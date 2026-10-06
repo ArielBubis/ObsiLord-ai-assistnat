@@ -3,10 +3,14 @@
 //   state=<name>  force a face state on load
 //   since=<ms>    pretend the forced state was entered this long ago
 //   mouth=0..3    force a mouth frame
+// Mouth precedence: touching the slider (or mouth=) sets a manual mouth that
+// overrides the text envelope; the "mouth auto" button hands control back.
 //   idle=0        freeze blink, glance, and bob
 
 import { STATES } from "./state.js";
-import { setState, setMouth, getMouth, getState, onStateChange, setIdleEnabled } from "./face.js";
+import {
+  setState, setMouth, getMouth, getState, onStateChange, setIdleEnabled, clearMouthOverride,
+} from "./face.js";
 
 export function initDebug(panel) {
   const params = new URLSearchParams(location.search);
@@ -29,6 +33,10 @@ export function initDebug(panel) {
   slider.addEventListener("input", () => {
     setMouth(slider.value);
     sliderValue.textContent = String(getMouth());
+  });
+  panel.querySelector("#debug-mouth-auto").addEventListener("click", () => {
+    clearMouthOverride();
+    sliderValue.textContent = "auto";
   });
 
   function markActive(current) {

@@ -30,6 +30,7 @@ def test_loads_example_config_with_types(tmp_path: Path) -> None:
     assert s.server.port == 8765
     assert s.llm.provider == "gemini"
     assert isinstance(s.llm.daily_token_cap, int)
+    assert s.llm.turn_timeout_s == 60.0 and type(s.llm.turn_timeout_s) is float
     assert s.stt.compute_type == "int8"
     assert s.tts.provider == "piper"
     assert s.camera.max_per_hour == 30
@@ -153,3 +154,16 @@ def test_rejects_bool_in_float_list_and_wrong_str(tmp_path: Path) -> None:
     path = _write_replaced(tmp_path, 'language = "en"', "language = 1")
     with pytest.raises(ValueError, match=r"stt\.language expected str, got int"):
         load_settings(path, env_path=tmp_path / "missing.env", environ={})
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "75", "75.0", "120"])
+def test_rejects_bad_turn_timeout(tmp_path: Path, value: str) -> None:
+    path = _write_replaced(tmp_path, "turn_timeout_s = 60", f"turn_timeout_s = {value}")
+    with pytest.raises(ValueError, match=r"llm\.turn_timeout_s must be > 0 and < 75.*WATCHDOG_MS"):
+        load_settings(path, env_path=tmp_path / "missing.env", environ={})
+
+
+def test_accepts_turn_timeout_just_under_watchdog(tmp_path: Path) -> None:
+    path = _write_replaced(tmp_path, "turn_timeout_s = 60", "turn_timeout_s = 74.5")
+    s = load_settings(path, env_path=tmp_path / "missing.env", environ={})
+    assert s.llm.turn_timeout_s == 74.5

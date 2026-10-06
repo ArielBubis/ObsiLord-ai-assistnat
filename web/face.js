@@ -6,10 +6,16 @@
 import { FACE_CONFIG } from "./config.js";
 import { createStateMachine, isValidState } from "./state.js";
 import { createIdle, buildFrame, frameKey, clampMouth, STILL_IDLE } from "./idle.js";
+import { createMouthEnvelope } from "./mouth.js";
 import * as skin from "./skin_code.js";
 
 const machine = createStateMachine("idle", performance.now());
 const idle = createIdle(Math.random);
+const envelope = createMouthEnvelope();
+// Mouth precedence: a manual value (debug slider or ?mouth=) wins over the
+// text envelope until clearMouthOverride() is called. Without an override the
+// envelope drives the mouth; it rests at 0 when no text is streaming.
+let manualMouth = null;
 let mouth = 0;
 let idleEnabled = true;
 let ctx = null;
@@ -36,10 +42,30 @@ export function onStateChange(fn) {
   return machine.subscribe(fn);
 }
 
-// Mouth frame 0..3. Phase 3 will feed this from the playback AnalyserNode RMS
-// using FACE_CONFIG.mouthThresholds.
+// Manual mouth frame 0..3 (debug). Overrides the envelope. Phase 3 will feed
+// the mouth from the playback AnalyserNode RMS using
+// FACE_CONFIG.mouthThresholds.
 export function setMouth(value) {
-  mouth = clampMouth(value);
+  manualMouth = clampMouth(value);
+  mouth = manualMouth;
+}
+
+export function clearMouthOverride() {
+  manualMouth = null;
+}
+
+// Streamed reply text: each new chunk energizes the fake mouth envelope.
+export function mouthText(chunk) {
+  envelope.energize(chunk, performance.now());
+}
+
+// Reply finished: the envelope decays and the mouth closes on its own.
+export function mouthEnd() {
+  envelope.end(performance.now());
+}
+
+export function mouthReset() {
+  envelope.reset();
 }
 
 export function getMouth() {
@@ -51,6 +77,10 @@ export function setIdleEnabled(enabled) {
   idleEnabled = Boolean(enabled);
 }
 
+// Vertical CSS px kept free for the subtitle, input, error, and status rows
+// under the face (see style.css; #subtitles has a fixed height).
+const UI_RESERVE_PX = 250;
+
 // Pick an integer number of device pixels per logical pixel (k), then size
 // the canvas in CSS px as 64*k/dpr, so every logical pixel is exactly k
 // device pixels wide even at 125% or 150% display scaling.
@@ -58,7 +88,7 @@ function fitCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
   const availDevice = Math.min(
     (window.innerWidth * dpr) / FACE_CONFIG.logicalWidth,
-    (window.innerHeight * 0.8 * dpr) / FACE_CONFIG.logicalHeight,
+    (Math.max(FACE_CONFIG.logicalHeight, window.innerHeight - UI_RESERVE_PX) * dpr) / FACE_CONFIG.logicalHeight,
   );
   const k = Math.max(1, Math.floor(availDevice));
   canvas.style.width = `${(FACE_CONFIG.logicalWidth * k) / dpr}px`;
@@ -81,6 +111,7 @@ function watchDpr(canvas) {
 
 function tick(now) {
   const idleValues = idleEnabled ? idle.update(now) : STILL_IDLE;
+  mouth = manualMouth !== null ? manualMouth : envelope.frame(now);
   const frame = buildFrame({
     state: machine.state,
     idle: idleValues,

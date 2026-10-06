@@ -51,3 +51,84 @@ main {
   border-color: #8ef6e4;
   color: #8ef6e4;
 }
+
+/* Chat: subtitles, input, error line. Width tracks the face. */
+#subtitles,
+#chat,
+#error-line {
+  width: min(90vw, 640px);
+  box-sizing: border-box;
+}
+
+/* Fixed height so streaming text never shifts the face. */
+#subtitles {
+  height: 112px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  text-align: center;
+}
+
+#user-line {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: #56637a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* At most four lines visible; ws.js scrolls to the bottom so the tail shows. */
+#subtitle {
+  margin: 0;
+  color: #d8e2f0;
+  font-size: 16px;
+  line-height: 1.4;
+  max-height: 5.6em;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+#chat {
+  display: flex;
+  gap: 8px;
+}
+
+#chat-input {
+  flex: 1;
+  min-width: 0;
+  background: #0d1424;
+  color: #d8e2f0;
+  border: 1px solid #2a3550;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+#chat-input:focus {
+  outline: none;
+  border-color: #8ef6e4;
+}
+
+#chat button {
+  background: #121a2c;
+  color: #c8d4e6;
+  border: 1px solid #2a3550;
+  padding: 6px 14px;
+  font: inherit;
+  cursor: pointer;
+}
+
+#chat-input:disabled,
+#chat button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#error-line {
+  margin: 0;
+  min-height: 1.2em;
+  font-size: 12px;
+  color: #ff6b6b;
+  text-align: center;
+}

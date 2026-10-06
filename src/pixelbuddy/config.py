@@ -21,6 +21,11 @@ REPO_ROOT: Path = Path(__file__).resolve().parents[2]
 
 ALLOWED_HOST = "127.0.0.1"
 
+# The browser gives up on a turn after WATCHDOG_MS = 75000 in web/turn.js. The
+# server turn timeout must be shorter so the client receives "Reply timed out."
+# instead of its own watchdog firing. Keep the two in sync.
+CLIENT_WATCHDOG_S = 75.0
+
 
 @dataclass(frozen=True)
 class ServerSettings:
@@ -33,8 +38,10 @@ class LLMSettings:
     provider: str
     model: str
     max_output_tokens: int
+    thinking_level: str
     history_turns: int
     daily_token_cap: int
+    turn_timeout_s: float
 
 
 @dataclass(frozen=True)
@@ -220,5 +227,11 @@ def load_settings(
         )
     if not 1 <= settings.server.port <= 65535:
         raise ValueError("config: server.port must be an int in 1..65535")
+    if not 0 < settings.llm.turn_timeout_s < CLIENT_WATCHDOG_S:
+        raise ValueError(
+            f"config: llm.turn_timeout_s must be > 0 and < {CLIENT_WATCHDOG_S:g} "
+            "(the browser watchdog WATCHDOG_MS in web/turn.js), "
+            f"got {settings.llm.turn_timeout_s:g}"
+        )
     log.info("loaded config from %s", path)
     return settings

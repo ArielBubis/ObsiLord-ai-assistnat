@@ -3,11 +3,21 @@
 <head>
   <meta charset="utf-8">
   <title>Pixel Buddy</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <main>
     <canvas id="face" width="64" height="48" aria-label="Pixel Buddy face"></canvas>
+    <section id="subtitles" aria-live="polite">
+      <p id="user-line"></p>
+      <p id="subtitle"></p>
+    </section>
+    <form id="chat" autocomplete="off">
+      <input id="chat-input" type="text" maxlength="2000" placeholder="Type a message" aria-label="Message">
+      <button id="chat-send" type="submit">Send</button>
+    </form>
+    <p id="error-line" role="alert"></p>
     <p class="status">Status: <span id="status">connecting</span></p>
     <section id="debug" hidden>
       <div id="debug-states"></div>
@@ -15,6 +25,7 @@
         <input id="debug-mouth" type="range" min="0" max="3" step="1" value="0">
         <span id="debug-mouth-value">0</span>
       </label>
+      <button id="debug-mouth-auto" type="button">mouth auto</button>
     </section>
   </main>
   <script type="module">
