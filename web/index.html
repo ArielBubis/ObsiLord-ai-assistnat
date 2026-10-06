@@ -3,10 +3,27 @@
 <head>
   <meta charset="utf-8">
   <title>Pixel Buddy</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <h1>Pixel Buddy</h1>
-  <p>Status: <span id="status">connecting</span></p>
-  <script src="/static/ws.js"></script>
+  <main>
+    <canvas id="face" width="64" height="48" aria-label="Pixel Buddy face"></canvas>
+    <p class="status">Status: <span id="status">connecting</span></p>
+    <section id="debug" hidden>
+      <div id="debug-states"></div>
+      <label>mouth
+        <input id="debug-mouth" type="range" min="0" max="3" step="1" value="0">
+        <span id="debug-mouth-value">0</span>
+      </label>
+    </section>
+  </main>
+  <script type="module">
+    import { start } from "/static/face.js";
+    import { initDebug } from "/static/debug.js";
+    import "/static/ws.js";
+
+    start(document.getElementById("face"));
+    initDebug(document.getElementById("debug"));
+  </script>
 </body>
 </html>

@@ -1,18 +1,32 @@
-// Minimal WebSocket client for Phase 0. face-dev owns web/ from Phase 1.
-(function () {
-  const statusEl = document.getElementById("status");
-  const ws = new WebSocket(`ws://${location.host}/ws`);
+// WebSocket client. Shows connection status and applies server state events
+// to the face. Other message types are ignored until later phases.
 
-  ws.addEventListener("open", () => {
-    statusEl.textContent = "connected";
-    ws.send(JSON.stringify({ type: "ping" }));
-  });
+import { setState } from "./face.js";
 
-  ws.addEventListener("close", () => {
-    statusEl.textContent = "disconnected";
-  });
+const statusEl = document.getElementById("status");
+const ws = new WebSocket(`ws://${location.host}/ws`);
 
-  ws.addEventListener("message", (event) => {
-    console.log("ws message", event.data);
-  });
-})();
+ws.addEventListener("open", () => {
+  statusEl.textContent = "connected";
+  ws.send(JSON.stringify({ type: "ping" }));
+});
+
+ws.addEventListener("close", () => {
+  statusEl.textContent = "disconnected";
+  // Do not leave the face stuck in looking or speaking after a disconnect.
+  setState("idle");
+});
+
+ws.addEventListener("message", (event) => {
+  if (typeof event.data !== "string") return;
+  let msg;
+  try {
+    msg = JSON.parse(event.data);
+  } catch {
+    console.warn("ws: invalid JSON from server");
+    return;
+  }
+  if (msg && msg.type === "state") {
+    setState(msg.state);
+  }
+});
