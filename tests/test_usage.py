@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from pixelbuddy.usage import CapExceeded, UsageTracker
+from obsilord.usage import CapExceeded, UsageTracker
 
 TZ = timezone(timedelta(hours=3))
 

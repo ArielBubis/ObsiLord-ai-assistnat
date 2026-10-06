@@ -21,10 +21,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from pixelbuddy.config import Settings
-from pixelbuddy.llm.base import LLMClient, Message
-from pixelbuddy.pipeline import run_text_turn
-from pixelbuddy.usage import UsageTracker
+from obsilord.config import Settings
+from obsilord.llm.base import LLMClient, Message
+from obsilord.pipeline import run_text_turn
+from obsilord.usage import UsageTracker
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ MSG_UNKNOWN = "Unknown message type."
 
 def _default_llm(settings: Settings) -> LLMClient | None:
     # Imported here so the provider SDK is only loaded when actually used.
-    from pixelbuddy.llm.gemini import GeminiClient, MissingApiKey
+    from obsilord.llm.gemini import GeminiClient, MissingApiKey
 
     try:
         return GeminiClient(settings.llm, settings.secrets.gemini_api_key)
@@ -74,7 +74,7 @@ def create_app(
             await aclose()
 
     app = FastAPI(
-        title="Pixel Buddy", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+        title="Obsi-Lord", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
     )
     app.state.settings = settings
     app.state.llm = llm

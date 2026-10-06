@@ -8,9 +8,9 @@ from typing import Any
 
 import pytest
 
-from pixelbuddy.config import REPO_ROOT, LLMSettings, load_settings
-from pixelbuddy.llm.base import Done, Message, TextDelta, UsageUpdate
-from pixelbuddy.llm.gemini import GeminiClient, MissingApiKey, load_system_prompt
+from obsilord.config import REPO_ROOT, LLMSettings, load_settings
+from obsilord.llm.base import Done, Message, TextDelta, UsageUpdate
+from obsilord.llm.gemini import GeminiClient, MissingApiKey, load_system_prompt
 
 
 def _llm(tmp_path: Path) -> LLMSettings:
@@ -56,7 +56,7 @@ def test_automatic_function_calling_disabled(tmp_path: Path) -> None:
 
 def test_system_prompt_loaded_from_repo() -> None:
     text = load_system_prompt()
-    assert text.startswith("You are Buddy")
+    assert text.startswith("You are Obsi-Lord")
 
 
 class _FakeSdkStream:

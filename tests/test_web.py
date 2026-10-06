@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from pixelbuddy.app import create_app
-from pixelbuddy.config import REPO_ROOT, load_settings
+from obsilord.app import create_app
+from obsilord.config import REPO_ROOT, load_settings
 
 WEB_DIR = REPO_ROOT / "web"
 JS_FILES = sorted(p.name for p in WEB_DIR.glob("*.js"))

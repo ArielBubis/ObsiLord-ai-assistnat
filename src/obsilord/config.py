@@ -16,7 +16,7 @@ from typing import Any, Mapping, get_args, get_origin, get_type_hints
 
 log = logging.getLogger(__name__)
 
-# src/pixelbuddy/config.py -> repo root is two levels above the package dir.
+# src/obsilord/config.py -> repo root is two levels above the package dir.
 REPO_ROOT: Path = Path(__file__).resolve().parents[2]
 
 ALLOWED_HOST = "127.0.0.1"

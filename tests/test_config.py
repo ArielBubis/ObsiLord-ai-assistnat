@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from pixelbuddy.config import (
+from obsilord.config import (
     REPO_ROOT,
     Secrets,
     Settings,

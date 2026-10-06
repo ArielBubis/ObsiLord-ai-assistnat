@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from fakes import FakeLLM
-from pixelbuddy.app import (
+from obsilord.app import (
     MAX_TEXT_CHARS,
     MSG_BUSY,
     MSG_EMPTY,
@@ -19,9 +19,9 @@ from pixelbuddy.app import (
     MSG_UNKNOWN,
     create_app,
 )
-from pixelbuddy.config import REPO_ROOT, Settings, load_settings
-from pixelbuddy.llm.base import UsageUpdate
-from pixelbuddy.usage import UsageTracker
+from obsilord.config import REPO_ROOT, Settings, load_settings
+from obsilord.llm.base import UsageUpdate
+from obsilord.usage import UsageTracker
 
 
 def _settings(tmp_path: Path) -> Settings:

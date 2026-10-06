@@ -13,11 +13,11 @@ from typing import Any
 
 import pytest
 
-from pixelbuddy.config import REPO_ROOT, load_settings
-from pixelbuddy.llm.base import Done, Message, TextDelta
-from pixelbuddy.llm.gemini import GeminiClient
-from pixelbuddy.pipeline import MSG_CAP, run_text_turn
-from pixelbuddy.usage import UsageTracker
+from obsilord.config import REPO_ROOT, load_settings
+from obsilord.llm.base import Done, Message, TextDelta
+from obsilord.llm.gemini import GeminiClient
+from obsilord.pipeline import MSG_CAP, run_text_turn
+from obsilord.usage import UsageTracker
 
 pytestmark = pytest.mark.hardware
 

@@ -1,11 +1,11 @@
-"""Entry point: python -m pixelbuddy starts uvicorn on 127.0.0.1."""
+"""Entry point: python -m obsilord starts uvicorn on 127.0.0.1."""
 
 import logging
 
 import uvicorn
 
-from pixelbuddy.app import create_app
-from pixelbuddy.config import load_settings
+from obsilord.app import create_app
+from obsilord.config import load_settings
 
 
 def main() -> None:

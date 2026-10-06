@@ -28,9 +28,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable
 
-from pixelbuddy.llm.base import Done, LLMClient, LLMEvent, Message, TextDelta, UsageUpdate
-from pixelbuddy.sentences import SentenceSplitter
-from pixelbuddy.usage import CapExceeded, UsageTracker
+from obsilord.llm.base import Done, LLMClient, LLMEvent, Message, TextDelta, UsageUpdate
+from obsilord.sentences import SentenceSplitter
+from obsilord.usage import CapExceeded, UsageTracker
 
 log = logging.getLogger(__name__)
 

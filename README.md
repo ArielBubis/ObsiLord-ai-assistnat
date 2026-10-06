@@ -1,4 +1,4 @@
-# Pixel Buddy
+# Obsi-Lord
 
 Desktop prototype of a voice assistant with an 8-bit animated face. Everything runs on one PC with a webcam. The camera only fires on command ("what am I holding?").
 

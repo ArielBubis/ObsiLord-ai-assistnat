@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pixelbuddy"
+name = "obsi-lord"
 version = "0.0.1"
 description = "Desktop voice assistant with an animated 8-bit face."
 requires-python = ">=3.12"

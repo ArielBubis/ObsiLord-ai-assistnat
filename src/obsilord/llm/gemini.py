@@ -29,8 +29,8 @@ from typing import AsyncIterator
 from google import genai
 from google.genai import types
 
-from pixelbuddy.config import REPO_ROOT, LLMSettings
-from pixelbuddy.llm.base import (
+from obsilord.config import REPO_ROOT, LLMSettings
+from obsilord.llm.base import (
     Done,
     LLMEvent,
     Message,

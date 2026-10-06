@@ -6,7 +6,7 @@ import asyncio
 import threading
 from typing import AsyncIterator
 
-from pixelbuddy.llm.base import Done, LLMEvent, Message, TextDelta, ToolSpec, UsageUpdate
+from obsilord.llm.base import Done, LLMEvent, Message, TextDelta, ToolSpec, UsageUpdate
 
 
 class FakeLLM:

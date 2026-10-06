@@ -1,6 +1,6 @@
 import pytest
 
-from pixelbuddy.sentences import SentenceSplitter
+from obsilord.sentences import SentenceSplitter
 
 
 def split_all(text: str) -> list[str]:

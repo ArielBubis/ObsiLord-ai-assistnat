@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 
 from fakes import FakeLLM
-from pixelbuddy.llm.base import Done, Message, UsageUpdate
-from pixelbuddy.pipeline import (
+from obsilord.llm.base import Done, Message, UsageUpdate
+from obsilord.pipeline import (
     MSG_CAP,
     MSG_LLM_FAILED,
     MSG_TIMEOUT,
@@ -17,7 +17,7 @@ from pixelbuddy.pipeline import (
     run_text_turn,
     trim_history,
 )
-from pixelbuddy.usage import UsageTracker
+from obsilord.usage import UsageTracker
 
 NOW = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 
