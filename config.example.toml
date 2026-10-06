@@ -1,0 +1,38 @@
+# Copy to config.toml. Non-secret settings only. Secrets go in .env.
+
+[server]
+host = "127.0.0.1"   # do not change
+port = 8765
+
+[llm]
+provider = "gemini"
+model = ""            # look up the current Flash-Lite model id at setup
+max_output_tokens = 200
+history_turns = 10
+daily_token_cap = 200000   # placeholder, tune after Phase 2
+
+[stt]
+provider = "faster-whisper"
+model = "small"
+device = "cpu"
+compute_type = "int8"
+language = "en"
+
+[tts]
+provider = "piper"
+voice = ""            # path or name of the Piper voice, set at setup
+
+[camera]
+device_index = 0
+max_edge_px = 768
+warmup_frames = 5
+cooldown_s = 10
+max_per_hour = 30
+
+[face]
+logical_width = 64
+logical_height = 48
+mouth_thresholds = [0.05, 0.15, 0.30]   # RMS cutoffs for mouth frames 1, 2, 3
+
+[audio]
+push_to_talk_key = "Space"

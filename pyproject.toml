@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pixelbuddy"
+version = "0.0.1"
+description = "Desktop voice assistant with an animated 8-bit face."
+requires-python = ">=3.12"
+# Runtime dependencies are pinned in requirements.txt (compiled from requirements.in).
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not hardware'"
+markers = [
+    "hardware: needs mic, webcam, or a model; skipped by default (run with -m hardware)",
+]

@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+config.toml
+logs/
+*.jsonl
+models/
+voices/
+captures/
+*.egg-info/

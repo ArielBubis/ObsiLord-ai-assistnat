@@ -1,0 +1,13 @@
+# Top-level dependencies, pinned. Versions looked up on PyPI on 2026-10-06
+# (httpx2 2.13.1 confirmed on PyPI 2026-10-06).
+# Compile the fully pinned lock file with:
+#   pip-compile requirements.in -o requirements.txt
+fastapi==0.142.2
+uvicorn==0.54.0
+google-genai==2.28.0
+faster-whisper==1.2.1
+piper-tts==1.8.0
+opencv-python==5.0.0.93
+pytest==9.1.1
+# Required by FastAPI/Starlette TestClient in tests (Starlette 1.7 deprecates httpx for it).
+httpx2==2.13.1
