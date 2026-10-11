@@ -52,6 +52,23 @@ main {
   color: #8ef6e4;
 }
 
+#debug-eq {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+}
+
+#debug-eq-config {
+  width: 100%;
+  margin: 0;
+  text-align: center;
+  font-family: monospace;
+  font-size: 12px;
+}
+
 /* Chat: subtitles, input, error line. Width tracks the face. */
 #subtitles,
 #chat,

@@ -16,7 +16,10 @@
 // end() (stream finished) cuts the hold short, so the mouth closes within
 // decayMs no matter how much text was still "owed".
 //
-// Phase 3 replaces this with the playback AnalyserNode RMS.
+// When the turn has audio (Phase 3), the mouth follows the playback
+// AnalyserNode RMS instead: see smoothLevel and rmsToFrame below.
+
+import { getMouthThresholds } from "./config.js";
 
 export const ENVELOPE = Object.freeze({
   msPerChar: 30,          // hold time added per new character
@@ -131,4 +134,50 @@ export function createMouthEnvelope(cfg = ENVELOPE) {
       return levelToFrame(level * flapAt(nowMs, openBias, cfg), cfg.thresholds);
     },
   };
+}
+
+// Audio-driven mouth. Time constants for the RMS follower: opens fast,
+// closes a little slower so the mouth does not chatter between frames.
+export const AUDIO_MOUTH = Object.freeze({
+  attackMs: 15,
+  releaseMs: 60,
+});
+
+// One step of an exponential follower toward target over dtMs. Uses the
+// attack time constant when rising and the release one when falling, so the
+// result does not depend on the frame rate.
+export function smoothLevel(prev, target, dtMs, cfg = AUDIO_MOUTH) {
+  const t = Number.isFinite(target) ? Math.max(0, target) : 0;
+  const dt = Number.isFinite(dtMs) ? Math.max(0, dtMs) : 0;
+  const tau = t > prev ? cfg.attackMs : cfg.releaseMs;
+  return prev + (t - prev) * (1 - Math.exp(-dt / tau));
+}
+
+export function createLevelSmoother(cfg = AUDIO_MOUTH) {
+  let value = 0;
+  return {
+    update(target, dtMs) {
+      value = smoothLevel(value, target, dtMs, cfg);
+      return value;
+    },
+    reset() {
+      value = 0;
+    },
+    get value() {
+      return value;
+    },
+  };
+}
+
+// Playback RMS to a mouth frame 0..3 using the configured cutoffs (from the
+// server's /config/face when loaded, else the fallback in config.js).
+export function rmsToFrame(level, thresholds = getMouthThresholds()) {
+  return levelToFrame(level, thresholds);
+}
+
+// Which input drives the mouth: a touched debug slider always wins; a turn
+// that has audio uses the analyser; otherwise the fake text envelope.
+export function mouthSource(manualSet, audioMode) {
+  if (manualSet) return "manual";
+  return audioMode ? "audio" : "envelope";
 }

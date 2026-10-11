@@ -1,12 +1,14 @@
 """FastAPI app: serves the web page and the /ws WebSocket.
 
-Phase 2: {"type": "text"} runs a streamed LLM turn (see pipeline.py). Voice
-input is not wired yet. Invalid JSON gets an error message and the connection
-stays open.
+{"type": "text"} runs a streamed LLM turn with spoken output (see
+pipeline.py). Voice input is not wired yet. Invalid JSON gets an error message
+and the connection stays open.
 
-The LLM client and UsageTracker are created once in create_app (app startup)
-and can be injected for tests. If no API key is configured the app still
-starts and text turns return an error.
+The LLM client, TTS client, and UsageTracker are created once in create_app
+(app startup) and can be injected for tests. If no API key is configured the
+app still starts and text turns return an error. If [tts] voice is empty, TTS
+is disabled and replies are text only; a configured voice that fails to load
+(missing file, unknown speaker) stops startup with an error.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from obsilord.config import Settings
 from obsilord.llm.base import LLMClient, Message
 from obsilord.pipeline import run_text_turn
+from obsilord.tts.base import TTSClient
 from obsilord.usage import UsageTracker
 
 log = logging.getLogger(__name__)
@@ -50,17 +53,42 @@ def _default_llm(settings: Settings) -> LLMClient | None:
         return None
 
 
+def _default_tts(settings: Settings) -> TTSClient | None:
+    """Load and warm up the configured voice, or None if TTS is disabled."""
+    if not settings.tts.enabled:
+        log.info("tts: disabled ([tts] voice is empty), replies are text only")
+        return None
+    # Imported here so the provider package is only loaded when used.
+    from obsilord.tts.piper import PiperTTS
+
+    tts = PiperTTS.load(
+        settings.repo_root / settings.tts.voice,
+        settings.tts.speaker,
+        settings.tts.length_scale,
+        settings.tts.pitch,
+    )
+    tts.warm_up()
+    return tts
+
+
 def create_app(
     settings: Settings,
     llm: LLMClient | None = None,
     usage: UsageTracker | None = None,
+    tts: TTSClient | None = None,
 ) -> FastAPI:
-    """Build the app. Pass llm and usage to inject fakes (tests)."""
+    """Build the app. Pass llm, usage, and tts to inject fakes (tests).
+
+    tts=None loads the voice from settings (nothing is loaded when [tts] voice
+    is empty).
+    """
     web_dir = settings.repo_root / "web"
     index_path = web_dir / "index.html"
 
     if llm is None:
         llm = _default_llm(settings)
+    if tts is None:
+        tts = _default_tts(settings)
     if usage is None:
         usage = UsageTracker(
             settings.repo_root / "logs" / "usage.jsonl", settings.llm.daily_token_cap
@@ -79,10 +107,32 @@ def create_app(
     app.state.settings = settings
     app.state.llm = llm
     app.state.usage = usage
+    app.state.tts = tts
 
     @app.get("/", include_in_schema=False)
     async def index() -> FileResponse:
         return FileResponse(index_path, media_type="text/html")
+
+    @app.get("/config/face", include_in_schema=False)
+    async def face_config() -> dict[str, Any]:
+        # Face settings only: no secrets and no other sections.
+        face = settings.face
+        return {
+            "logical_width": face.logical_width,
+            "logical_height": face.logical_height,
+            "mouth_thresholds": list(face.mouth_thresholds),
+        }
+
+    @app.get("/config/audio", include_in_schema=False)
+    async def audio_config() -> dict[str, Any]:
+        # Browser playback EQ only: no secrets and no other settings.
+        tts_cfg = settings.tts
+        return {
+            "low_shelf_hz": tts_cfg.low_shelf_hz,
+            "low_shelf_db": tts_cfg.low_shelf_db,
+            "high_shelf_hz": tts_cfg.high_shelf_hz,
+            "high_shelf_db": tts_cfg.high_shelf_db,
+        }
 
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
@@ -92,9 +142,13 @@ def create_app(
         turn: asyncio.Task[Any] | None = None
         send_lock = asyncio.Lock()
 
-        async def send(msg: dict[str, Any]) -> None:
+        async def send(msg: dict[str, Any] | bytes) -> None:
+            # One lock for JSON and binary frames keeps their order intact.
             async with send_lock:
-                await websocket.send_json(msg)
+                if isinstance(msg, bytes):
+                    await websocket.send_bytes(msg)
+                else:
+                    await websocket.send_json(msg)
 
         def on_turn_done(task: asyncio.Task[Any]) -> None:
             # run_text_turn handles its own errors; this is a last-resort log.
@@ -127,6 +181,7 @@ def create_app(
                     history_turns=settings.llm.history_turns,
                     max_output_tokens=settings.llm.max_output_tokens,
                     turn_timeout_s=settings.llm.turn_timeout_s,
+                    tts=app.state.tts,
                 )
             )
             turn.add_done_callback(on_turn_done)

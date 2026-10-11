@@ -26,6 +26,17 @@
         <span id="debug-mouth-value">0</span>
       </label>
       <button id="debug-mouth-auto" type="button">mouth auto</button>
+      <div id="debug-eq">
+        <label>bass
+          <input id="debug-bass" type="range" min="-24" max="24" step="0.5" value="-6">
+          <span id="debug-bass-value"></span>
+        </label>
+        <label>treble
+          <input id="debug-treble" type="range" min="-24" max="24" step="0.5" value="0">
+          <span id="debug-treble-value"></span>
+        </label>
+        <p id="debug-eq-config"></p>
+      </div>
     </section>
   </main>
   <script type="module">

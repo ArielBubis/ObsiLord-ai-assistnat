@@ -3,20 +3,25 @@
 // runs under every state. The skin is only called when the frame changes, so
 // a static face costs one cheap comparison per animation frame.
 
-import { FACE_CONFIG } from "./config.js";
+import { FACE_CONFIG, loadFaceConfig } from "./config.js";
 import { createStateMachine, isValidState } from "./state.js";
 import { createIdle, buildFrame, frameKey, clampMouth, STILL_IDLE } from "./idle.js";
-import { createMouthEnvelope } from "./mouth.js";
+import { createMouthEnvelope, createLevelSmoother, rmsToFrame, mouthSource } from "./mouth.js";
 import * as skin from "./skin_code.js";
 
 const machine = createStateMachine("idle", performance.now());
 const idle = createIdle(Math.random);
 const envelope = createMouthEnvelope();
-// Mouth precedence: a manual value (debug slider or ?mouth=) wins over the
-// text envelope until clearMouthOverride() is called. Without an override the
-// envelope drives the mouth; it rests at 0 when no text is streaming.
+const smoother = createLevelSmoother();
+// Mouth precedence: a manual value (debug slider or ?mouth=) wins until
+// clearMouthOverride() is called. Otherwise, in audio mode (the turn has TTS
+// audio) the playback RMS drives the mouth; without audio the fake text
+// envelope does. Both rest at 0 when nothing is playing or streaming.
 let manualMouth = null;
 let mouth = 0;
+let audioMode = false;
+let audioLevel = () => 0;
+let lastTickT = null;
 let idleEnabled = true;
 let ctx = null;
 let lastKey = "";
@@ -42,9 +47,7 @@ export function onStateChange(fn) {
   return machine.subscribe(fn);
 }
 
-// Manual mouth frame 0..3 (debug). Overrides the envelope. Phase 3 will feed
-// the mouth from the playback AnalyserNode RMS using
-// FACE_CONFIG.mouthThresholds.
+// Manual mouth frame 0..3 (debug). Overrides audio and envelope.
 export function setMouth(value) {
   manualMouth = clampMouth(value);
   mouth = manualMouth;
@@ -66,6 +69,19 @@ export function mouthEnd() {
 
 export function mouthReset() {
   envelope.reset();
+  smoother.reset();
+}
+
+// fn() returns the current playback RMS (0 when silent).
+export function setAudioLevelSource(fn) {
+  audioLevel = typeof fn === "function" ? fn : () => 0;
+}
+
+// On: the mouth follows playback audio for this turn. Off: back to the text
+// envelope (set at the start of each turn).
+export function setAudioMouth(on) {
+  audioMode = Boolean(on);
+  smoother.reset();
 }
 
 export function getMouth() {
@@ -111,7 +127,16 @@ function watchDpr(canvas) {
 
 function tick(now) {
   const idleValues = idleEnabled ? idle.update(now) : STILL_IDLE;
-  mouth = manualMouth !== null ? manualMouth : envelope.frame(now);
+  const dt = lastTickT === null ? 0 : now - lastTickT;
+  lastTickT = now;
+  const source = mouthSource(manualMouth !== null, audioMode);
+  if (source === "manual") {
+    mouth = manualMouth;
+  } else if (source === "audio") {
+    mouth = rmsToFrame(smoother.update(audioLevel(), dt));
+  } else {
+    mouth = envelope.frame(now);
+  }
   const frame = buildFrame({
     state: machine.state,
     idle: idleValues,
@@ -129,6 +154,9 @@ function tick(now) {
 export function start(canvas) {
   if (started) return;
   started = true;
+  // Mouth thresholds from the server; the fallback applies until (or unless)
+  // this succeeds.
+  loadFaceConfig();
   canvas.width = FACE_CONFIG.logicalWidth;
   canvas.height = FACE_CONFIG.logicalHeight;
   ctx = canvas.getContext("2d", { alpha: false });

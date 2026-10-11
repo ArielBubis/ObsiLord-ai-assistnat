@@ -1,7 +1,10 @@
 """Typed settings loaded from config.toml (tomllib) and secrets from .env.
 
 config.toml holds non-secret settings. If it is missing, config.example.toml is
-used. Secrets come from .env in the repo root, and real environment variables
+used. Keys whose dataclass field has a default (keys added after Phase 0) may
+be left out of config.toml; the default is used and one INFO line lists the
+defaulted keys. Fields without a default are required. Unknown keys are
+rejected, and provided values are type checked. Secrets come from .env in the repo root, and real environment variables
 override values found in .env.
 """
 
@@ -10,7 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import tomllib
-from dataclasses import dataclass, field, fields
+from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping, get_args, get_origin, get_type_hints
 
@@ -33,15 +36,16 @@ class ServerSettings:
     port: int
 
 
-@dataclass(frozen=True)
+# kw_only lets fields with defaults (optional in the TOML) sit anywhere.
+@dataclass(frozen=True, kw_only=True)
 class LLMSettings:
     provider: str
     model: str
     max_output_tokens: int
-    thinking_level: str
+    thinking_level: str = "minimal"  # added in Phase 2
     history_turns: int
     daily_token_cap: int
-    turn_timeout_s: float
+    turn_timeout_s: float = 60.0  # added in Phase 2
 
 
 @dataclass(frozen=True)
@@ -53,10 +57,39 @@ class STTSettings:
     language: str
 
 
-@dataclass(frozen=True)
+TTS_PROVIDERS = ("piper",)
+PITCH_MIN = 0.8
+PITCH_MAX = 1.25
+EQ_HZ_MIN = 20.0
+EQ_HZ_MAX = 10000.0
+EQ_DB_LIMIT = 24.0
+
+
+@dataclass(frozen=True, kw_only=True)
 class TTSSettings:
     provider: str
+    # Path to the voice model, relative to the repo root (or absolute).
+    # Empty means TTS is disabled and replies are text only.
     voice: str
+    # Speaker name for multi-speaker voices, resolved at load time against the
+    # voice's speaker_id_map. Empty means the voice's default speaker.
+    speaker: str = ""  # added in Phase 3
+    # Phoneme length scale: < 1 speaks faster, > 1 slower. Must be > 0.
+    length_scale: float = 1.0  # added in Phase 3
+    # Pitch factor, PITCH_MIN..PITCH_MAX. Applied server side by synthesizing
+    # with length_scale * pitch and announcing native_rate * pitch.
+    pitch: float = 1.0  # added in Phase 3
+    # Browser playback EQ (served at /config/audio, applied by Web Audio
+    # shelving filters). Frequencies EQ_HZ_MIN..EQ_HZ_MAX, gains within
+    # plus or minus EQ_DB_LIMIT dB; 0 dB disables a shelf. Added in Phase 3.
+    low_shelf_hz: float = 250.0
+    low_shelf_db: float = -6.0
+    high_shelf_hz: float = 3500.0
+    high_shelf_db: float = 0.0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.voice.strip())
 
 
 @dataclass(frozen=True)
@@ -175,22 +208,75 @@ def _check_value(value: Any, tp: Any, where: str) -> Any:
     raise ValueError(f"config: {where} expected {_type_name(tp)}, got {got}")
 
 
-def _build(cls: type, section: str, data: Mapping[str, Any]) -> Any:
+def _has_default(f: Any) -> bool:
+    return f.default is not MISSING or f.default_factory is not MISSING
+
+
+def _build(
+    cls: type, section: str, data: Mapping[str, Any], defaulted: list[str] | None = None
+) -> Any:
+    """Build a settings dataclass from one TOML section.
+
+    Fields with a default may be omitted (their names, as section.key, are
+    appended to defaulted); fields without one are required.
+    """
     raw = data.get(section)
     if not isinstance(raw, dict):
         raise ValueError(f"config: missing [{section}] section")
     hints = get_type_hints(cls)
-    names = {f.name for f in fields(cls)}
-    unknown = set(raw) - names
-    missing = names - set(raw)
+    all_fields = {f.name: f for f in fields(cls)}
+    unknown = set(raw) - set(all_fields)
     if unknown:
         raise ValueError(f"config: unknown keys in [{section}]: {sorted(unknown)}")
+    absent = set(all_fields) - set(raw)
+    missing = sorted(n for n in absent if not _has_default(all_fields[n]))
     if missing:
-        raise ValueError(f"config: missing keys in [{section}]: {sorted(missing)}")
+        raise ValueError(f"config: missing keys in [{section}]: {missing}")
+    if defaulted is not None:
+        defaulted.extend(f"{section}.{n}" for n in sorted(absent))
     values = {
-        name: _check_value(raw[name], hints[name], f"{section}.{name}") for name in names
+        name: _check_value(raw[name], hints[name], f"{section}.{name}")
+        for name in all_fields
+        if name in raw
     }
     return cls(**values)
+
+
+def _check_tts_voice_controls(tts: TTSSettings) -> None:
+    """Pitch in [PITCH_MIN, PITCH_MAX], EQ frequencies and gains in range."""
+    if not PITCH_MIN <= tts.pitch <= PITCH_MAX:
+        raise ValueError(
+            f"config: tts.pitch must be in {PITCH_MIN:g}..{PITCH_MAX:g}, got {tts.pitch:g}"
+        )
+    for name in ("low_shelf_hz", "high_shelf_hz"):
+        value = getattr(tts, name)
+        if not EQ_HZ_MIN <= value <= EQ_HZ_MAX:
+            raise ValueError(
+                f"config: tts.{name} must be in {EQ_HZ_MIN:g}..{EQ_HZ_MAX:g} Hz, got {value:g}"
+            )
+    for name in ("low_shelf_db", "high_shelf_db"):
+        value = getattr(tts, name)
+        if not -EQ_DB_LIMIT <= value <= EQ_DB_LIMIT:
+            raise ValueError(
+                f"config: tts.{name} must be in -{EQ_DB_LIMIT:g}..{EQ_DB_LIMIT:g} dB, "
+                f"got {value:g}"
+            )
+
+
+MOUTH_THRESHOLD_COUNT = 3
+
+
+def _check_mouth_thresholds(values: tuple[float, ...]) -> None:
+    """Exactly 3 RMS cutoffs (mouth frames 1, 2, 3), each in (0, 1], strictly increasing."""
+    if len(values) != MOUTH_THRESHOLD_COUNT:
+        raise ValueError(
+            f"config: face.mouth_thresholds must have exactly {MOUTH_THRESHOLD_COUNT} "
+            f"values, got {len(values)}"
+        )
+    if not all(0 < v <= 1 for v in values):
+        raise ValueError("config: face.mouth_thresholds values must each be in (0, 1]")
+    if not all(a < b for a, b in zip(values, values[1:])):
+        raise ValueError("config: face.mouth_thresholds must be strictly increasing")
 
 
 def default_config_path() -> Path:
@@ -211,14 +297,15 @@ def load_settings(
     with path.open("rb") as fh:
         data = tomllib.load(fh)
 
+    defaulted: list[str] = []
     settings = Settings(
-        server=_build(ServerSettings, "server", data),
-        llm=_build(LLMSettings, "llm", data),
-        stt=_build(STTSettings, "stt", data),
-        tts=_build(TTSSettings, "tts", data),
-        camera=_build(CameraSettings, "camera", data),
-        face=_build(FaceSettings, "face", data),
-        audio=_build(AudioSettings, "audio", data),
+        server=_build(ServerSettings, "server", data, defaulted),
+        llm=_build(LLMSettings, "llm", data, defaulted),
+        stt=_build(STTSettings, "stt", data, defaulted),
+        tts=_build(TTSSettings, "tts", data, defaulted),
+        camera=_build(CameraSettings, "camera", data, defaulted),
+        face=_build(FaceSettings, "face", data, defaulted),
+        audio=_build(AudioSettings, "audio", data, defaulted),
         secrets=load_secrets(env_path, environ),
     )
     if settings.server.host != ALLOWED_HOST:
@@ -232,6 +319,25 @@ def load_settings(
             f"config: llm.turn_timeout_s must be > 0 and < {CLIENT_WATCHDOG_S:g} "
             "(the browser watchdog WATCHDOG_MS in web/turn.js), "
             f"got {settings.llm.turn_timeout_s:g}"
+        )
+    if not settings.tts.length_scale > 0:
+        raise ValueError(
+            f"config: tts.length_scale must be > 0, got {settings.tts.length_scale:g}"
+        )
+    if settings.tts.enabled and settings.tts.provider not in TTS_PROVIDERS:
+        raise ValueError(
+            f"config: tts.provider must be one of {list(TTS_PROVIDERS)}, "
+            f"got {settings.tts.provider!r}"
+        )
+    _check_tts_voice_controls(settings.tts)
+    _check_mouth_thresholds(settings.face.mouth_thresholds)
+    if defaulted:
+        log.info(
+            "config: %s not set in %s, using defaults (copy them from "
+            "config.example.toml to silence this): %s",
+            "key" if len(defaulted) == 1 else "keys",
+            path.name,
+            ", ".join(defaulted),
         )
     log.info("loaded config from %s", path)
     return settings

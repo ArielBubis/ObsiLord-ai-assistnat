@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import dataclasses
 import json
 import threading
 import time
@@ -8,7 +9,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from fakes import FakeLLM
+from fakes import FakeLLM, FakeTTS, text_only
 from obsilord.app import (
     MAX_TEXT_CHARS,
     MSG_BUSY,
@@ -25,8 +26,10 @@ from obsilord.usage import UsageTracker
 
 
 def _settings(tmp_path: Path) -> Settings:
-    return load_settings(
-        REPO_ROOT / "config.example.toml", env_path=tmp_path / "missing.env", environ={}
+    return text_only(
+        load_settings(
+            REPO_ROOT / "config.example.toml", env_path=tmp_path / "missing.env", environ={}
+        )
     )
 
 
@@ -181,3 +184,106 @@ def test_ws_disconnect_cancels_turn_and_records_usage(tmp_path: Path) -> None:
     assert usage.today_total == 15
     entry = json.loads((tmp_path / "usage.jsonl").read_text(encoding="utf-8"))
     assert entry["partial"] is True
+
+
+def _collect_turn_raw(ws: Any) -> list[dict[str, Any] | bytes]:
+    msgs: list[dict[str, Any] | bytes] = []
+    while True:
+        raw = ws.receive()
+        if raw.get("bytes") is not None:
+            msgs.append(raw["bytes"])
+            continue
+        msg = json.loads(raw["text"])
+        msgs.append(msg)
+        if msg == {"type": "state", "state": "idle"}:
+            return msgs
+
+
+def test_ws_turn_with_tts_sends_binary_frames(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    usage = UsageTracker(tmp_path / "usage.jsonl", settings.llm.daily_token_cap)
+    tts = FakeTTS(frames=2)
+    app = create_app(settings, llm=FakeLLM(["Hello ", "you."]), usage=usage, tts=tts)
+    with TestClient(app).websocket_connect("/ws") as ws:
+        ws.send_json({"type": "text", "text": "hi"})
+        msgs = _collect_turn_raw(ws)
+    assert msgs == [
+        {"type": "state", "state": "thinking"},
+        {"type": "transcript", "role": "assistant", "text": "Hello ", "final": False},
+        {"type": "transcript", "role": "assistant", "text": "Hello you.", "final": False},
+        {"type": "transcript", "role": "assistant", "text": "Hello you.", "final": True},
+        {"type": "tts_start", "sentence_id": 1, "sample_rate": 22050},
+        {"type": "state", "state": "speaking"},
+        bytes([1, 0]) * 2,
+        bytes([1, 1]) * 2,
+        {"type": "tts_end", "sentence_id": 1},
+        {"type": "state", "state": "idle"},
+    ]
+
+
+def test_empty_voice_loads_no_tts(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path), llm=FakeLLM(["x"]))
+    assert app.state.tts is None
+
+
+def test_bad_speaker_stops_startup(tmp_path: Path) -> None:
+    model = tmp_path / "voice.onnx"
+    model.write_bytes(b"junk")
+    (tmp_path / "voice.onnx.json").write_text(
+        json.dumps({"speaker_id_map": {"obadiah": 2}}), encoding="utf-8"
+    )
+    base = _settings(tmp_path)
+    settings = dataclasses.replace(
+        base, tts=dataclasses.replace(base.tts, voice=str(model), speaker="nobody")
+    )
+    with pytest.raises(ValueError, match="valid names: obadiah"):
+        create_app(settings, llm=FakeLLM(["x"]))
+
+
+def test_face_config_endpoint(client: TestClient) -> None:
+    resp = client.get("/config/face")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.json() == {
+        "logical_width": 64,
+        "logical_height": 48,
+        "mouth_thresholds": [0.05, 0.15, 0.30],
+    }
+
+
+def test_face_config_follows_settings(tmp_path: Path) -> None:
+    base = _settings(tmp_path)
+    settings = dataclasses.replace(
+        base, face=dataclasses.replace(base.face, mouth_thresholds=(0.1, 0.2, 0.4))
+    )
+    client = TestClient(create_app(settings, llm=FakeLLM(["x"])))
+    body = client.get("/config/face").json()
+    assert body["mouth_thresholds"] == [0.1, 0.2, 0.4]
+    assert set(body) == {"logical_width", "logical_height", "mouth_thresholds"}
+
+
+def test_audio_config_endpoint(client: TestClient) -> None:
+    resp = client.get("/config/audio")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.json() == {
+        "low_shelf_hz": 250.0,
+        "low_shelf_db": -6.0,
+        "high_shelf_hz": 3500.0,
+        "high_shelf_db": 0.0,
+    }
+
+
+def test_audio_config_follows_settings(tmp_path: Path) -> None:
+    base = _settings(tmp_path)
+    settings = dataclasses.replace(
+        base, tts=dataclasses.replace(base.tts, low_shelf_db=-3.0, high_shelf_db=2.5, pitch=1.1)
+    )
+    client = TestClient(create_app(settings, llm=FakeLLM(["x"])))
+    body = client.get("/config/audio").json()
+    assert body == {
+        "low_shelf_hz": 250.0,
+        "low_shelf_db": -3.0,
+        "high_shelf_hz": 3500.0,
+        "high_shelf_db": 2.5,
+    }

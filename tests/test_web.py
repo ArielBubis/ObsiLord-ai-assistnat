@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from fakes import text_only
 from obsilord.app import create_app
 from obsilord.config import REPO_ROOT, load_settings
 
@@ -21,7 +22,7 @@ def client(tmp_path: Path) -> TestClient:
     settings = load_settings(
         REPO_ROOT / "config.example.toml", env_path=tmp_path / "missing.env", environ={}
     )
-    return TestClient(create_app(settings))
+    return TestClient(create_app(text_only(settings)))
 
 
 def test_index_has_canvas_and_status(client: TestClient) -> None:

@@ -29,8 +29,36 @@ compute_type = "int8"
 language = "en"
 
 [tts]
+# Piper via piper-tts 1.8.0 (PyPI, looked up 2026-10-06). License GPL-3.0-or-later
+# (OHF-Voice/piper1-gpl). Runs locally on CPU, no API cost.
 provider = "piper"
-voice = ""            # path or name of the Piper voice, set at setup
+# Voice model path, relative to the repo root. Empty string disables TTS (text
+# only replies). Not in git (voices/ is gitignored). Downloaded 2026-10-06:
+# en_GB-semaine-medium.onnx and its .onnx.json from the rhasspy/piper-voices
+# repository on Hugging Face (en/en_GB/semaine/medium/).
+# 22050 Hz, 4 speakers. Dataset license: CC BY-NC-SA 4.0 (non-commercial use).
+voice = "voices/en_GB-semaine-medium.onnx"
+# Speaker name from the voice's speaker_id_map (.onnx.json). For semaine:
+# prudence, spike, obadiah, poppy. Empty uses the voice's default speaker.
+speaker = "obadiah"
+# Phoneme length: < 1.0 speaks faster, > 1.0 slower. Must be > 0.
+length_scale = 1.0
+# Pitch factor: 1.0 is the voice as recorded, 1.06 is about one semitone
+# higher, 0.94 about one lower. Allowed 0.8 to 1.25; small steps (0.03 to 0.1)
+# sound natural. How it works: the server synthesizes more slowly
+# (length_scale * pitch) and tells the browser a higher sample rate (22050 *
+# pitch). Playing faster raises the pitch and brings the tempo back to normal.
+pitch = 1.0
+# Playback EQ, applied in the browser to the speech only (read from
+# /config/audio). A shelf boosts (+dB) or cuts (-dB) everything below
+# (low shelf) or above (high shelf) its frequency. 0 dB disables a shelf.
+# Frequencies 20 to 10000 Hz, gains -24 to +24 dB; 3 to 6 dB is usually enough.
+# Low shelf: cuts boom and bass. 150 to 300 Hz is the useful range for a voice.
+low_shelf_hz = 250.0
+low_shelf_db = -6.0
+# High shelf: adds (or tames) brightness and clarity. Try 3000 to 5000 Hz.
+high_shelf_hz = 3500.0
+high_shelf_db = 0.0
 
 [camera]
 device_index = 0

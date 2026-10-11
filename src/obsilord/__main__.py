@@ -10,8 +10,9 @@ from obsilord.config import load_settings
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    # Per-request SDK and HTTP lines at INFO are noise.
-    for name in ("google_genai", "httpx", "httpcore"):
+    # Per-request SDK and HTTP lines at INFO are noise. piper logs the input
+    # text and phonemes at DEBUG, so it is held at WARNING to keep text out of logs.
+    for name in ("google_genai", "httpx", "httpcore", "piper"):
         logging.getLogger(name).setLevel(logging.WARNING)
     settings = load_settings()
     app = create_app(settings)
