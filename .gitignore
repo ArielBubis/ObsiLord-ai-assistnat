@@ -11,8 +11,12 @@ voices/
 captures/
 *.egg-info/
 /characters/
-# Bundled character: license unverified, see PLAN.md
+# Bundled character: license unverified, see planning/PLAN.md
 /web/ai-face/characters/default.face.glb
-/PLAN.md
+# Private docs: planning/ holds plans, architecture notes and handoffs.
+# CLAUDE.md and .claude/agents/ stay where Claude Code loads them, untracked.
+/planning/
 /CLAUDE.md
-/ARCHITECTURE.md
+/.claude/agents/
+# Handoff docs that come with the face playground folder.
+/web/ai-face/*.md

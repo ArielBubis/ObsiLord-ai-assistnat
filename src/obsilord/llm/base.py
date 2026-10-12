@@ -1,4 +1,4 @@
-"""Provider-neutral LLM interface (see ARCHITECTURE.md, Interfaces).
+"""Provider-neutral LLM interface (see planning/ARCHITECTURE.md, Interfaces).
 
 Nothing in this module may import a provider SDK.
 """

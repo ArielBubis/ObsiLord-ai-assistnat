@@ -1,4 +1,4 @@
-"""Provider-neutral TTS interface (see ARCHITECTURE.md, Interfaces).
+"""Provider-neutral TTS interface (see planning/ARCHITECTURE.md, Interfaces).
 
 Nothing in this module may import a provider package.
 

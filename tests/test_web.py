@@ -15,7 +15,7 @@ from obsilord.config import REPO_ROOT, load_settings
 
 WEB_DIR = REPO_ROOT / "web"
 JS_FILES = sorted(p.name for p in WEB_DIR.glob("*.js"))
-# Gitignored (license unverified, see PLAN.md): absent in a fresh clone.
+# Gitignored (license unverified, see planning/PLAN.md): absent in a fresh clone.
 BUNDLED_CHARACTER = WEB_DIR / "ai-face" / "characters" / "default.face.glb"
 # ES modules the dither skin imports (web/ai-face/, three.js vendored there).
 AI_FACE_MODULES = [

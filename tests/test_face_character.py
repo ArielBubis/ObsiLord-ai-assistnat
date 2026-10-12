@@ -15,7 +15,7 @@ ASSET = {"version": "2.0"}
 VALID = make_glb({"asset": ASSET})
 HINT = "open it in the face creator and export a .face.glb"
 BUNDLED = REPO_ROOT / "web" / "ai-face" / "characters" / "default.face.glb"
-# The bundled character is gitignored (license unverified, see PLAN.md), so a
+# The bundled character is gitignored (license unverified, see planning/PLAN.md), so a
 # fresh clone does not have it.
 NO_BUNDLED = "web/ai-face/characters/default.face.glb is absent (gitignored, license unverified)"
 

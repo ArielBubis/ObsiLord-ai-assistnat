@@ -12,10 +12,9 @@ Status: planning. No code yet.
 
 ## Files
 
-- PLAN.md: phases with tasks and "done when" checks. Work one phase at a time.
-- ARCHITECTURE.md: components, WebSocket protocol, state machine, interfaces, config keys.
-- CLAUDE.md: conventions the coding agent must follow.
-- .claude/agents/: subagents (backend-dev, face-dev, reviewer).
+- planning/ (local only, gitignored): PLAN.md (phases with tasks and "done when" checks; work one phase at a time), ARCHITECTURE.md (components, WebSocket protocol, state machine, interfaces, config keys), and handoff specs.
+- CLAUDE.md (local only, gitignored): conventions the coding agent must follow.
+- .claude/agents/ (local only, gitignored): subagents (backend-dev, face-dev, reviewer).
 - prompts/system.md: the assistant's system prompt.
 - config.example.toml, .env.example, requirements.in, .gitignore: setup files.
 
@@ -28,14 +27,14 @@ Status: planning. No code yet.
 Kickoff prompt:
 
 ```
-Read CLAUDE.md, PLAN.md and ARCHITECTURE.md. Outline the plan for Phase 0 in a few lines and wait for my OK. Then do Phase 0 only. Use the backend-dev subagent for implementation and the reviewer subagent before committing. Look up current versions of all dependencies before pinning them.
+Read CLAUDE.md, planning/PLAN.md and planning/ARCHITECTURE.md. Outline the plan for Phase 0 in a few lines and wait for my OK. Then do Phase 0 only. Use the backend-dev subagent for implementation and the reviewer subagent before committing. Look up current versions of all dependencies before pinning them.
 ```
 
 For later phases: "Continue with Phase N. Same rules."
 
 ## Agent harness
 
-A single agent that reads CLAUDE.md and PLAN.md is enough for a solo prototype. The subagents are optional. They help mainly by keeping the main context clean and by giving you an independent review pass before each commit.
+A single agent that reads CLAUDE.md and planning/PLAN.md is enough for a solo prototype. The subagents are optional. They help mainly by keeping the main context clean and by giving you an independent review pass before each commit.
 
 - Main session: orchestrator. Reads the plan, delegates, integrates, commits once per phase.
 - backend-dev: everything under src/ and tests/.
@@ -46,7 +45,7 @@ Delegation per phase:
 
 - Phase 0: backend-dev
 - Phase 1: face-dev
-- Phase 2: backend-dev (LLM, sentence splitter) and face-dev (subtitles, fake mouth) in parallel, since the WebSocket protocol is already fixed in ARCHITECTURE.md
+- Phase 2: backend-dev (LLM, sentence splitter) and face-dev (subtitles, fake mouth) in parallel, since the WebSocket protocol is already fixed in planning/ARCHITECTURE.md
 - Phase 3 and 4: both, in parallel, same reason
 - Phase 5: backend-dev, plus face-dev for the "looking" animation
 - Phase 6 (nice to have): both

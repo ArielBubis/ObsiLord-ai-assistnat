@@ -1,4 +1,4 @@
-"""Provider-neutral STT interface (see ARCHITECTURE.md, Interfaces).
+"""Provider-neutral STT interface (see planning/ARCHITECTURE.md, Interfaces).
 
 Nothing in this module may import a provider package.
 

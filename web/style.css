@@ -4,7 +4,7 @@
    the face is listening or thinking. (The dither skin keeps its own WebGL
    animation loop running in every state.) */
 
-/* JetBrains Mono v2.304, SIL OFL 1.1 (see PLAN.md). Two weights only. */
+/* JetBrains Mono v2.304, SIL OFL 1.1 (see planning/PLAN.md). Two weights only. */
 @font-face {
   font-family: "JetBrains Mono";
   src: url("fonts/JetBrainsMono-Regular.woff2") format("woff2");

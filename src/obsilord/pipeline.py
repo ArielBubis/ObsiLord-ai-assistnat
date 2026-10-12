@@ -1,7 +1,7 @@
 """One conversation turn: typed text or recorded speech in, streamed text and
 speech out.
 
-Message contract with the browser (see ARCHITECTURE.md, WebSocket protocol):
+Message contract with the browser (see planning/ARCHITECTURE.md, WebSocket protocol):
   state thinking -> [cap check] ->
   transcript (assistant, cumulative, final false) per text delta ->
   transcript (assistant, full text, final true) when the LLM finishes ->
