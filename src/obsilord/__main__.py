@@ -12,7 +12,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     # Per-request SDK and HTTP lines at INFO are noise. piper logs the input
     # text and phonemes at DEBUG, so it is held at WARNING to keep text out of logs.
-    for name in ("google_genai", "httpx", "httpcore", "piper"):
+    # faster_whisper logs every utterance's duration at INFO (no text): noise.
+    for name in ("google_genai", "httpx", "httpcore", "piper", "faster_whisper"):
         logging.getLogger(name).setLevel(logging.WARNING)
     settings = load_settings()
     app = create_app(settings)

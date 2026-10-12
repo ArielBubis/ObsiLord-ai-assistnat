@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import {
   FACE_CONFIG, FACE_CONFIG_URL, validThresholds, validateFaceConfig, loadFaceConfig,
   getMouthThresholds, resetFaceConfig, AUDIO_CONFIG_URL, AUDIO_EQ_DEFAULTS, EQ_LIMITS,
-  validateAudioConfig, loadAudioConfig, fetchConfigJson,
+  validateAudioConfig, loadAudioSettings, fetchConfigJson, validateMaxUtterance,
+  MAX_UTTERANCE_DEFAULT_S, MAX_UTTERANCE_LIMITS,
 } from "../../web/config.js";
 import { rmsToFrame } from "../../web/mouth.js";
 
@@ -133,19 +134,63 @@ test("validateAudioConfig rejects bad values with one warning", () => {
   }
 });
 
-test("loadAudioConfig returns server values or the defaults with one warning", async () => {
-  const server = { low_shelf_hz: 180, low_shelf_db: -9, high_shelf_hz: 5000, high_shelf_db: 2 };
+test("max_utterance_s: 1 to 120 s accepted, anything else falls back to 30 s with one warning", () => {
+  assert.equal(MAX_UTTERANCE_DEFAULT_S, 30);
+  assert.deepEqual({ ...MAX_UTTERANCE_LIMITS }, { minS: 1, maxS: 120 });
+  for (const v of [1, 30, 45.5, 120]) {
+    assert.deepEqual(validateMaxUtterance({ max_utterance_s: v }), { seconds: v, warnings: [] });
+  }
+  for (const v of [0.99, 120.01, 0, -5, NaN, Infinity, "30", null, true, undefined]) {
+    const { seconds, warnings } = validateMaxUtterance({ max_utterance_s: v });
+    assert.equal(seconds, 30, String(v));
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /max_utterance_s/);
+  }
+  for (const raw of [null, undefined, 3, "x"]) assert.equal(validateMaxUtterance(raw).seconds, 30);
+});
+
+test("loadAudioSettings: one fetch gives the EQ and the recording limit", async () => {
+  const server = { low_shelf_hz: 180, low_shelf_db: -9, high_shelf_hz: 5000, high_shelf_db: 2, max_utterance_s: 45 };
   const ok = fakeFetch(server);
   const warnings = [];
-  assert.deepEqual({ ...(await loadAudioConfig(ok, (w) => warnings.push(w))) }, server);
+  const got = await loadAudioSettings(ok, (w) => warnings.push(w));
+  assert.deepEqual({ ...got.eq }, { low_shelf_hz: 180, low_shelf_db: -9, high_shelf_hz: 5000, high_shelf_db: 2 });
+  assert.equal(got.maxUtteranceS, 45);
   assert.deepEqual(ok.calls, [AUDIO_CONFIG_URL]);
   assert.deepEqual(warnings, []);
+});
+
+test("loadAudioSettings: EQ and limit fall back independently, one warning each", async () => {
+  const eqServer = { low_shelf_hz: 180, low_shelf_db: -9, high_shelf_hz: 5000, high_shelf_db: 2 };
+  // Limit missing or bad: EQ kept, 30 s.
+  for (const extra of [{}, { max_utterance_s: 0 }, { max_utterance_s: 500 }]) {
+    const w = [];
+    const got = await loadAudioSettings(fakeFetch({ ...eqServer, ...extra }), (x) => w.push(x));
+    assert.deepEqual({ ...got.eq }, eqServer);
+    assert.equal(got.maxUtteranceS, 30);
+    assert.equal(w.length, 1, JSON.stringify(w));
+    assert.match(w[0], /max_utterance_s/);
+  }
+  // EQ bad: EQ defaults, limit kept.
+  const w = [];
+  const got = await loadAudioSettings(fakeFetch({ ...eqServer, high_shelf_db: 30, max_utterance_s: 12 }),
+    (x) => w.push(x));
+  assert.equal(got.eq, AUDIO_EQ_DEFAULTS);
+  assert.equal(got.maxUtteranceS, 12);
+  assert.equal(w.length, 1, JSON.stringify(w));
+  assert.match(w[0], /high_shelf_db/);
+});
+
+test("loadAudioSettings: fetch failures give both defaults with one warning", async () => {
+  const server = { low_shelf_hz: 180, low_shelf_db: -9, high_shelf_hz: 5000, high_shelf_db: 2, max_utterance_s: 45 };
   for (const fetchFn of [
     fakeFetch(null, { throws: true }), fakeFetch(server, { ok: false, status: 500 }),
-    fakeFetch(() => { throw new SyntaxError("bad"); }), fakeFetch({ ...server, high_shelf_db: 30 }),
+    fakeFetch(() => { throw new SyntaxError("bad"); }),
   ]) {
     const w = [];
-    assert.equal(await loadAudioConfig(fetchFn, (x) => w.push(x)), AUDIO_EQ_DEFAULTS);
+    const got = await loadAudioSettings(fetchFn, (x) => w.push(x));
+    assert.equal(got.eq, AUDIO_EQ_DEFAULTS);
+    assert.equal(got.maxUtteranceS, 30);
     assert.equal(w.length, 1, JSON.stringify(w));
   }
 });

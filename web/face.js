@@ -93,9 +93,10 @@ export function setIdleEnabled(enabled) {
   idleEnabled = Boolean(enabled);
 }
 
-// Vertical CSS px kept free for the subtitle, input, error, and status rows
-// under the face (see style.css; #subtitles has a fixed height).
-const UI_RESERVE_PX = 250;
+// Vertical CSS px kept free for the subtitle, input, push-to-talk hint, error,
+// and status rows under the face (see style.css; #subtitles and #ptt-hint have
+// fixed heights).
+const UI_RESERVE_PX = 280;
 
 // Pick an integer number of device pixels per logical pixel (k), then size
 // the canvas in CSS px as 64*k/dpr, so every logical pixel is exactly k

@@ -84,6 +84,7 @@ iniconfig==2.3.0
     # via pytest
 numpy==2.5.3
     # via
+    #   -r requirements.in
     #   ctranslate2
     #   onnxruntime
     #   opencv-python

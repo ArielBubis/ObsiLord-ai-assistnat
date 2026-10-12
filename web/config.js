@@ -94,7 +94,7 @@ export function resetFaceConfig() {
 
 // Playback EQ, served from the [tts] section of config.toml (flat keys
 // low_shelf_hz, low_shelf_db, high_shelf_hz, high_shelf_db) at
-// GET /config/audio. Defaults equal the backend defaults and are used if the
+// GET /config/audio, together with max_utterance_s (see below). Defaults equal the backend defaults and are used if the
 // fetch fails or the response is invalid. Keys match the server response.
 export const AUDIO_CONFIG_URL = "/config/audio";
 
@@ -137,17 +137,38 @@ export function validateAudioConfig(raw) {
   return { eq, warnings: [] };
 }
 
-// Fetches the EQ settings once. Never throws; returns the settings to use
-// (server values if valid, else the defaults) and logs one warning otherwise.
-export async function loadAudioConfig(fetchFn = globalThis.fetch, warn = console.warn) {
+// Push-to-talk length limit, from [stt] max_utterance_s in config.toml,
+// served in the same /config/audio response. The client stops recording
+// after this long; the server keeps at most this much audio. Checked on its
+// own: a bad value falls back to the default without touching the EQ.
+export const MAX_UTTERANCE_DEFAULT_S = 30;
+export const MAX_UTTERANCE_LIMITS = Object.freeze({ minS: 1, maxS: 120 });
+
+// Pure. Returns { seconds, warnings }: the server value if it is a number
+// in 1..120, else the default with one warning.
+export function validateMaxUtterance(raw) {
+  const v = raw && typeof raw === "object" ? raw.max_utterance_s : undefined;
+  if (inRange(v, MAX_UTTERANCE_LIMITS.minS, MAX_UTTERANCE_LIMITS.maxS)) return { seconds: v, warnings: [] };
+  return {
+    seconds: MAX_UTTERANCE_DEFAULT_S,
+    warnings: [`audio config: invalid max_utterance_s=${JSON.stringify(v)}, using ${MAX_UTTERANCE_DEFAULT_S} s`],
+  };
+}
+
+// Fetches /config/audio once. Never throws. Returns { eq, maxUtteranceS }:
+// server values where valid, defaults otherwise, with one warning per
+// problem.
+export async function loadAudioSettings(fetchFn = globalThis.fetch, warn = console.warn) {
   let raw;
   try {
     raw = await fetchConfigJson(AUDIO_CONFIG_URL, fetchFn);
   } catch (err) {
     warn(`audio config: fetch failed (${errText(err)}), using defaults`);
-    return AUDIO_EQ_DEFAULTS;
+    return { eq: AUDIO_EQ_DEFAULTS, maxUtteranceS: MAX_UTTERANCE_DEFAULT_S };
   }
   const { eq, warnings } = validateAudioConfig(raw);
-  if (warnings.length > 0) warn(warnings.join("; "));
-  return eq || AUDIO_EQ_DEFAULTS;
+  const max = validateMaxUtterance(raw);
+  const all = [...warnings, ...max.warnings];
+  if (all.length > 0) warn(all.join("; "));
+  return { eq: eq || AUDIO_EQ_DEFAULTS, maxUtteranceS: max.seconds };
 }

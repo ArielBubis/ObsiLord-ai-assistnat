@@ -293,13 +293,18 @@ export function createPlayer({ onDrained = () => {}, cfg = PLAYBACK } = {}) {
   }
 
   return {
-    // Call from a user gesture (Send click or Enter) so autoplay rules allow
-    // the context to run.
+    // Call from a user gesture (Send click, Enter, or a push-to-talk press)
+    // so autoplay rules allow the context to run.
     unlock() {
       const c = ensureContext();
       if (c && c.state === "suspended") {
         c.resume().catch((err) => console.warn("audio: resume failed", err));
       }
+    },
+    // The shared AudioContext, created if needed (null without Web Audio).
+    // Mic capture (audio_in.js) runs in it too, at its native rate.
+    context() {
+      return ensureContext();
     },
     startSentence,
     pushChunk,

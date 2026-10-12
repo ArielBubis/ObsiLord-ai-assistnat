@@ -1,4 +1,4 @@
-"""Test doubles for the LLM and TTS interfaces. No network, no model."""
+"""Test doubles for the LLM, STT, and TTS interfaces. No network, no model."""
 
 from __future__ import annotations
 
@@ -12,8 +12,13 @@ from obsilord.llm.base import Done, LLMEvent, Message, TextDelta, ToolSpec, Usag
 
 
 def text_only(settings: Settings) -> Settings:
-    """Settings with TTS disabled, so create_app does not load a voice."""
-    return dataclasses.replace(settings, tts=dataclasses.replace(settings.tts, voice=""))
+    """Settings with TTS and STT disabled, so create_app loads no voice and no
+    STT model."""
+    return dataclasses.replace(
+        settings,
+        tts=dataclasses.replace(settings.tts, voice=""),
+        stt=dataclasses.replace(settings.stt, model=""),
+    )
 
 
 class FakeLLM:
@@ -118,3 +123,43 @@ class FakeTTS:
             raise
         finally:
             self.closed += 1
+
+
+class FakeSTT:
+    """Returns `text` for every utterance.
+
+    calls records (pcm16 bytes, sample_rate, language) per call.
+    fail: raise RuntimeError instead of returning.
+    delay_s: sleep before returning (for timeout tests).
+    gate: wait (polling) until the event is set before returning.
+    cancelled is set if a transcription is cancelled.
+    """
+
+    def __init__(
+        self,
+        text: str = "What is the capital of France?",
+        fail: bool = False,
+        delay_s: float = 0.0,
+        gate: threading.Event | None = None,
+    ) -> None:
+        self.text = text
+        self.fail = fail
+        self.delay_s = delay_s
+        self.gate = gate
+        self.calls: list[tuple[bytes, int, str | None]] = []
+        self.cancelled = threading.Event()
+
+    async def transcribe(self, pcm16: bytes, sample_rate: int, language: str | None) -> str:
+        self.calls.append((pcm16, sample_rate, language))
+        try:
+            if self.delay_s:
+                await asyncio.sleep(self.delay_s)
+            if self.gate is not None:
+                while not self.gate.is_set():
+                    await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        if self.fail:
+            raise RuntimeError("stt boom with secret words")
+        return self.text

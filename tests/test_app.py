@@ -16,7 +16,9 @@ from obsilord.app import (
     MSG_EMPTY,
     MSG_NO_KEY,
     MSG_NO_VOICE,
+    MSG_NOT_RECORDING,
     MSG_TOO_LONG,
+    MSG_UNEXPECTED_AUDIO,
     MSG_UNKNOWN,
     create_app,
 )
@@ -132,13 +134,14 @@ def test_ws_too_long_text_rejected(client: TestClient) -> None:
 
 
 def test_ws_voice_not_available(client: TestClient) -> None:
+    # text_only settings: [stt] model is empty, so voice input is disabled.
     with client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "audio_start"})
         assert ws.receive_json() == {"type": "error", "message": MSG_NO_VOICE}
         ws.send_bytes(bytes([0, 1]))
-        assert ws.receive_json() == {"type": "error", "message": MSG_NO_VOICE}
+        assert ws.receive_json() == {"type": "error", "message": MSG_UNEXPECTED_AUDIO}
         ws.send_json({"type": "audio_end"})
-        assert ws.receive_json() == {"type": "error", "message": MSG_NO_VOICE}
+        assert ws.receive_json() == {"type": "error", "message": MSG_NOT_RECORDING}
 
 
 def test_ws_non_object_json_is_unknown(client: TestClient) -> None:
@@ -271,19 +274,24 @@ def test_audio_config_endpoint(client: TestClient) -> None:
         "low_shelf_db": -6.0,
         "high_shelf_hz": 3500.0,
         "high_shelf_db": 0.0,
+        "max_utterance_s": 30.0,
     }
 
 
 def test_audio_config_follows_settings(tmp_path: Path) -> None:
     base = _settings(tmp_path)
     settings = dataclasses.replace(
-        base, tts=dataclasses.replace(base.tts, low_shelf_db=-3.0, high_shelf_db=2.5, pitch=1.1)
+        base,
+        tts=dataclasses.replace(base.tts, low_shelf_db=-3.0, high_shelf_db=2.5, pitch=1.1),
+        stt=dataclasses.replace(base.stt, max_utterance_s=12.5),
     )
     client = TestClient(create_app(settings, llm=FakeLLM(["x"])))
     body = client.get("/config/audio").json()
+    # Exactly these five keys: nothing else from the settings is exposed.
     assert body == {
         "low_shelf_hz": 250.0,
         "low_shelf_db": -3.0,
         "high_shelf_hz": 3500.0,
         "high_shelf_db": 2.5,
+        "max_utterance_s": 12.5,
     }

@@ -6,6 +6,9 @@ fastapi==0.142.2
 uvicorn==0.54.0
 google-genai==2.28.0
 faster-whisper==1.2.1
+# Imported directly by stt/ (PCM16 to float32). Same version already locked
+# in requirements.txt as a dependency of ctranslate2 and onnxruntime.
+numpy==2.5.3
 piper-tts==1.8.0
 opencv-python==5.0.0.93
 pytest==9.1.1

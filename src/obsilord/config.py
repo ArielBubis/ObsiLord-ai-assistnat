@@ -17,6 +17,8 @@ from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping, get_args, get_origin, get_type_hints
 
+from obsilord.stt.whisper_languages import WHISPER_LANGUAGE_CODES
+
 log = logging.getLogger(__name__)
 
 # src/obsilord/config.py -> repo root is two levels above the package dir.
@@ -48,13 +50,42 @@ class LLMSettings:
     turn_timeout_s: float = 60.0  # added in Phase 2
 
 
-@dataclass(frozen=True)
+STT_PROVIDERS = ("faster-whisper",)
+STT_BEAM_SIZE_MIN = 1
+STT_BEAM_SIZE_MAX = 10
+STT_MAX_UTTERANCE_MIN_S = 1.0
+STT_MAX_UTTERANCE_MAX_S = 120.0
+STT_MIN_UTTERANCE_MIN_MS = 50
+STT_MIN_UTTERANCE_MAX_MS = 5000
+
+
+@dataclass(frozen=True, kw_only=True)
 class STTSettings:
     provider: str
+    # Model size (for example "small") or a path to a converted model
+    # directory. Empty means voice input is disabled.
     model: str
     device: str
     compute_type: str
+    # Spoken language code ("en"). Empty lets the model detect it per utterance.
     language: str
+    # Decoding beam width, STT_BEAM_SIZE_MIN..MAX. 1 (greedy) is fastest.
+    beam_size: int = 1  # added in Phase 4
+    # Longest utterance kept, in seconds; audio past it is dropped.
+    max_utterance_s: float = 30.0  # added in Phase 4
+    # Shorter utterances are rejected without running STT.
+    min_utterance_ms: int = 300  # added in Phase 4
+    # Model download and cache directory, relative to the repo root (or absolute).
+    download_root: str = "models"  # added in Phase 4
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.model.strip())
+
+    @property
+    def language_or_none(self) -> str | None:
+        """The configured language, or None to let the model detect it."""
+        return self.language.strip() or None
 
 
 TTS_PROVIDERS = ("piper",)
@@ -263,6 +294,50 @@ def _check_tts_voice_controls(tts: TTSSettings) -> None:
             )
 
 
+def _check_stt(stt: STTSettings) -> None:
+    """Range checks for the [stt] keys. Provider and download_root only matter
+    when voice input is enabled."""
+    if not STT_BEAM_SIZE_MIN <= stt.beam_size <= STT_BEAM_SIZE_MAX:
+        raise ValueError(
+            f"config: stt.beam_size must be in {STT_BEAM_SIZE_MIN}..{STT_BEAM_SIZE_MAX}, "
+            f"got {stt.beam_size}"
+        )
+    if not STT_MAX_UTTERANCE_MIN_S <= stt.max_utterance_s <= STT_MAX_UTTERANCE_MAX_S:
+        raise ValueError(
+            f"config: stt.max_utterance_s must be in "
+            f"{STT_MAX_UTTERANCE_MIN_S:g}..{STT_MAX_UTTERANCE_MAX_S:g}, "
+            f"got {stt.max_utterance_s:g}"
+        )
+    if not STT_MIN_UTTERANCE_MIN_MS <= stt.min_utterance_ms <= STT_MIN_UTTERANCE_MAX_MS:
+        raise ValueError(
+            f"config: stt.min_utterance_ms must be in "
+            f"{STT_MIN_UTTERANCE_MIN_MS}..{STT_MIN_UTTERANCE_MAX_MS}, "
+            f"got {stt.min_utterance_ms}"
+        )
+    if stt.min_utterance_ms >= stt.max_utterance_s * 1000:
+        raise ValueError(
+            "config: stt.min_utterance_ms must be shorter than stt.max_utterance_s, "
+            f"got {stt.min_utterance_ms} ms and {stt.max_utterance_s:g} s"
+        )
+    if not stt.enabled:
+        return
+    if stt.provider not in STT_PROVIDERS:
+        raise ValueError(
+            f"config: stt.provider must be one of {list(STT_PROVIDERS)}, "
+            f"got {stt.provider!r}"
+        )
+    if not stt.download_root.strip():
+        raise ValueError(
+            'config: stt.download_root must not be empty (the default is "models")'
+        )
+    language = stt.language_or_none
+    if language is not None and language not in WHISPER_LANGUAGE_CODES:
+        raise ValueError(
+            f'config: stt.language must be "" (detect) or a Whisper language code '
+            f'such as "en" or "he", got {stt.language!r}'
+        )
+
+
 MOUTH_THRESHOLD_COUNT = 3
 
 
@@ -330,6 +405,7 @@ def load_settings(
             f"got {settings.tts.provider!r}"
         )
     _check_tts_voice_controls(settings.tts)
+    _check_stt(settings.stt)
     _check_mouth_thresholds(settings.face.mouth_thresholds)
     if defaulted:
         log.info(

@@ -22,11 +22,26 @@ daily_token_cap = 200000   # placeholder, tune after Phase 2
 turn_timeout_s = 60       # server-side limit for one whole reply
 
 [stt]
+# faster-whisper 1.2.1 (PyPI, MIT, SYSTRAN/faster-whisper), runs locally, no API
+# cost. Checked in the installed package 2026-10-12.
 provider = "faster-whisper"
+# Model size or a path to a converted model directory. "small" is
+# Systran/faster-whisper-small on Hugging Face (MIT, about 486 MB, looked up
+# 2026-10-12). It is downloaded into download_root on the first start and
+# loaded from there afterwards. Empty string disables voice input.
 model = "small"
-device = "cpu"
-compute_type = "int8"
-language = "en"
+device = "cpu"          # "cpu" or "cuda"
+compute_type = "int8"   # int8 on CPU; float16 or int8_float16 on a GPU
+language = "en"         # language code; empty lets the model detect it
+# Decoding beam width, 1 to 10. 1 (greedy) is fastest; 5 is a little more
+# accurate and slower.
+beam_size = 1
+# Push-to-talk limits. Audio past max_utterance_s (1 to 120) is dropped;
+# recordings shorter than min_utterance_ms (50 to 5000) are rejected.
+max_utterance_s = 30.0
+min_utterance_ms = 300
+# Model cache, relative to the repo root (models/ is gitignored).
+download_root = "models"
 
 [tts]
 # Piper via piper-tts 1.8.0 (PyPI, looked up 2026-10-06). License GPL-3.0-or-later

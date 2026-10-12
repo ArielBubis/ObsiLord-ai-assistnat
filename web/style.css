@@ -149,3 +149,41 @@ main {
   color: #ff6b6b;
   text-align: center;
 }
+
+/* Push-to-talk: amber while the mic opens, red while live (Phase 4). */
+#chat-talk.opening {
+  border-color: #ffb020;
+  color: #ffb020;
+}
+#chat-talk.recording {
+  border-color: #ff3b3b;
+  color: #ff3b3b;
+}
+#ptt-hint {
+  width: min(90vw, 640px);
+  box-sizing: border-box;
+  height: 18px;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #6f7d95;
+}
+#ptt-dot {
+  display: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+#ptt-hint[data-mode="recording"] {
+  color: #ff6b6b;
+}
+#ptt-hint[data-mode="recording"] #ptt-dot {
+  display: inline-block;
+  background: #ff3b3b;
+}
+#ptt-hint[data-mode="flash"],
+#ptt-hint[data-mode="opening"] {
+  color: #ffb020;
+}

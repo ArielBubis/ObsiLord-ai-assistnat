@@ -296,6 +296,7 @@ def test_accepts_eq_bounds(tmp_path: Path) -> None:
 
 OPTIONAL_KEYS = {
     "llm": ["thinking_level", "turn_timeout_s"],
+    "stt": ["beam_size", "max_utterance_s", "min_utterance_ms", "download_root"],
     "tts": [
         "speaker",
         "length_scale",
@@ -348,6 +349,10 @@ def test_old_config_loads_with_defaults(
     assert s.tts.pitch == 1.0
     assert (s.tts.low_shelf_hz, s.tts.low_shelf_db) == (250.0, -6.0)
     assert (s.tts.high_shelf_hz, s.tts.high_shelf_db) == (3500.0, 0.0)
+    assert s.stt.beam_size == 1
+    assert s.stt.max_utterance_s == 30.0
+    assert s.stt.min_utterance_ms == 300
+    assert s.stt.download_root == "models"
     lines = [r.getMessage() for r in caplog.records if "using defaults" in r.getMessage()]
     assert len(lines) == 1
     for section, keys in OPTIONAL_KEYS.items():
@@ -411,3 +416,122 @@ def test_required_keys_still_required(tmp_path: Path, section: str, key: str) ->
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ValueError, match=rf"missing keys in \[{section}\]: \['{key}'\]"):
         load_settings(path, env_path=tmp_path / "missing.env", environ={})
+
+
+def _load(path: Path, tmp_path: Path) -> Settings:
+    return load_settings(path, env_path=tmp_path / "missing.env", environ={})
+
+
+def test_stt_settings_from_example(tmp_path: Path) -> None:
+    s = _load(EXAMPLE, tmp_path)
+    assert s.stt.provider == "faster-whisper"
+    assert s.stt.model == "small"
+    assert (s.stt.device, s.stt.compute_type, s.stt.language) == ("cpu", "int8", "en")
+    assert s.stt.beam_size == 1 and type(s.stt.beam_size) is int
+    assert s.stt.max_utterance_s == 30.0 and type(s.stt.max_utterance_s) is float
+    assert s.stt.min_utterance_ms == 300
+    assert s.stt.download_root == "models"
+    assert s.stt.enabled
+    assert s.stt.language_or_none == "en"
+
+
+def test_empty_stt_model_disables_voice_input(tmp_path: Path) -> None:
+    s = _load(_write_replaced(tmp_path, 'model = "small"', 'model = ""'), tmp_path)
+    assert not s.stt.enabled
+    s = _load(_write_replaced(tmp_path, 'model = "small"', 'model = "   "'), tmp_path)
+    assert not s.stt.enabled
+
+
+def test_empty_stt_language_means_detect(tmp_path: Path) -> None:
+    s = _load(_write_replaced(tmp_path, 'language = "en"', 'language = ""'), tmp_path)
+    assert s.stt.language_or_none is None
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "match"),
+    [
+        ("beam_size = 1", "beam_size = 0", r"stt\.beam_size must be in 1\.\.10, got 0"),
+        ("beam_size = 1", "beam_size = 11", r"stt\.beam_size must be in 1\.\.10, got 11"),
+        ("beam_size = 1", "beam_size = 1.0", r"stt\.beam_size expected int, got float"),
+        ("max_utterance_s = 30.0", "max_utterance_s = 0.5",
+         r"stt\.max_utterance_s must be in 1\.\.120, got 0\.5"),
+        ("max_utterance_s = 30.0", "max_utterance_s = 121",
+         r"stt\.max_utterance_s must be in 1\.\.120, got 121"),
+        ("max_utterance_s = 30.0", 'max_utterance_s = "30"',
+         r"stt\.max_utterance_s expected float, got str"),
+        ("min_utterance_ms = 300", "min_utterance_ms = 49",
+         r"stt\.min_utterance_ms must be in 50\.\.5000, got 49"),
+        ("min_utterance_ms = 300", "min_utterance_ms = 5001",
+         r"stt\.min_utterance_ms must be in 50\.\.5000, got 5001"),
+        ("min_utterance_ms = 300", "min_utterance_ms = 300.0",
+         r"stt\.min_utterance_ms expected int, got float"),
+        ('download_root = "models"', 'download_root = ""',
+         r"stt\.download_root must not be empty"),
+        ('provider = "faster-whisper"', 'provider = "whisper.cpp"',
+         r"stt\.provider must be one of \['faster-whisper'\]"),
+    ],
+)
+def test_rejects_bad_stt_values(tmp_path: Path, old: str, new: str, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        _load(_write_replaced(tmp_path, old, new), tmp_path)
+
+
+def test_rejects_min_utterance_not_below_max(tmp_path: Path) -> None:
+    text = EXAMPLE.read_text(encoding="utf-8")
+    text = text.replace("max_utterance_s = 30.0", "max_utterance_s = 2")
+    text = text.replace("min_utterance_ms = 300", "min_utterance_ms = 2000")
+    path = tmp_path / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match=r"stt\.min_utterance_ms must be shorter"):
+        _load(path, tmp_path)
+
+
+def test_accepts_stt_bounds(tmp_path: Path) -> None:
+    text = EXAMPLE.read_text(encoding="utf-8")
+    for old, new in [
+        ("beam_size = 1", "beam_size = 10"),
+        ("max_utterance_s = 30.0", "max_utterance_s = 120"),
+        ("min_utterance_ms = 300", "min_utterance_ms = 5000"),
+    ]:
+        assert old in text
+        text = text.replace(old, new)
+    path = tmp_path / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    s = _load(path, tmp_path)
+    assert (s.stt.beam_size, s.stt.max_utterance_s, s.stt.min_utterance_ms) == (10, 120.0, 5000)
+    path.write_text(
+        EXAMPLE.read_text(encoding="utf-8")
+        .replace("max_utterance_s = 30.0", "max_utterance_s = 1")
+        .replace("min_utterance_ms = 300", "min_utterance_ms = 50"),
+        encoding="utf-8",
+    )
+    s = _load(path, tmp_path)
+    assert (s.stt.max_utterance_s, s.stt.min_utterance_ms) == (1.0, 50)
+
+
+def test_disabled_stt_skips_provider_and_root_checks(tmp_path: Path) -> None:
+    text = (
+        EXAMPLE.read_text(encoding="utf-8")
+        .replace('model = "small"', 'model = ""')
+        .replace('provider = "faster-whisper"', 'provider = "none"')
+        .replace('download_root = "models"', 'download_root = ""')
+        .replace('language = "en"', 'language = "klingon"')
+    )
+    path = tmp_path / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    s = _load(path, tmp_path)
+    assert not s.stt.enabled
+
+
+@pytest.mark.parametrize("value", ["en", "he", "yue", "haw", "", " "])
+def test_accepts_whisper_language(tmp_path: Path, value: str) -> None:
+    s = _load(_write_replaced(tmp_path, 'language = "en"', f'language = "{value}"'), tmp_path)
+    assert s.stt.language_or_none == (value.strip() or None)
+
+
+@pytest.mark.parametrize("value", ["xx", "EN", "english", "en-US", "iw"])
+def test_rejects_unknown_language(tmp_path: Path, value: str) -> None:
+    path = _write_replaced(tmp_path, 'language = "en"', f'language = "{value}"')
+    match = rf"stt\.language must be \"\" \(detect\) or a Whisper language code.*'{value}'"
+    with pytest.raises(ValueError, match=match):
+        _load(path, tmp_path)

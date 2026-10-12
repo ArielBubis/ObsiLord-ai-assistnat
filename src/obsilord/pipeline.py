@@ -1,4 +1,5 @@
-"""One conversation turn: typed text in, streamed text and speech out.
+"""One conversation turn: typed text or recorded speech in, streamed text and
+speech out.
 
 Message contract with the browser (see ARCHITECTURE.md, WebSocket protocol):
   state thinking -> [cap check] ->
@@ -6,6 +7,21 @@ Message contract with the browser (see ARCHITECTURE.md, WebSocket protocol):
   transcript (assistant, full text, final true) when the LLM finishes ->
   state idle.
 Errors send {"type": "error"} and then state idle.
+
+Voice turns (run_voice_turn) send state thinking once for the whole turn, then
+check the cap before running STT (no STT when the cap is reached), then
+transcribe. STT failure sends "Speech recognition failed." and an empty
+transcript sends "Didn't catch that.", each followed by idle. Otherwise
+{"type": "transcript", "role": "user", "text": ..., "final": true} is sent and
+the text turn body follows (cap check again, LLM, speech) without a second
+thinking. One turn timeout covers STT and the rest. Transcript text is never
+logged.
+
+Latency line (INFO, one per successful turn): stt_ms is the STT duration and
+audio_ms the utterance length (both n/a for text turns). llm_ttft_ms,
+llm_done_ms, tts_first_chunk_ms, and total_ms are measured from turn start
+(text received, or audio_end received), so for voice turns they include
+stt_ms.
 
 Speech (when a TTSClient is given): every complete sentence from the
 SentenceSplitter, plus the flush remainder, is queued to one TTS worker task
@@ -48,6 +64,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 from obsilord.llm.base import Done, LLMClient, Message, TextDelta, UsageUpdate
 from obsilord.sentences import SentenceSplitter
+from obsilord.stt.base import SAMPLE_RATE, STTClient, pcm16_duration_ms
 from obsilord.tts.base import TTSClient
 from obsilord.tts.text import clean_for_speech
 from obsilord.usage import CapExceeded, UsageTracker
@@ -62,6 +79,8 @@ MSG_LLM_FAILED = "LLM request failed."
 MSG_TIMEOUT = "Reply timed out."
 MSG_UNEXPECTED = "Something went wrong."
 MSG_TTS_FAILED = "Voice output failed."
+MSG_STT_FAILED = "Speech recognition failed."
+MSG_NOT_CAUGHT = "Didn't catch that."
 
 
 def trim_history(history: list[Message], history_turns: int) -> None:
@@ -245,6 +264,9 @@ async def run_text_turn(
     only) and reported to the client as a generic error, best effort.
     """
     try:
+        t0 = time.monotonic()
+        deadline = asyncio.get_running_loop().time() + turn_timeout_s
+        await send({"type": "state", "state": "thinking"})
         return await _run_turn(
             text,
             history,
@@ -253,8 +275,9 @@ async def run_text_turn(
             send,
             history_turns,
             max_output_tokens,
-            turn_timeout_s,
             tts,
+            t0=t0,
+            deadline=deadline,
         )
     except asyncio.CancelledError:
         raise
@@ -265,6 +288,145 @@ async def run_text_turn(
         return None
 
 
+async def run_voice_turn(
+    pcm16: bytes,
+    history: list[Message],
+    llm: LLMClient,
+    usage: UsageTracker,
+    send: Send,
+    stt: STTClient,
+    language: str | None = None,
+    sample_rate: int = SAMPLE_RATE,
+    history_turns: int = 10,
+    max_output_tokens: int = 200,
+    turn_timeout_s: float = 60.0,
+    tts: TTSClient | None = None,
+) -> str | None:
+    """Run one spoken turn: STT, then the text turn body with the transcript.
+
+    pcm16: the whole utterance, PCM16 mono little-endian at sample_rate.
+    language: passed to the STT client (None lets it detect the language).
+    Returns the reply text, or None if the turn failed or nothing was heard.
+
+    Never raises except CancelledError, like run_text_turn.
+    """
+    try:
+        return await _run_voice_turn(
+            pcm16,
+            history,
+            llm,
+            usage,
+            send,
+            stt,
+            language,
+            sample_rate,
+            history_turns,
+            max_output_tokens,
+            turn_timeout_s,
+            tts,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.error("voice turn failed unexpectedly: %s", type(exc).__name__)
+        await _send_quietly(send, {"type": "error", "message": MSG_UNEXPECTED})
+        await _send_quietly(send, {"type": "state", "state": "idle"})
+        return None
+
+
+async def _cap_allows(usage: UsageTracker, send: Send) -> bool:
+    """False (after sending the cap error and idle) if the daily cap is reached."""
+    try:
+        usage.check()
+    except CapExceeded:
+        log.warning("turn blocked: daily token cap reached (%d tokens today)", usage.today_total)
+        await send({"type": "error", "message": MSG_CAP})
+        await send({"type": "state", "state": "idle"})
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class _VoiceTiming:
+    stt_ms: int
+    audio_ms: int
+
+
+async def _run_voice_turn(
+    pcm16: bytes,
+    history: list[Message],
+    llm: LLMClient,
+    usage: UsageTracker,
+    send: Send,
+    stt: STTClient,
+    language: str | None,
+    sample_rate: int,
+    history_turns: int,
+    max_output_tokens: int,
+    turn_timeout_s: float,
+    tts: TTSClient | None,
+) -> str | None:
+    t0 = time.monotonic()
+    # One deadline for STT and the rest of the turn.
+    deadline = asyncio.get_running_loop().time() + turn_timeout_s
+    audio_ms = pcm16_duration_ms(len(pcm16), sample_rate)
+    await send({"type": "state", "state": "thinking"})
+    # Checked before STT so a capped day does not spend CPU on transcription.
+    if not await _cap_allows(usage, send):
+        return None
+
+    stt_error: Exception | None = None
+    transcript: Any = ""
+    t_stt = time.monotonic()
+    try:
+        async with asyncio.timeout_at(deadline):
+            try:
+                transcript = await stt.transcribe(pcm16, sample_rate, language)
+            except Exception as exc:  # noqa: BLE001 - any STT error ends the turn
+                stt_error = exc
+    except TimeoutError:
+        log.error(
+            "turn timed out during STT after %d ms (audio_ms=%d)",
+            int((time.monotonic() - t0) * 1000),
+            audio_ms,
+        )
+        await send({"type": "error", "message": MSG_TIMEOUT})
+        await send({"type": "state", "state": "idle"})
+        return None
+    stt_ms = int((time.monotonic() - t_stt) * 1000)
+
+    if stt_error is not None:
+        # Type name only: provider messages could echo input details.
+        log.error(
+            "STT failed: %s (stt_ms=%d audio_ms=%d)", type(stt_error).__name__, stt_ms, audio_ms
+        )
+        await send({"type": "error", "message": MSG_STT_FAILED})
+        await send({"type": "state", "state": "idle"})
+        return None
+
+    text = transcript.strip() if isinstance(transcript, str) else ""
+    if not text:
+        log.info("stt: nothing recognized (stt_ms=%d audio_ms=%d)", stt_ms, audio_ms)
+        await send({"type": "error", "message": MSG_NOT_CAUGHT})
+        await send({"type": "state", "state": "idle"})
+        return None
+
+    await send({"type": "transcript", "role": "user", "text": text, "final": True})
+    return await _run_turn(
+        text,
+        history,
+        llm,
+        usage,
+        send,
+        history_turns,
+        max_output_tokens,
+        tts,
+        t0=t0,
+        deadline=deadline,
+        voice=_VoiceTiming(stt_ms, audio_ms),
+    )
+
+
 async def _run_turn(
     text: str,
     history: list[Message],
@@ -273,17 +435,19 @@ async def _run_turn(
     send: Send,
     history_turns: int,
     max_output_tokens: int,
-    turn_timeout_s: float,
     tts: TTSClient | None,
+    *,
+    t0: float,
+    deadline: float,
+    voice: _VoiceTiming | None = None,
 ) -> str | None:
-    t0 = time.monotonic()
-    await send({"type": "state", "state": "thinking"})
-    try:
-        usage.check()
-    except CapExceeded:
-        log.warning("turn blocked: daily token cap reached (%d tokens today)", usage.today_total)
-        await send({"type": "error", "message": MSG_CAP})
-        await send({"type": "state", "state": "idle"})
+    """The shared turn body after state thinking has been sent.
+
+    t0: turn start (time.monotonic) for the latency line. deadline: end of the
+    turn in event loop time (asyncio.timeout_at). voice: STT timings for the
+    latency line, None for text turns.
+    """
+    if not await _cap_allows(usage, send):
         return None
 
     messages = [*history, Message(role="user", text=text)]
@@ -310,7 +474,7 @@ async def _run_turn(
                 queue.put_nowait(sentence)
 
     try:
-        async with asyncio.timeout(turn_timeout_s):
+        async with asyncio.timeout_at(deadline):
             t_llm = time.monotonic()
             try:
                 stream = llm.stream_reply(messages, [])
@@ -392,8 +556,10 @@ async def _run_turn(
 
     d = st.done
     log.info(
-        "turn latency: stt_ms=n/a llm_ttft_ms=%s llm_done_ms=%s tts_first_chunk_ms=%s "
-        "total_ms=%d sentences=%d spoken=%d tts_failures=%d",
+        "turn latency: stt_ms=%s audio_ms=%s llm_ttft_ms=%s llm_done_ms=%s "
+        "tts_first_chunk_ms=%s total_ms=%d sentences=%d spoken=%d tts_failures=%d",
+        voice.stt_ms if voice is not None else "n/a",
+        voice.audio_ms if voice is not None else "n/a",
         st.ttft_ms if st.ttft_ms is not None else "-",
         st.done_ms if st.done_ms is not None else "-",
         sp.first_audio_ms if sp.first_audio_ms is not None else "-",

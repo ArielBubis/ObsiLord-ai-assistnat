@@ -16,7 +16,9 @@
     <form id="chat" autocomplete="off">
       <input id="chat-input" type="text" maxlength="2000" placeholder="Type a message" aria-label="Message">
       <button id="chat-send" type="submit">Send</button>
+      <button id="chat-talk" type="button">Hold to talk</button>
     </form>
+    <p id="ptt-hint" data-mode="off"><span id="ptt-dot" aria-hidden="true"></span><span id="ptt-text"></span></p>
     <p id="error-line" role="alert"></p>
     <p class="status">Status: <span id="status">connecting</span></p>
     <section id="debug" hidden>
