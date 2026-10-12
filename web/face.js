@@ -93,10 +93,13 @@ export function setIdleEnabled(enabled) {
   idleEnabled = Boolean(enabled);
 }
 
-// Vertical CSS px kept free for the subtitle, input, push-to-talk hint, error,
-// and status rows under the face (see style.css; #subtitles and #ptt-hint have
-// fixed heights).
-const UI_RESERVE_PX = 280;
+// CSS px kept free around the face for the card chrome in style.css.
+// Vertical: page and card padding, the header rail, the frame edges, and the
+// subtitle box, input row, push-to-talk hint, and error rows (#subtitles,
+// #ptt-hint, and #error-line have fixed heights). Horizontal: page padding,
+// card padding, and the card and frame borders.
+const UI_RESERVE_PX = 424;
+const UI_RESERVE_X_PX = 72;
 
 // Pick an integer number of device pixels per logical pixel (k), then size
 // the canvas in CSS px as 64*k/dpr, so every logical pixel is exactly k
@@ -104,7 +107,7 @@ const UI_RESERVE_PX = 280;
 function fitCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
   const availDevice = Math.min(
-    (window.innerWidth * dpr) / FACE_CONFIG.logicalWidth,
+    (Math.max(FACE_CONFIG.logicalWidth, window.innerWidth - UI_RESERVE_X_PX) * dpr) / FACE_CONFIG.logicalWidth,
     (Math.max(FACE_CONFIG.logicalHeight, window.innerHeight - UI_RESERVE_PX) * dpr) / FACE_CONFIG.logicalHeight,
   );
   const k = Math.max(1, Math.floor(availDevice));

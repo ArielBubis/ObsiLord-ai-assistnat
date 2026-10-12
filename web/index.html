@@ -2,25 +2,41 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Obsi-Lord</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <main>
-    <canvas id="face" width="64" height="48" aria-label="Obsi-Lord face"></canvas>
+    <header class="hud-header">
+      <h1 class="brand-title"><span aria-hidden="true">// </span>Obsi-Lord</h1>
+      <div class="status-badges">
+        <span id="link-badge" class="brutal-badge">Link: <span id="status">connecting</span></span>
+        <span id="state-badge" class="brutal-badge">idle</span>
+      </div>
+    </header>
+    <div class="viewport-frame">
+      <span class="viewport-label" aria-hidden="true">SYS.FEED // 64x48</span>
+      <div class="viewport-screen">
+        <canvas id="face" width="64" height="48" aria-label="Obsi-Lord face"></canvas>
+        <div class="scan-line" aria-hidden="true"></div>
+      </div>
+    </div>
     <section id="subtitles" aria-live="polite">
       <p id="user-line"></p>
       <p id="subtitle"></p>
     </section>
     <form id="chat" autocomplete="off">
-      <input id="chat-input" type="text" maxlength="2000" placeholder="Type a message" aria-label="Message">
+      <div class="input-wrapper">
+        <span class="input-prefix" aria-hidden="true">&gt;</span>
+        <input id="chat-input" type="text" maxlength="2000" placeholder="Type a message" aria-label="Message">
+      </div>
       <button id="chat-send" type="submit">Send</button>
       <button id="chat-talk" type="button">Hold to talk</button>
     </form>
     <p id="ptt-hint" data-mode="off"><span id="ptt-dot" aria-hidden="true"></span><span id="ptt-text"></span></p>
     <p id="error-line" role="alert"></p>
-    <p class="status">Status: <span id="status">connecting</span></p>
     <section id="debug" hidden>
       <div id="debug-states"></div>
       <label>mouth
@@ -42,9 +58,27 @@
     </section>
   </main>
   <script type="module">
-    import { start } from "/static/face.js";
+    import { start, getState, onStateChange } from "/static/face.js";
     import { initDebug } from "/static/debug.js";
     import "/static/ws.js";
+
+    // HUD readouts. The face state goes on body[data-status] (style.css runs
+    // the scan line from it) and into the state badge. The link badge text is
+    // whatever ws.js writes into #status; it is mirrored to body[data-link]
+    // for the badge color.
+    const stateBadge = document.getElementById("state-badge");
+    const linkStatus = document.getElementById("status");
+    function showState(name) {
+      document.body.dataset.status = name;
+      stateBadge.textContent = name;
+    }
+    function showLink() {
+      document.body.dataset.link = linkStatus.textContent.trim();
+    }
+    onStateChange((name) => showState(name));
+    new MutationObserver(showLink).observe(linkStatus, { childList: true, characterData: true, subtree: true });
+    showState(getState());
+    showLink();
 
     start(document.getElementById("face"));
     initDebug(document.getElementById("debug"));

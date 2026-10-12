@@ -17,11 +17,13 @@ import { FACE_CONFIG } from "./config.js";
 const W = FACE_CONFIG.logicalWidth;
 const H = FACE_CONFIG.logicalHeight;
 
+// bg matches the viewport frame in style.css; fg and rec are the HUD cyan
+// and magenta.
 const COLORS = {
-  bg: "#0b1020",
-  fg: "#8ef6e4",
+  bg: "#000000",
+  fg: "#00f0ff",
   tongue: "#ff6b8b",
-  rec: "#ff3b3b",
+  rec: "#ff0055",
 };
 
 const EYE_LEFT = { cx: 20, cy: 18 };
