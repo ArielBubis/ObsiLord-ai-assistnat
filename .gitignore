@@ -13,3 +13,6 @@ captures/
 /characters/
 # Bundled character: license unverified, see PLAN.md
 /web/ai-face/characters/default.face.glb
+/PLAN.md
+/CLAUDE.md
+/ARCHITECTURE.md
