@@ -306,6 +306,7 @@ OPTIONAL_KEYS = {
         "high_shelf_hz",
         "high_shelf_db",
     ],
+    "face": ["skin", "character"],
 }
 
 
@@ -353,6 +354,8 @@ def test_old_config_loads_with_defaults(
     assert s.stt.max_utterance_s == 30.0
     assert s.stt.min_utterance_ms == 300
     assert s.stt.download_root == "models"
+    assert s.face.skin == "dither"
+    assert s.face.character == ""
     lines = [r.getMessage() for r in caplog.records if "using defaults" in r.getMessage()]
     assert len(lines) == 1
     for section, keys in OPTIONAL_KEYS.items():
@@ -535,3 +538,57 @@ def test_rejects_unknown_language(tmp_path: Path, value: str) -> None:
     match = rf"stt\.language must be \"\" \(detect\) or a Whisper language code.*'{value}'"
     with pytest.raises(ValueError, match=match):
         _load(path, tmp_path)
+
+
+def test_face_skin_and_character_from_example(tmp_path: Path) -> None:
+    s = _load(EXAMPLE, tmp_path)
+    assert s.face.skin == "dither"
+    assert s.face.character == ""
+
+
+def test_accepts_code_skin(tmp_path: Path) -> None:
+    s = _load(_write_replaced(tmp_path, 'skin = "dither"', 'skin = "code"'), tmp_path)
+    assert s.face.skin == "code"
+
+
+@pytest.mark.parametrize("value", ["Dither", "3d", "", " dither", "pixel"])
+def test_rejects_unknown_skin(tmp_path: Path, value: str) -> None:
+    path = _write_replaced(tmp_path, 'skin = "dither"', f'skin = "{value}"')
+    match = rf"face\.skin must be one of \['dither', 'code'\], got '{value}'"
+    with pytest.raises(ValueError, match=match):
+        _load(path, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "match"),
+    [
+        ('skin = "dither"', "skin = 1", r"face\.skin expected str, got int"),
+        ('skin = "dither"', 'skin = ["code"]', r"face\.skin expected str, got list"),
+        ('character = ""', "character = true", r"face\.character expected str, got bool"),
+        ('character = ""', "character = 5", r"face\.character expected str, got int"),
+    ],
+)
+def test_rejects_wrong_face_types(tmp_path: Path, old: str, new: str, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        _load(_write_replaced(tmp_path, old, new), tmp_path)
+
+
+def test_character_file_not_checked_by_config(tmp_path: Path) -> None:
+    # The file check runs at app startup (face_character.py), not in load_settings.
+    path = _write_replaced(
+        tmp_path, 'character = ""', 'character = "characters/missing.face.glb"'
+    )
+    assert _load(path, tmp_path).face.character == "characters/missing.face.glb"
+
+
+def test_only_missing_face_keys_are_defaulted(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    text = _drop_keys(EXAMPLE.read_text(encoding="utf-8"), "face", ["skin", "character"])
+    path = tmp_path / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    with caplog.at_level("INFO", logger="obsilord.config"):
+        s = _load(path, tmp_path)
+    assert (s.face.skin, s.face.character) == ("dither", "")
+    [line] = [r.getMessage() for r in caplog.records if "using defaults" in r.getMessage()]
+    assert line.endswith(": face.character, face.skin")

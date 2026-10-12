@@ -1,15 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 
 import {
   FACE_CONFIG, FACE_CONFIG_URL, validThresholds, validateFaceConfig, loadFaceConfig,
-  getMouthThresholds, resetFaceConfig, AUDIO_CONFIG_URL, AUDIO_EQ_DEFAULTS, EQ_LIMITS,
+  getMouthThresholds, resetFaceConfig, FACE_SKINS, getFaceSkin, skinModulePath,
+  AUDIO_CONFIG_URL, AUDIO_EQ_DEFAULTS, EQ_LIMITS,
   validateAudioConfig, loadAudioSettings, fetchConfigJson, validateMaxUtterance,
   MAX_UTTERANCE_DEFAULT_S, MAX_UTTERANCE_LIMITS,
 } from "../../web/config.js";
 import { rmsToFrame } from "../../web/mouth.js";
 
-const good = { logical_width: 64, logical_height: 48, mouth_thresholds: [0.04, 0.12, 0.25] };
+// skin "code" differs from the fallback, so applying it is observable.
+const good = { logical_width: 64, logical_height: 48, mouth_thresholds: [0.04, 0.12, 0.25], skin: "code" };
 
 test("fallback thresholds mirror config.example.toml", () => {
   assert.deepEqual([...FACE_CONFIG.mouthThresholds], [0.05, 0.15, 0.3]);
@@ -51,9 +54,85 @@ test("validateFaceConfig warns on a different grid but keeps valid thresholds", 
 
 test("validateFaceConfig rejects non-objects", () => {
   for (const raw of [null, undefined, 5, "x", [1, 2, 3]]) {
-    const { thresholds, warnings } = validateFaceConfig(raw);
+    const { thresholds, skin, warnings } = validateFaceConfig(raw);
     assert.equal(thresholds, null);
+    assert.equal(skin, "dither");
     assert.equal(warnings.length, 1);
+  }
+});
+
+test("fallback skin is dither (mirrors config.example.toml), allowed skins are dither and code", () => {
+  assert.equal(FACE_CONFIG.skin, "dither");
+  assert.deepEqual([...FACE_SKINS], ["dither", "code"]);
+  assert.ok(Object.isFrozen(FACE_SKINS));
+});
+
+test("validateFaceConfig accepts each allowed skin without warnings", () => {
+  for (const name of FACE_SKINS) {
+    const { thresholds, skin, warnings } = validateFaceConfig({ ...good, skin: name });
+    assert.equal(skin, name);
+    assert.deepEqual([...thresholds], good.mouth_thresholds);
+    assert.deepEqual(warnings, []);
+  }
+});
+
+test("validateFaceConfig: a missing skin gives the fallback and one warning", () => {
+  const noSkin = { ...good };
+  delete noSkin.skin;
+  const { thresholds, skin, warnings } = validateFaceConfig(noSkin);
+  assert.equal(skin, "dither");
+  assert.deepEqual([...thresholds], good.mouth_thresholds);
+  assert.deepEqual(warnings, ['face config: invalid skin undefined, using fallback "dither"']);
+});
+
+test("validateFaceConfig: an unknown skin name gives the fallback and one warning", () => {
+  for (const name of ["pixel", "Dither", "CODE", " code", "3d", ""]) {
+    const { thresholds, skin, warnings } = validateFaceConfig({ ...good, skin: name });
+    assert.equal(skin, "dither", JSON.stringify(name));
+    assert.deepEqual([...thresholds], good.mouth_thresholds);
+    assert.deepEqual(warnings, [`face config: invalid skin ${JSON.stringify(name)}, using fallback "dither"`]);
+  }
+});
+
+test("validateFaceConfig: a skin of the wrong type gives the fallback and one warning", () => {
+  for (const value of [null, 0, 1, true, ["code"], { name: "code" }]) {
+    const { skin, warnings } = validateFaceConfig({ ...good, skin: value });
+    assert.equal(skin, "dither", JSON.stringify(value));
+    assert.deepEqual(warnings, [`face config: invalid skin ${JSON.stringify(value)}, using fallback "dither"`]);
+  }
+});
+
+test("validateFaceConfig checks skin and thresholds independently", () => {
+  const both = validateFaceConfig({ ...good, mouth_thresholds: [0.3, 0.2, 0.1], skin: "nope" });
+  assert.equal(both.thresholds, null);
+  assert.equal(both.skin, "dither");
+  assert.equal(both.warnings.length, 2);
+  assert.match(both.warnings[0], /mouth_thresholds/);
+  assert.match(both.warnings[1], /skin "nope"/);
+  const skinOnly = validateFaceConfig({ ...good, mouth_thresholds: [0.3, 0.2, 0.1] });
+  assert.equal(skinOnly.thresholds, null);
+  assert.equal(skinOnly.skin, "code");
+  assert.equal(skinOnly.warnings.length, 1);
+});
+
+test("validateFaceConfig uses the given fallback skin", () => {
+  const fallback = { ...FACE_CONFIG, skin: "code" };
+  assert.equal(validateFaceConfig({ ...good, skin: "x" }, fallback).skin, "code");
+  assert.equal(validateFaceConfig(null, fallback).skin, "code");
+});
+
+test("skinModulePath maps each skin to its module next to web/config.js", () => {
+  assert.equal(skinModulePath("dither"), "./ai-face/obsi-lord-skin.js");
+  assert.equal(skinModulePath("code"), "./skin_code.js");
+  const webDir = new URL("../../web/", import.meta.url);
+  for (const name of FACE_SKINS) {
+    assert.ok(existsSync(new URL(skinModulePath(name), webDir)), name);
+  }
+});
+
+test("skinModulePath gives the fallback skin's module for unknown names", () => {
+  for (const name of ["pixel", "", undefined, null, 3, "toString", "__proto__"]) {
+    assert.equal(skinModulePath(name), "./ai-face/obsi-lord-skin.js", String(name));
   }
 });
 
@@ -76,6 +155,7 @@ test("loadFaceConfig applies valid server thresholds and rmsToFrame uses them", 
   assert.deepEqual(fetchFn.calls, [FACE_CONFIG_URL]);
   assert.deepEqual([...t], good.mouth_thresholds);
   assert.equal(getMouthThresholds(), t);
+  assert.equal(getFaceSkin(), "code");
   assert.deepEqual(warnings, []);
   // 0.045 is frame 1 with the server cutoffs, frame 0 with the fallback.
   assert.equal(rmsToFrame(0.045), 1);
@@ -97,6 +177,43 @@ test("loadFaceConfig keeps the fallback and warns once on failures", async () =>
     assert.equal(t, FACE_CONFIG.mouthThresholds);
     assert.equal(getMouthThresholds(), FACE_CONFIG.mouthThresholds);
     assert.equal(warnings.length, 1, JSON.stringify(warnings));
+  }
+  resetFaceConfig();
+});
+
+test("getFaceSkin is the fallback until a valid skin loads, and resetFaceConfig restores it", async () => {
+  resetFaceConfig();
+  assert.equal(getFaceSkin(), "dither");
+  await loadFaceConfig(fakeFetch(good), () => {});
+  assert.equal(getFaceSkin(), "code");
+  resetFaceConfig();
+  assert.equal(getFaceSkin(), "dither");
+  assert.equal(getMouthThresholds(), FACE_CONFIG.mouthThresholds);
+});
+
+test("loadFaceConfig keeps the fallback skin when the fetch fails", async () => {
+  for (const fetchFn of [
+    fakeFetch(null, { throws: true }), fakeFetch(good, { ok: false, status: 500 }),
+    fakeFetch(() => { throw new SyntaxError("bad json"); }),
+  ]) {
+    resetFaceConfig();
+    const warnings = [];
+    await loadFaceConfig(fetchFn, (w) => warnings.push(w));
+    assert.equal(getFaceSkin(), "dither");
+    assert.equal(warnings.length, 1, JSON.stringify(warnings));
+  }
+  resetFaceConfig();
+});
+
+test("loadFaceConfig: an invalid skin gives the fallback, keeps valid thresholds, warns once", async () => {
+  for (const skin of [undefined, "pixel", 7]) {
+    resetFaceConfig();
+    const warnings = [];
+    const t = await loadFaceConfig(fakeFetch({ ...good, skin }), (w) => warnings.push(w));
+    assert.equal(getFaceSkin(), "dither");
+    assert.deepEqual([...t], good.mouth_thresholds);
+    assert.equal(warnings.length, 1, JSON.stringify(warnings));
+    assert.match(warnings[0], /invalid skin/);
   }
   resetFaceConfig();
 });

@@ -17,7 +17,7 @@
       </div>
     </header>
     <div class="viewport-frame">
-      <span class="viewport-label" aria-hidden="true">SYS.FEED // 64x48</span>
+      <span id="feed-label" class="viewport-label" aria-hidden="true">SYS.FEED</span>
       <div class="viewport-screen">
         <canvas id="face" width="64" height="48" aria-label="Obsi-Lord face"></canvas>
         <div class="scan-line" aria-hidden="true"></div>
@@ -58,7 +58,7 @@
     </section>
   </main>
   <script type="module">
-    import { start, getState, onStateChange } from "/static/face.js";
+    import { start, getState, onStateChange, skinReady } from "/static/face.js";
     import { initDebug } from "/static/debug.js";
     import "/static/ws.js";
 
@@ -79,6 +79,10 @@
     new MutationObserver(showLink).observe(linkStatus, { childList: true, characterData: true, subtree: true });
     showState(getState());
     showLink();
+    // The feed tag names the skin once face.js has loaded it.
+    skinReady.then((skin) => {
+      document.getElementById("feed-label").textContent = `SYS.FEED // ${skin === "dither" ? "3D" : "64x48"}`;
+    });
 
     start(document.getElementById("face"));
     initDebug(document.getElementById("debug"));

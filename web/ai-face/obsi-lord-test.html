@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skin test</title>
+<style>
+  /* A stand-in for obsi-lord's HUD: grid page background, solid card, 4:3 face box. */
+  :root { --void: #090a0f; --panel: #12151d; --cyan: #00f0ff; --text: #e2e8f0; --dim: #8a94a6; --line: #2a3140; }
+  * { box-sizing: border-box; margin: 0; }
+  html { height: 100%; }
+  body {
+    min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 24px 12px;
+    background-color: var(--void); color: var(--text); font: 13px/1.4 system-ui, sans-serif;
+    background-image: linear-gradient(to right, rgba(0, 240, 255, .07) 2px, transparent 2px),
+                      linear-gradient(to bottom, rgba(0, 240, 255, .07) 2px, transparent 2px);
+    background-size: 48px 48px;
+  }
+  main { width: min(560px, 100%); padding: 16px; background: var(--panel); border: 3px solid #000; outline: 2px solid var(--cyan); display: grid; gap: 12px; }
+  .viewport-frame { position: relative; border: 3px solid #000; background: #000; }
+  .viewport-screen { position: relative; display: flex; justify-content: center; overflow: hidden; }
+  #face { display: block; width: 100%; aspect-ratio: 4 / 3; height: auto; image-rendering: pixelated; }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  button { font: inherit; color: var(--dim); background: none; border: 1px solid var(--line); padding: 5px 9px; border-radius: 2px; cursor: pointer; }
+  button:hover { color: var(--text); }
+  button[aria-pressed="true"] { background: var(--text); color: #000; }
+  button:focus-visible { outline: 1px solid var(--cyan); outline-offset: 2px; }
+  .test { border-top: 1px dashed var(--line); padding-top: 12px; }
+  .note { color: var(--dim); font-size: 12px; min-height: 1.4em; }
+  .note.error { color: #ff6b8b; }
+  pre { color: var(--dim); font-size: 11px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<main>
+  <div class="viewport-frame">
+    <div class="viewport-screen">
+      <canvas id="face" width="64" height="48" aria-label="Face"></canvas>
+    </div>
+  </div>
+  <div class="bar" id="states" aria-label="State"></div>
+  <!-- Test page only: obsi-lord picks the character from config.toml. -->
+  <div class="bar test">
+    <button id="previewBtn" type="button">Preview a .glb</button>
+    <input id="previewFile" type="file" accept=".glb,.vrm" hidden>
+    <span class="note" id="note" aria-live="polite"></span>
+  </div>
+  <pre id="readout"></pre>
+</main>
+<script type="module">
+// Stands in for obsi-lord's face.js: builds frames and calls skin.draw(ctx, frame)
+// only when the frame changes.
+import * as skin from "./obsi-lord-skin.js";
+
+const q = new URLSearchParams(location.search);
+if (q.get("character")) skin.options.character = q.get("character");
+if (q.get("frameEyes")) skin.options.useFrameEyes = true;
+if (q.get("backdrop")) skin.options.backdrop = q.get("backdrop");
+
+const STATES = ["idle", "listening", "thinking", "speaking", "looking"];
+const canvas = document.getElementById("face");
+const ctx = canvas.getContext("2d", { alpha: false });
+const noteEl = document.getElementById("note");
+let state = q.get("state") || "idle";
+let auto = !q.get("state");
+let enteredAt = performance.now();
+let lastKey = "";
+
+const statesEl = document.getElementById("states");
+const buttons = STATES.map((s) => {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.textContent = s;
+  b.addEventListener("click", () => { auto = false; setState(s); });
+  statesEl.append(b);
+  return b;
+});
+const autoBtn = document.createElement("button");
+autoBtn.type = "button";
+autoBtn.textContent = "cycle";
+autoBtn.addEventListener("click", () => { auto = !auto; sync(); });
+statesEl.append(autoBtn);
+function setState(s) { state = s; enteredAt = performance.now(); sync(); }
+function sync() {
+  buttons.forEach((b) => b.setAttribute("aria-pressed", String(b.textContent === state)));
+  autoBtn.setAttribute("aria-pressed", String(auto));
+}
+sync();
+
+function note(text, isError = false) { noteEl.textContent = text; noteEl.classList.toggle("error", isError); }
+document.getElementById("previewBtn").addEventListener("click", () => document.getElementById("previewFile").click());
+document.getElementById("previewFile").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  try {
+    await skin.setCharacter(url);
+    note(`Previewing ${file.name}. Nothing is saved.`);
+  } catch (err) {
+    note(err.message, true);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+});
+
+function tick(now) {
+  const since = now - enteredAt;
+  if (auto && since > 3500) setState(STATES[(STATES.indexOf(state) + 1) % STATES.length]);
+  const talk = state === "speaking" ? Math.max(0, Math.round(1.5 + 1.6 * Math.sin(now / 90) * Math.sin(now / 410))) : 0;
+  const frame = {
+    state,
+    blink: "open",
+    glance: { dx: 0, dy: 0 },
+    bobY: 0,
+    mouth: Math.min(3, talk),
+    shutter: state === "looking" ? Math.max(0, 1 - since / 300) : 0,
+    dots: state === "thinking" ? Math.floor(since / 400) % 4 : 0,
+  };
+  const key = JSON.stringify(frame);
+  if (key !== lastKey) {
+    lastKey = key;
+    skin.draw(ctx, frame);
+    document.getElementById("readout").textContent = key;
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+window.ready = "ok";
+</script>
+</body>
+</html>

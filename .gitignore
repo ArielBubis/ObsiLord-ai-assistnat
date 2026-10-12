@@ -10,3 +10,6 @@ models/
 voices/
 captures/
 *.egg-info/
+/characters/
+# Bundled character: license unverified, see PLAN.md
+/web/ai-face/characters/default.face.glb

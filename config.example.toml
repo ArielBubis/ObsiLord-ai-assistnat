@@ -86,6 +86,15 @@ max_per_hour = 30
 logical_width = 64
 logical_height = 48
 mouth_thresholds = [0.05, 0.15, 0.30]   # RMS cutoffs for mouth frames 1, 2, 3
+skin = "dither"   # "dither" (3D face, WebGL) or "code" (8-bit face)
+# Character for the dither skin: a .face.glb from the face creator, or a plain
+# .glb or .vrm. Path relative to the repo root (or absolute). Empty uses the
+# bundled character (web/ai-face/characters/default.face.glb). The file is
+# checked at startup: a missing file, one that is not binary glTF 2.0, one that
+# uses Draco, meshopt or KTX2 compression, or one that links to external files
+# stops startup with an error. A characters/ folder in the repo root is
+# gitignored, for your own files. Restart the server after changing this.
+character = ""
 
 [audio]
 push_to_talk_key = "Space"

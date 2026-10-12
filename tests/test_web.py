@@ -15,6 +15,19 @@ from obsilord.config import REPO_ROOT, load_settings
 
 WEB_DIR = REPO_ROOT / "web"
 JS_FILES = sorted(p.name for p in WEB_DIR.glob("*.js"))
+# Gitignored (license unverified, see PLAN.md): absent in a fresh clone.
+BUNDLED_CHARACTER = WEB_DIR / "ai-face" / "characters" / "default.face.glb"
+# ES modules the dither skin imports (web/ai-face/, three.js vendored there).
+AI_FACE_MODULES = [
+    "obsi-lord-skin.js",
+    "ai-face.js",
+    "render.js",
+    "animate.js",
+    "normalize.js",
+    "vendor/three/build/three.module.min.js",
+    "vendor/three/examples/jsm/loaders/GLTFLoader.js",
+    "vendor/three/examples/jsm/utils/BufferGeometryUtils.js",
+]
 
 
 @pytest.fixture()
@@ -50,3 +63,22 @@ def test_css_served_with_css_mime(client: TestClient) -> None:
     resp = client.get("/static/style.css")
     assert resp.status_code == 200
     assert resp.headers["content-type"].split(";")[0].strip() == "text/css"
+
+
+@pytest.mark.parametrize("name", AI_FACE_MODULES)
+def test_ai_face_modules_served_with_js_mime(client: TestClient, name: str) -> None:
+    resp = client.get(f"/static/ai-face/{name}")
+    assert resp.status_code == 200
+    ctype = resp.headers["content-type"].split(";")[0].strip()
+    assert ctype in ("text/javascript", "application/javascript"), ctype
+
+
+@pytest.mark.skipif(
+    not BUNDLED_CHARACTER.is_file(),
+    reason="web/ai-face/characters/default.face.glb is absent (gitignored, license unverified)",
+)
+def test_bundled_character_served(client: TestClient) -> None:
+    # The dither skin's fallback when /face/character.glb answers 404.
+    resp = client.get("/static/ai-face/characters/default.face.glb")
+    assert resp.status_code == 200
+    assert resp.content[:4] == b"glTF"

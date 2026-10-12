@@ -1,11 +1,14 @@
-"""Test doubles for the LLM, STT, and TTS interfaces. No network, no model."""
+"""Test doubles for the LLM, STT, and TTS interfaces, and a minimal .glb builder.
+No network, no model."""
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
+import struct
 import threading
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from obsilord.config import Settings
 from obsilord.llm.base import Done, LLMEvent, Message, TextDelta, ToolSpec, UsageUpdate
@@ -19,6 +22,22 @@ def text_only(settings: Settings) -> Settings:
         tts=dataclasses.replace(settings.tts, voice=""),
         stt=dataclasses.replace(settings.stt, model=""),
     )
+
+
+GLB_CHUNK_JSON = 0x4E4F534A
+GLB_CHUNK_BIN = 0x004E4942
+
+
+def make_glb_raw(raw: bytes, version: int = 2, chunk_type: int = GLB_CHUNK_JSON) -> bytes:
+    """A binary glTF file: 12-byte header plus one chunk holding raw (padded to 4)."""
+    raw += b" " * (-len(raw) % 4)
+    body = struct.pack("<II", len(raw), chunk_type) + raw
+    return b"glTF" + struct.pack("<II", version, 12 + len(body)) + body
+
+
+def make_glb(doc: Any) -> bytes:
+    """A minimal binary glTF 2.0 file whose JSON chunk is doc."""
+    return make_glb_raw(json.dumps(doc).encode("utf-8"))
 
 
 class FakeLLM:

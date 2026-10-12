@@ -1,7 +1,8 @@
 /* Obsi-Lord HUD: dark neo-brutalist. Hard 3px black edges, zero-blur offset
    shadows, double outlines (border plus outline), yellow and cyan accents.
-   The only continuous motion is the scan line, and it runs only while the
-   face is listening or thinking, so an idle tab stays cheap. */
+   The only continuous CSS motion is the scan line, and it runs only while
+   the face is listening or thinking. (The dither skin keeps its own WebGL
+   animation loop running in every state.) */
 
 /* JetBrains Mono v2.304, SIL OFL 1.1 (see PLAN.md). Two weights only. */
 @font-face {
@@ -176,11 +177,16 @@ body[data-status]:not([data-status="idle"]) #state-badge {
   letter-spacing: 0.08em;
 }
 
+/* The dither skin adds an absolutely positioned div (position:absolute;
+   inset:0) after the scan line and hides #face, which keeps sizing the box.
+   isolation keeps the scan line's z-index inside the screen, so it stays
+   above that div without rising over the feed tag. */
 .viewport-screen {
   position: relative;
   display: flex;
   justify-content: center;
   overflow: hidden;
+  isolation: isolate;
 }
 
 /* 64x48 logical canvas. face.js sets an integer CSS size (64*n by 48*n). */
@@ -197,6 +203,7 @@ body[data-status]:not([data-status="idle"]) #state-badge {
   display: none;
   position: absolute;
   inset: 0;
+  z-index: 1;
   pointer-events: none;
   background: linear-gradient(
     to bottom,

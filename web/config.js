@@ -3,24 +3,47 @@
 // are the fallback if the fetch fails or the response is invalid, and they
 // mirror config.example.toml.
 //
-// The 64x48 grid is fixed in JS (the skin is drawn for it); a different size
-// from the server only produces a warning. Only the mouth thresholds are
-// taken from the server.
+// The 64x48 grid is fixed in JS (the code skin is drawn for it); a different
+// size from the server only produces a warning. The mouth thresholds and the
+// skin are taken from the server.
 
 export const FACE_CONFIG = Object.freeze({
   logicalWidth: 64,
   logicalHeight: 48,
   // Playback RMS cutoffs for mouth frames 1, 2, 3 (fallback).
   mouthThresholds: Object.freeze([0.05, 0.15, 0.3]),
+  // Face skin (fallback): "dither" is the 3D face, "code" the 8-bit face.
+  skin: "dither",
 });
 
 export const FACE_CONFIG_URL = "/config/face";
 
+// Allowed [face] skin values.
+export const FACE_SKINS = Object.freeze(["dither", "code"]);
+
+// Module face.js imports for each skin. Relative to web/, where face.js and
+// this file live.
+const SKIN_MODULES = Object.freeze({
+  dither: "./ai-face/obsi-lord-skin.js",
+  code: "./skin_code.js",
+});
+
+// Pure. Unknown names give the fallback skin's module.
+export function skinModulePath(name) {
+  return Object.hasOwn(SKIN_MODULES, name) ? SKIN_MODULES[name] : SKIN_MODULES[FACE_CONFIG.skin];
+}
+
 let activeThresholds = FACE_CONFIG.mouthThresholds;
+let activeSkin = FACE_CONFIG.skin;
 
 // Thresholds in use: from the server if loaded and valid, else the fallback.
 export function getMouthThresholds() {
   return activeThresholds;
+}
+
+// Skin in use: from the server if loaded and valid, else the fallback.
+export function getFaceSkin() {
+  return activeSkin;
 }
 
 // Three strictly increasing finite numbers in (0, 1].
@@ -35,12 +58,13 @@ export function validThresholds(t) {
 }
 
 // Checks a /config/face response. Pure.
-// Returns { thresholds, warnings }: thresholds is a frozen copy of valid
-// server values or null (use the fallback); warnings lists problems to log.
+// Returns { thresholds, skin, warnings }: thresholds is a frozen copy of valid
+// server values or null (use the fallback); skin is the server value if it is
+// one of FACE_SKINS, else fallback.skin; warnings lists problems to log.
 export function validateFaceConfig(raw, fallback = FACE_CONFIG) {
   const warnings = [];
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return { thresholds: null, warnings: ["face config: response is not an object"] };
+    return { thresholds: null, skin: fallback.skin, warnings: ["face config: response is not an object"] };
   }
   let thresholds = null;
   if (validThresholds(raw.mouth_thresholds)) {
@@ -56,7 +80,13 @@ export function validateFaceConfig(raw, fallback = FACE_CONFIG) {
         + `${fallback.logicalWidth}x${fallback.logicalHeight}, keeping ${fallback.logicalWidth}x${fallback.logicalHeight}`,
     );
   }
-  return { thresholds, warnings };
+  let skin = fallback.skin;
+  if (FACE_SKINS.includes(raw.skin)) {
+    skin = raw.skin;
+  } else {
+    warnings.push(`face config: invalid skin ${JSON.stringify(raw.skin)}, using fallback "${fallback.skin}"`);
+  }
+  return { thresholds, skin, warnings };
 }
 
 // Shared by the config loaders: GET url and parse JSON. Throws on network
@@ -71,8 +101,8 @@ function errText(err) {
   return err && err.message ? err.message : String(err);
 }
 
-// Fetches the face config once and applies valid thresholds. Never throws.
-// Returns the thresholds in use afterwards.
+// Fetches the face config once and applies valid thresholds and the skin
+// (getFaceSkin()). Never throws. Returns the thresholds in use afterwards.
 export async function loadFaceConfig(fetchFn = globalThis.fetch, warn = console.warn) {
   let raw;
   try {
@@ -81,15 +111,17 @@ export async function loadFaceConfig(fetchFn = globalThis.fetch, warn = console.
     warn(`face config: fetch failed (${errText(err)}), using fallback`);
     return activeThresholds;
   }
-  const { thresholds, warnings } = validateFaceConfig(raw);
+  const { thresholds, skin, warnings } = validateFaceConfig(raw);
   if (warnings.length > 0) warn(warnings.join("; "));
   if (thresholds) activeThresholds = thresholds;
+  activeSkin = skin;
   return activeThresholds;
 }
 
-// Test helper: back to the fallback thresholds.
+// Test helper: back to the fallback thresholds and skin.
 export function resetFaceConfig() {
   activeThresholds = FACE_CONFIG.mouthThresholds;
+  activeSkin = FACE_CONFIG.skin;
 }
 
 // Playback EQ, served from the [tts] section of config.toml (flat keys

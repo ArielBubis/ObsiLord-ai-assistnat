@@ -132,11 +132,19 @@ class CameraSettings:
     max_per_hour: int
 
 
-@dataclass(frozen=True)
+FACE_SKINS = ("dither", "code")
+
+
+@dataclass(frozen=True, kw_only=True)
 class FaceSettings:
     logical_width: int
     logical_height: int
     mouth_thresholds: tuple[float, ...]
+    # One of FACE_SKINS: "dither" (3D face, WebGL) or "code" (8-bit face).
+    skin: str = "dither"  # added in Phase 8
+    # Character file (.face.glb, .glb or .vrm), relative to the repo root (or
+    # absolute). Checked by app startup. Empty means the bundled character.
+    character: str = ""  # added in Phase 8
 
 
 @dataclass(frozen=True)
@@ -354,6 +362,14 @@ def _check_mouth_thresholds(values: tuple[float, ...]) -> None:
         raise ValueError("config: face.mouth_thresholds must be strictly increasing")
 
 
+def _check_face_skin(face: FaceSettings) -> None:
+    """face.skin is one of FACE_SKINS. The character file is checked by app startup."""
+    if face.skin not in FACE_SKINS:
+        raise ValueError(
+            f"config: face.skin must be one of {list(FACE_SKINS)}, got {face.skin!r}"
+        )
+
+
 def default_config_path() -> Path:
     """config.toml in the repo root, falling back to config.example.toml."""
     path = REPO_ROOT / "config.toml"
@@ -407,6 +423,7 @@ def load_settings(
     _check_tts_voice_controls(settings.tts)
     _check_stt(settings.stt)
     _check_mouth_thresholds(settings.face.mouth_thresholds)
+    _check_face_skin(settings.face)
     if defaulted:
         log.info(
             "config: %s not set in %s, using defaults (copy them from "

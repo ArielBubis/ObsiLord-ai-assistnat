@@ -251,18 +251,22 @@ def test_face_config_endpoint(client: TestClient) -> None:
         "logical_width": 64,
         "logical_height": 48,
         "mouth_thresholds": [0.05, 0.15, 0.30],
+        "skin": "dither",
     }
 
 
 def test_face_config_follows_settings(tmp_path: Path) -> None:
     base = _settings(tmp_path)
     settings = dataclasses.replace(
-        base, face=dataclasses.replace(base.face, mouth_thresholds=(0.1, 0.2, 0.4))
+        base,
+        face=dataclasses.replace(base.face, mouth_thresholds=(0.1, 0.2, 0.4), skin="code"),
     )
     client = TestClient(create_app(settings, llm=FakeLLM(["x"])))
     body = client.get("/config/face").json()
     assert body["mouth_thresholds"] == [0.1, 0.2, 0.4]
-    assert set(body) == {"logical_width", "logical_height", "mouth_thresholds"}
+    assert body["skin"] == "code"
+    # The character path is not exposed: the page loads /face/character.glb.
+    assert set(body) == {"logical_width", "logical_height", "mouth_thresholds", "skin"}
 
 
 def test_audio_config_endpoint(client: TestClient) -> None:

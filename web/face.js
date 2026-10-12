@@ -2,12 +2,15 @@
 // value, builds a frame description, and hands it to the skin. The idle loop
 // runs under every state. The skin is only called when the frame changes, so
 // a static face costs one cheap comparison per animation frame.
+//
+// The skin module ([face] skin: "dither" or "code") is imported once the face
+// config has loaded. The loop runs from start(); frames are drawn once the
+// skin is in.
 
-import { FACE_CONFIG, loadFaceConfig } from "./config.js";
+import { FACE_CONFIG, loadFaceConfig, getFaceSkin, skinModulePath } from "./config.js";
 import { createStateMachine, isValidState } from "./state.js";
 import { createIdle, buildFrame, frameKey, clampMouth, STILL_IDLE } from "./idle.js";
 import { createMouthEnvelope, createLevelSmoother, rmsToFrame, mouthSource } from "./mouth.js";
-import * as skin from "./skin_code.js";
 
 const machine = createStateMachine("idle", performance.now());
 const idle = createIdle(Math.random);
@@ -26,6 +29,16 @@ let idleEnabled = true;
 let ctx = null;
 let lastKey = "";
 let started = false;
+let skin = null;
+let resolveSkin;
+let drawErrorLogged = false;
+
+// Resolves with the name of the skin in use ("dither" or "code") once its
+// module has loaded, before its first draw. Never rejects (stays pending if
+// no skin loads).
+export const skinReady = new Promise((resolve) => {
+  resolveSkin = resolve;
+});
 
 // Returns true if the name was valid. Unknown names are logged and ignored.
 // enteredAgoMs backdates the state entry; only the debug panel uses it, to
@@ -148,19 +161,56 @@ function tick(now) {
     sinceStateMs: now - machine.enteredAt,
   });
   const key = frameKey(frame);
-  if (key !== lastKey) {
+  // lastKey stays "" until the skin is in, so its first frame is drawn.
+  // A draw that throws must not stop the loop. lastKey is still updated, so
+  // the same frame is not retried every animation frame, and the next
+  // different frame is drawn as usual. Only the first error is logged.
+  if (skin && key !== lastKey) {
     lastKey = key;
-    skin.draw(ctx, frame);
+    try {
+      skin.draw(ctx, frame);
+    } catch (err) {
+      if (!drawErrorLogged) {
+        drawErrorLogged = true;
+        console.error("face: the skin failed to draw a frame (later errors are not logged)", err);
+      }
+    }
   }
   requestAnimationFrame(tick);
+}
+
+// Imports one skin module. Returns null (and logs why) if it does not load.
+async function importSkin(name) {
+  try {
+    return await import(skinModulePath(name));
+  } catch (err) {
+    console.error(`face: the ${name} skin did not load`, err);
+    return null;
+  }
+}
+
+// Mouth thresholds and skin from the server (the fallbacks apply if that
+// fails), then the skin module. A dither skin module that does not load (the
+// adapter handles WebGL failures itself) falls back to the code skin. Never
+// throws.
+async function loadSkin() {
+  await loadFaceConfig();
+  let name = getFaceSkin();
+  let mod = await importSkin(name);
+  if (!mod && name !== "code") {
+    console.warn("face: using the code skin instead");
+    name = "code";
+    mod = await importSkin(name);
+  }
+  if (!mod) return;
+  skin = mod;
+  resolveSkin(name);
 }
 
 export function start(canvas) {
   if (started) return;
   started = true;
-  // Mouth thresholds from the server; the fallback applies until (or unless)
-  // this succeeds.
-  loadFaceConfig();
+  loadSkin();
   canvas.width = FACE_CONFIG.logicalWidth;
   canvas.height = FACE_CONFIG.logicalHeight;
   ctx = canvas.getContext("2d", { alpha: false });

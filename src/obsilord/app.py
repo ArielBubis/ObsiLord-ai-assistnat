@@ -29,6 +29,10 @@ configured the app still starts and turns return an error. If [tts] voice is
 empty, TTS is disabled and replies are text only; if [stt] model is empty,
 voice input is disabled. A configured voice or STT model that fails to load
 (missing file, unknown speaker, failed download) stops startup with an error.
+A configured [face] character file is checked first (face_character.py:
+missing, not binary glTF 2.0, compressed, or linking external files), and a
+failed check also stops startup with an error. GET /face/character.glb serves
+it, or answers 404 when the key is empty.
 """
 
 from __future__ import annotations
@@ -37,13 +41,15 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Coroutine
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from obsilord.config import Settings
+from obsilord.face_character import check_character
 from obsilord.llm.base import LLMClient, Message
 from obsilord.pipeline import MSG_NOT_CAUGHT, run_text_turn, run_voice_turn
 from obsilord.stt.base import SAMPLE_RATE as STT_SAMPLE_RATE
@@ -76,6 +82,22 @@ _watchdog_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
 def msg_too_long_audio(max_utterance_s: float) -> str:
     return f"Recording too long, using the first {max_utterance_s:g} s."
+
+
+def _checked_character(settings: Settings) -> Path | None:
+    """The [face] character file after check_character, or None when the key is
+    empty (the page then shows the bundled character)."""
+    character = settings.face.character.strip()
+    if not character:
+        log.info("face: [face] character is empty, the page shows the bundled character")
+        return None
+    path = settings.repo_root / character
+    try:
+        check_character(path)
+    except ValueError as exc:
+        log.error('%s; set [face] character = "" to use the bundled character', exc)
+        raise
+    return path
 
 
 def _default_llm(settings: Settings) -> LLMClient | None:
@@ -151,6 +173,8 @@ def create_app(
     web_dir = settings.repo_root / "web"
     index_path = web_dir / "index.html"
 
+    # Cheap file check first, so a bad character fails before any model loads.
+    character_path = _checked_character(settings)
     if llm is None:
         llm = _default_llm(settings)
     if tts is None:
@@ -197,7 +221,22 @@ def create_app(
             "logical_width": face.logical_width,
             "logical_height": face.logical_height,
             "mouth_thresholds": list(face.mouth_thresholds),
+            "skin": face.skin,
         }
+
+    @app.get("/face/character.glb", include_in_schema=False)
+    async def face_character() -> FileResponse:
+        # 404 when [face] character is empty (or the file was removed after
+        # startup); the dither skin then shows its bundled character.
+        if character_path is None or not character_path.is_file():
+            raise HTTPException(status_code=404)
+        # no-cache: the URL stays the same when the setting changes, so the
+        # browser must revalidate (ETag) instead of reusing a stale copy.
+        return FileResponse(
+            character_path,
+            media_type="model/gltf-binary",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @app.get("/config/audio", include_in_schema=False)
     async def audio_config() -> dict[str, Any]:
