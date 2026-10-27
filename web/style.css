@@ -1,10 +1,54 @@
-/* Obsi-Lord HUD: dark neo-brutalist. Hard 3px black edges, zero-blur offset
-   shadows, double outlines (border plus outline), yellow and cyan accents.
-   The only continuous CSS motion is the scan line, and it runs only while
-   the face is listening or thinking. (The dither skin keeps its own WebGL
-   animation loop running in every state.) */
+/* Hallmark · shape: app screen · genre: atmospheric · theme: Ribbon (deal 1/3, seed local-voice-assistant-console-63b6·nosalt·2026-10-27·r0) · redesign: full
+ * nav: a top bar as wide as the face column, the wordmark left and two live readouts right · signature: the face held in a machined panel, its recessed bed ringed in amber while listening or thinking · states: idle, listening, thinking, speaking, looking, connecting, connected, disconnected, recording, opening, disabled, error · ribbon: two-in-the-morning
+ * axes: dark/grotesk-sans/chromatic-amber · posture: committed · contrast: pass · v2.0.0 */
+/* Hallmark · pre-emit critique: P4 H5 E4 S4 R5 V5 · weakest: S, a top bar and a message row are every chat tool's furniture; the readouts carry live state instead of links and the controls are machined parts of the same instrument as the face */
+/* Hallmark · reworded "SYS.FEED // 3D" and "SYS.FEED // 64x48" to "3D face" and "8-bit face", "SYS.FEED" to "Face" · 67 names the tracked-caps label */
+/* Hallmark · reworded "YOU" to "You" · 67 names the capitals label */
+/* Hallmark · reworded "// Obsi-Lord" to "Obsi-Lord" · 63 names the glyph ornament before the wordmark */
+/* Hallmark · waive 39b · the 21px controls are the disk render of web/index.html, whose /static/ stylesheet only the FastAPI app serves · the live render at 127.0.0.1:8765 measures the input, Send and Hold to talk at 48px */
+/* Hallmark · dismissed render · the fallback face is the same disk render of web/index.html with no /static/ route; the live render loads all five faces */
+/* Hallmark · finish-review: subagent · fix · 6 findings · 5 resolved 1 partial (the bed's recess reads at its rim but not over the dither skin's black backdrop) · gap: none */
+/* Hallmark · answered F4 · Hold to talk is the theme's metal part, a top-lit grey with no accent; only Send carries the amber at rest, and the talk pill lights only while the mic is live */
+/* Hallmark · dropped the "[ ]" around the readouts, the "[!] " before errors and the ">" before the message field · 63 names the glyph ornaments */
 
-/* JetBrains Mono v2.304, SIL OFL 1.1 (see planning/PLAN.md). Two weights only. */
+@import url("./tokens.css");
+@import url("./base.css");
+
+/* Self-hosted, so the page makes no third-party requests (see planning/PLAN.md).
+   Instrument Sans and Figtree: fontsource 5.3.0 latin builds, SIL OFL 1.1.
+   JetBrains Mono v2.304, SIL OFL 1.1, only for the debug config readout. */
+@font-face {
+  font-family: "Instrument Sans";
+  src: url("fonts/InstrumentSans-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Instrument Sans";
+  src: url("fonts/InstrumentSans-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Figtree";
+  src: url("fonts/Figtree-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Figtree";
+  src: url("fonts/Figtree-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
 @font-face {
   font-family: "JetBrains Mono";
   src: url("fonts/JetBrainsMono-Regular.woff2") format("woff2");
@@ -13,180 +57,137 @@
   font-display: swap;
 }
 
-@font-face {
-  font-family: "JetBrains Mono";
-  src: url("fonts/JetBrainsMono-Bold.woff2") format("woff2");
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
-
-:root {
-  --void: #090a0f;
-  --panel: #12151d;
-  --border-black: #000000;
-  --signal: #fcee0a;
-  --cyan: #00f0ff;
-  --magenta: #ff0055;
-  --text: #e2e8f0;
-  --dim: #8a94a6;
-  --brutal-shadow: 6px 6px 0 var(--border-black);
-  --brutal-shadow-cyan: 6px 6px 0 var(--cyan);
-  --font-mono: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
-}
-
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-}
-
-html {
-  height: 100%;
-}
-
+/* The night: blue-black ground falling to a slightly lighter land at the foot. */
 body {
-  margin: 0;
-  min-height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 12px;
-  background-color: var(--void);
-  background-image:
-    linear-gradient(to right, rgba(0, 240, 255, 0.07) 2px, transparent 2px),
-    linear-gradient(to bottom, rgba(0, 240, 255, 0.07) 2px, transparent 2px);
-  background-size: 30px 30px;
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 14px;
+  min-height: 100dvh;
+  padding: 0 var(--space-lg) var(--space-md);
+  background: var(--color-paper) linear-gradient(to bottom, var(--color-paper) 55%, var(--color-land)) no-repeat;
+  background-attachment: fixed;
+  font-synthesis: none;
 }
 
-/* The card is exactly as wide as the face frame. Every other row has
-   contain: inline-size, so long text wraps instead of widening the card.
-   face.js sizes the canvas to leave room for this chrome (UI_RESERVE_PX and
-   UI_RESERVE_X_PX there track the paddings, borders, and fixed row heights
-   below). The minimum width keeps the header rail and the input row on one
-   line each when the face is small, which the reserve assumes. */
+/* One column as wide as the face panel. Every row except the panel has
+   contain: inline-size, so long text wraps instead of widening the column.
+   face.js sizes the canvas to leave room for this chrome: UI_RESERVE_PX there
+   is the sum of the fixed heights below (bar 56, gap 8, panel padding 12 + 12,
+   label gap 8 and line 20, gap 24, transcript 128, gap 16, controls 48, gap 8,
+   hint 24, gap 4, error 24, page foot 16), UI_RESERVE_X_PX the page and panel
+   side padding (24 + 24 + 12 + 12). The minimum width keeps the bar and the
+   control row on one line each, which the reserve assumes. */
 main {
+  display: flex;
+  flex-direction: column;
   width: fit-content;
   max-width: 100%;
-  min-width: min(100%, 520px);
-  padding: 16px;
-  background: var(--panel);
-  border: 3px solid var(--border-black);
-  outline: 2px solid var(--cyan);
-  box-shadow: var(--brutal-shadow-cyan);
+  min-width: min(100%, 560px);
+  margin-inline: auto;
 }
 
-/* Header rail: name on the left, live readouts on the right. */
+/* Top bar: wordmark left, the link and face-state readouts right. */
 .hud-header {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px 12px;
-  margin-bottom: 18px;
-  padding: 8px 10px;
-  background: var(--border-black);
-  border: 2px solid var(--cyan);
-  box-shadow: 4px 4px 0 var(--magenta);
+  gap: var(--space-sm);
+  min-height: 56px;
+  margin-bottom: var(--space-xs);
   contain: inline-size;
 }
 
 .brand-title {
-  margin: 0;
-  color: var(--signal);
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
+  max-width: none;
+  white-space: nowrap;
+  color: var(--color-ink);
+  font-size: var(--text-lg);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1;
 }
 
 .status-badges {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  align-items: center;
+  gap: var(--space-md);
 }
 
-.brutal-badge {
-  padding: 2px 6px;
-  background: var(--void);
-  border: 2px solid var(--cyan);
-  color: var(--cyan);
-  font-size: 11px;
-  font-weight: 700;
+.readout {
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
   line-height: 1.4;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   white-space: nowrap;
 }
 
-.brutal-badge::before {
-  content: "[";
-}
-
-.brutal-badge::after {
-  content: "]";
-}
-
-/* The link badge follows the text ws.js writes into #status; the inline
+/* The link readout follows the text ws.js writes into #status; the inline
    script in index.html mirrors it to body[data-link]. */
-body[data-link="connecting"] #link-badge {
-  border-color: var(--dim);
-  color: var(--dim);
+body[data-link="connected"] #link-badge {
+  color: var(--color-ink-2);
 }
 
 body[data-link="disconnected"] #link-badge {
-  background: var(--magenta);
-  border-color: var(--border-black);
-  color: var(--border-black);
+  color: var(--color-error);
 }
 
-/* Any face state other than idle turns the state badge solid yellow. */
+/* The face-state readout is a pill that lights amber off idle. */
+#state-badge {
+  min-height: 28px;
+  padding: var(--space-3xs) var(--space-sm);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-pill);
+  color: var(--color-ink-2);
+}
+
 body[data-status]:not([data-status="idle"]) #state-badge {
-  background: var(--signal);
-  border-color: var(--border-black);
-  color: var(--border-black);
-  box-shadow: 2px 2px 0 var(--border-black);
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
 }
 
-/* Face viewport. The feed tag sits on the top edge, outside the clipped
-   screen, so it never covers the face. */
+/* The instrument: a machined panel lit from above, the face in a recessed
+   bed, its caption under it. */
 .viewport-frame {
-  position: relative;
-  margin-bottom: 18px;
-  background: var(--border-black);
-  border: 3px solid var(--border-black);
-  outline: 2px solid var(--signal);
-  box-shadow: var(--brutal-shadow);
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-sm);
+  background: linear-gradient(var(--color-paper-3), var(--color-paper-2));
+  border-radius: var(--radius-card);
+  box-shadow: var(--edge-light), var(--shadow-panel);
 }
 
 .viewport-label {
-  position: absolute;
-  top: -11px;
-  left: 10px;
-  z-index: 1;
-  padding: 1px 6px;
-  background: var(--magenta);
-  border: 1px solid var(--border-black);
-  color: var(--border-black);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1.5;
-  letter-spacing: 0.08em;
+  height: 20px;
+  margin-top: var(--space-xs);
+  padding-inline: var(--space-2xs);
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 20px;
 }
 
 /* The dither skin adds an absolutely positioned div (position:absolute;
-   inset:0) after the scan line and hides #face, which keeps sizing the box.
-   isolation keeps the scan line's z-index inside the screen, so it stays
-   above that div without rising over the feed tag. */
+   inset:0) after the ring layer and hides #face, which keeps sizing the box.
+   isolation keeps the z-indexes below inside the bed, so the recess and the
+   ring stay above that div. */
 .viewport-screen {
   position: relative;
   display: flex;
   justify-content: center;
   overflow: hidden;
   isolation: isolate;
+  background: var(--color-screen);
+  border-radius: var(--radius-screen);
+}
+
+/* The recess: an inset shadow and a dark rim drawn over the face, since the
+   canvas and the dither div paint over the bed's own background. */
+.viewport-screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: inherit;
+  box-shadow: var(--shadow-well);
 }
 
 /* 64x48 logical canvas. face.js sets an integer CSS size (64*n by 48*n). */
@@ -197,223 +198,228 @@ body[data-status]:not([data-status="idle"]) #state-badge {
   image-rendering: pixelated;
 }
 
-/* Scan line: a 3px cyan bar with a short fade above it, moved top to bottom
-   with transform only (compositor work, no layout). */
+/* The ring: an amber edge on the bed that breathes (opacity only) while the
+   face is listening or thinking. The element kept its old class name. */
 .scan-line {
-  display: none;
   position: absolute;
   inset: 0;
-  z-index: 1;
+  z-index: 2;
   pointer-events: none;
-  background: linear-gradient(
-    to bottom,
-    transparent calc(100% - 28px),
-    rgba(0, 240, 255, 0.16) calc(100% - 3px),
-    var(--cyan) calc(100% - 3px)
-  );
-  transform: translateY(-100%);
+  border: 2px solid var(--color-accent);
+  border-radius: inherit;
+  opacity: 0;
 }
 
 body[data-status="listening"] .scan-line,
 body[data-status="thinking"] .scan-line {
-  display: block;
-  animation: sweep 2.2s linear infinite;
+  animation: breathe 2.4s var(--ease-in-out) infinite alternate;
 }
 
-@keyframes sweep {
+@keyframes breathe {
   from {
-    transform: translateY(-100%);
+    opacity: 0.3;
   }
   to {
-    transform: translateY(0);
+    opacity: 1;
   }
 }
 
-/* Terminal box. Fixed height so streaming text never shifts the face. */
+/* Transcript on the night, no box. Fixed height so streaming text never
+   moves the face; the reply is set in the display face, three lines at most,
+   and ws.js scrolls it so the tail shows. */
 #subtitles {
-  height: 140px;
-  margin-bottom: 18px;
-  padding: 12px;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  background: var(--border-black);
-  border: 2px solid var(--border-black);
-  outline: 2px solid rgba(255, 255, 255, 0.2);
-  box-shadow: var(--brutal-shadow);
+  height: 128px;
+  margin-top: var(--space-lg);
+  padding-inline: var(--space-2xs);
+  border-top: var(--rule-hair) solid var(--color-rule-2);
   contain: inline-size;
 }
 
+/* max-width: none on the three id-only rows undoes base.css's 65ch measure
+   for unclassed paragraphs; they span the column. */
 #user-line {
-  margin: 0 0 4px;
-  color: var(--dim);
-  font-size: 12px;
-  white-space: nowrap;
+  max-width: none;
+  height: 24px;
+  margin: 0 0 var(--space-xs);
   overflow: hidden;
+  color: var(--color-muted);
+  line-height: 24px;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #user-line:not(:empty)::before {
-  content: "YOU";
-  margin-right: 6px;
-  padding: 0 4px;
-  background: var(--signal);
-  color: var(--border-black);
-  font-weight: 700;
+  content: "You";
+  margin-right: var(--space-xs);
+  color: var(--color-ink-2);
+  font-weight: 500;
 }
 
-/* At most four lines visible; ws.js scrolls to the bottom so the tail shows. */
 #subtitle {
-  margin: 0;
-  color: var(--cyan);
-  font-size: 15px;
-  font-weight: 700;
-  line-height: 1.4;
-  max-height: 5.6em;
+  max-width: 60ch;
+  max-height: 3.9em;
   overflow: hidden;
-  overflow-wrap: anywhere;
+  color: var(--color-ink);
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  letter-spacing: -0.012em;
+  line-height: 1.3;
+  overflow-wrap: break-word;
   white-space: pre-wrap;
 }
 
-/* Input row: prompt-style field, primary Send, secondary push-to-talk. */
+/* Control row: a recessed message well, Send as the one lit primary, and
+   push-to-talk as a metal pill. All three stand 48px. */
+/* One row down to 32rem; below that (phones) push-to-talk takes its own row,
+   60px the reserve does not count, so a window that is both that narrow and
+   short scrolls. */
 #chat {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
   contain: inline-size;
 }
 
 .input-wrapper {
-  position: relative;
   flex: 1 1 200px;
   min-width: 0;
 }
 
-.input-prefix {
-  position: absolute;
-  top: 50%;
-  left: 11px;
-  transform: translateY(-50%);
-  color: var(--signal);
-  font-weight: 700;
-  pointer-events: none;
-}
-
 #chat-input {
   width: 100%;
-  padding: 10px 10px 10px 28px;
-  background: var(--border-black);
-  color: var(--text);
-  border: 3px solid var(--border-black);
-  outline: 2px solid var(--cyan);
-  box-shadow: var(--brutal-shadow);
-  font: 700 14px var(--font-mono);
-  transition: outline-color 0.1s ease, box-shadow 0.1s ease;
+  height: 48px;
+  padding: 0 var(--space-md);
+  background: var(--color-screen);
+  border: var(--rule-hair) solid var(--color-field-edge);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-well);
+  color: var(--color-ink);
+  outline: 2px solid transparent;
+  outline-offset: -4px;
+  transition: background-color var(--dur-short) var(--ease-out);
 }
 
 #chat-input::placeholder {
-  color: var(--dim);
-  font-weight: 400;
+  color: var(--color-muted);
 }
 
-#chat-input:focus {
-  outline-color: var(--signal);
-  box-shadow: 6px 6px 0 var(--signal);
+#chat-input:focus-visible {
+  outline-color: var(--color-focus);
 }
 
 #chat button {
-  padding: 0 18px;
-  border: 3px solid var(--border-black);
-  box-shadow: var(--brutal-shadow);
-  font: 700 14px var(--font-mono);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  position: relative;
+  min-height: 48px;
+  padding: 0 var(--space-lg);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-md);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
-  transition: transform 0.1s ease, box-shadow 0.1s ease, background-color 0.1s ease;
+  transition: background-color var(--dur-short) var(--ease-out), border-color var(--dur-short) var(--ease-out), transform var(--dur-micro) var(--ease-out);
 }
 
 #chat-send {
-  background: var(--signal);
-  color: var(--border-black);
-  outline: 2px solid var(--signal);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  box-shadow: var(--edge-lit), var(--shadow-part);
+  color: var(--color-accent-ink);
 }
 
 /* touch-action none: holding the button must not scroll or zoom on touch
    screens. */
 #chat-talk {
-  background: var(--border-black);
-  color: var(--cyan);
-  outline: 2px solid var(--cyan);
+  background: linear-gradient(var(--metal-hi), var(--metal-lo));
+  box-shadow: var(--edge-light), var(--shadow-part);
+  color: var(--color-ink);
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
 }
 
-#chat button:hover:not(:disabled) {
-  transform: translate(-2px, -2px);
-  box-shadow: 8px 8px 0 var(--border-black);
-}
+@media (hover: hover) {
+  #chat-input:hover:not(:disabled) {
+    background: var(--color-screen-2);
+  }
 
-#chat-send:hover:not(:disabled) {
-  background: var(--cyan);
-  outline-color: var(--cyan);
+  #chat-send:hover:not(:disabled) {
+    background: var(--color-accent-hi);
+    border-color: var(--color-accent-hi);
+  }
+
+  #chat-talk:hover:not(:disabled) {
+    border-color: var(--metal-hover);
+  }
 }
 
 #chat button:active:not(:disabled) {
-  transform: translate(2px, 2px);
-  box-shadow: 2px 2px 0 var(--border-black);
+  transform: translateY(1px);
 }
 
-#chat button:focus-visible {
-  outline-color: var(--text);
-  outline-offset: 2px;
-}
-
-/* Held and capturing. */
+/* Held and capturing: the talk pill lights. */
 #chat-talk.recording {
-  background: var(--magenta);
-  color: var(--border-black);
-  outline-color: var(--magenta);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  box-shadow: var(--edge-lit), var(--shadow-part);
+  color: var(--color-accent-ink);
+}
+
+/* While the talk pill is lit, Send steps down to metal so only one part
+   carries the amber. */
+#chat:has(#chat-talk.recording) #chat-send {
+  background: linear-gradient(var(--metal-hi), var(--metal-lo));
+  border-color: var(--color-rule);
+  box-shadow: var(--edge-light), var(--shadow-part);
+  color: var(--color-ink);
 }
 
 /* Held, mic not capturing yet: wait before talking. */
 #chat-talk.opening {
-  color: var(--signal);
-  outline-color: var(--signal);
+  border-color: var(--color-accent);
 }
 
 #chat-input:disabled,
 #chat button:disabled {
-  opacity: 0.5;
-  cursor: default;
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
 }
 
-/* Hint line under the input: help text, "Listening..." with a dot while
-   recording, or a short notice. Fixed height so it never shifts the face. */
+/* Hint line under the controls: help text, "Listening..." with a lit index
+   while recording, or a short notice. Fixed height so it never moves the
+   face. */
 #ptt-hint {
-  height: 1.4em;
-  margin: 0 0 10px;
+  max-width: none;
   display: flex;
   align-items: center;
-  gap: 6px;
-  color: var(--dim);
-  font-size: 12px;
-  white-space: nowrap;
+  gap: var(--space-xs);
+  height: 24px;
+  margin: var(--space-xs) 0 0;
+  padding-inline: var(--space-2xs);
   overflow: hidden;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
   contain: inline-size;
 }
 
 #ptt-dot {
   display: none;
   flex: none;
-  width: 8px;
-  height: 8px;
-  background: var(--magenta);
+  width: 3px;
+  height: 14px;
+  background: var(--color-accent);
+  border-radius: var(--space-3xs);
 }
 
 #ptt-hint[data-mode="recording"] {
-  color: var(--magenta);
+  color: var(--color-accent);
 }
 
 #ptt-hint[data-mode="recording"] #ptt-dot {
@@ -422,48 +428,36 @@ body[data-status="thinking"] .scan-line {
 
 #ptt-hint[data-mode="flash"],
 #ptt-hint[data-mode="opening"] {
-  color: var(--signal);
+  color: var(--color-ink-2);
 }
 
-/* Error banner. The row keeps its height while empty so an error appearing
-   does not move the card. Black on magenta for contrast (5.4:1). */
+/* Error line. Keeps one line of height while empty so an error appearing
+   does not move anything. */
 #error-line {
-  min-height: 32px;
-  margin: 0;
-  padding: 6px 8px;
-  border: 2px solid transparent;
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1.4;
-  letter-spacing: 0.05em;
+  max-width: none;
+  min-height: 24px;
+  margin: var(--space-2xs) 0 0;
+  padding-inline: var(--space-2xs);
+  color: var(--color-error);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 24px;
   contain: inline-size;
 }
 
-#error-line:not(:empty) {
-  background: var(--magenta);
-  border-color: var(--border-black);
-  color: var(--border-black);
-  box-shadow: 3px 3px 0 var(--border-black);
-}
-
-#error-line:not(:empty)::before {
-  content: "[!] ";
-}
-
-/* Debug panel (?debug=1 only). */
+/* Debug panel (?debug=1 only): a tinted well under the controls. */
 #debug {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  margin-top: 14px;
-  padding: 10px;
-  background: var(--border-black);
-  border-top: 2px solid var(--cyan);
-  color: var(--dim);
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+  padding: var(--space-md);
+  background: var(--color-paper-2);
+  border-radius: var(--radius-part);
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
   contain: inline-size;
 }
 
@@ -474,66 +468,145 @@ body[data-status="thinking"] .scan-line {
 #debug-states {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-xs);
 }
 
+/* 32px pills with the hit target grown to 44px. */
 #debug button {
-  padding: 3px 8px;
-  background: var(--void);
-  color: var(--cyan);
-  border: 2px solid var(--cyan);
-  font: 700 11px var(--font-mono);
-  text-transform: uppercase;
+  position: relative;
+  min-height: 32px;
+  padding: 0 var(--space-sm);
+  background: var(--color-paper-3);
+  border: var(--rule-hair) solid var(--color-rule);
+  border-radius: var(--radius-pill);
+  color: var(--color-ink-2);
+  font-size: var(--text-sm);
+  font-weight: 500;
   cursor: pointer;
+  transition: background-color var(--dur-short) var(--ease-out), transform var(--dur-micro) var(--ease-out);
+}
+
+#debug button::before {
+  content: "";
+  position: absolute;
+  inset: -6px 0;
+}
+
+@media (hover: hover) {
+  #debug button:hover:not(:disabled) {
+    background: var(--metal-lo);
+  }
+}
+
+#debug button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+#debug button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 #debug button.active {
-  background: var(--signal);
-  color: var(--border-black);
-  border-color: var(--border-black);
-  box-shadow: 2px 2px 0 var(--border-black);
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
 }
 
-/* Slider readouts keep their case ("-6 dB"). */
+#debug label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
 #debug label span {
-  text-transform: none;
+  min-width: 5ch;
+  color: var(--color-ink-2);
+  font-variant-numeric: tabular-nums;
 }
 
 #debug input[type="range"] {
-  vertical-align: middle;
-  accent-color: var(--signal);
+  accent-color: var(--color-accent);
+}
+
+#debug input[type="range"]:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 #debug-eq {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
   width: 100%;
 }
 
 #debug-eq-config {
   width: 100%;
+  max-width: none;
   margin: 0;
-  color: var(--text);
+  color: var(--color-ink-2);
+  font-family: var(--font-outlier);
   font-weight: 400;
-  text-transform: none;
 }
 
-/* Reduced motion (on Windows this follows "Animation effects"): no sweep;
-   the viewport outline turns cyan instead while listening or thinking. */
-@media (prefers-reduced-motion: reduce) {
-  body[data-status] .scan-line {
-    display: none;
+/* Under the 560px minimum, any spare height goes above the transcript, so the
+   controls sit at the foot within thumb reach. Under 32rem push-to-talk takes
+   a full row, and under 25rem the readouts wrap under the wordmark. */
+@media (max-width: 35rem) {
+  main {
+    min-height: calc(100dvh - var(--space-md));
   }
 
-  body[data-status="listening"] .viewport-frame,
-  body[data-status="thinking"] .viewport-frame {
-    outline-color: var(--cyan);
+  #subtitles {
+    margin-top: auto;
+  }
+}
+
+@media (max-width: 32rem) {
+  #chat-talk {
+    flex: 1 1 100%;
+  }
+}
+
+@media (max-width: 25rem) {
+  .hud-header {
+    flex-wrap: wrap;
+    padding-block: var(--space-sm);
+  }
+
+  .input-wrapper {
+    flex-basis: 100%;
+  }
+
+  #chat-send {
+    flex: 1 1 0;
+  }
+
+  #chat-talk {
+    flex: 2 1 0;
+  }
+}
+
+/* Reduced motion (on Windows this follows "Animation effects"): the ring
+   holds still and lit while listening or thinking, and controls change
+   without movement. */
+@media (prefers-reduced-motion: reduce) {
+  body[data-status="listening"] .scan-line,
+  body[data-status="thinking"] .scan-line {
+    animation: none;
+    opacity: 1;
   }
 
   #chat-input,
-  #chat button {
+  #chat button,
+  #debug button {
     transition: none;
+  }
+
+  #chat button:active:not(:disabled),
+  #debug button:active:not(:disabled) {
+    transform: none;
   }
 }

@@ -95,7 +95,7 @@ export function earlyReleaseHint(heldMs) {
 }
 
 // The line under the input. mode: "opening" (held, not capturing yet),
-// "recording" (red dot: talk now), "help", "flash" (brief notice), or "off"
+// "recording" (lit bar: talk now), "help", "flash" (brief notice), or "off"
 // (empty). live: the worklet has audio and the server sent listening; only
 // then does "Listening..." show, so the first word is not cut off.
 // flash is a short message to show instead of the help, or null.

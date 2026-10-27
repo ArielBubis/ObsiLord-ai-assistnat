@@ -4,24 +4,25 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Obsi-Lord</title>
+  <meta name="description" content="Obsi-Lord, a local voice assistant with an animated face: hold Space to talk or type a message.">
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <main>
     <header class="hud-header">
-      <h1 class="brand-title"><span aria-hidden="true">// </span>Obsi-Lord</h1>
+      <h1 class="brand-title">Obsi-Lord</h1>
       <div class="status-badges">
-        <span id="link-badge" class="brutal-badge">Link: <span id="status">connecting</span></span>
-        <span id="state-badge" class="brutal-badge">idle</span>
+        <span id="link-badge" class="readout">Link: <span id="status">connecting</span></span>
+        <span id="state-badge" class="readout">idle</span>
       </div>
     </header>
     <div class="viewport-frame">
-      <span id="feed-label" class="viewport-label" aria-hidden="true">SYS.FEED</span>
       <div class="viewport-screen">
         <canvas id="face" width="64" height="48" aria-label="Obsi-Lord face"></canvas>
         <div class="scan-line" aria-hidden="true"></div>
       </div>
+      <span id="feed-label" class="viewport-label" aria-hidden="true">Face</span>
     </div>
     <section id="subtitles" aria-live="polite">
       <p id="user-line"></p>
@@ -29,7 +30,6 @@
     </section>
     <form id="chat" autocomplete="off">
       <div class="input-wrapper">
-        <span class="input-prefix" aria-hidden="true">&gt;</span>
         <input id="chat-input" type="text" maxlength="2000" placeholder="Type a message" aria-label="Message">
       </div>
       <button id="chat-send" type="submit">Send</button>
@@ -62,10 +62,10 @@
     import { initDebug } from "/static/debug.js";
     import "/static/ws.js";
 
-    // HUD readouts. The face state goes on body[data-status] (style.css runs
-    // the scan line from it) and into the state badge. The link badge text is
-    // whatever ws.js writes into #status; it is mirrored to body[data-link]
-    // for the badge color.
+    // HUD readouts. The face state goes on body[data-status] (style.css lights
+    // the bed's ring from it) and into the state readout. The link readout text
+    // is whatever ws.js writes into #status; it is mirrored to body[data-link]
+    // for the readout color.
     const stateBadge = document.getElementById("state-badge");
     const linkStatus = document.getElementById("status");
     function showState(name) {
@@ -79,9 +79,9 @@
     new MutationObserver(showLink).observe(linkStatus, { childList: true, characterData: true, subtree: true });
     showState(getState());
     showLink();
-    // The feed tag names the skin once face.js has loaded it.
+    // The caption under the face names the skin once face.js has loaded it.
     skinReady.then((skin) => {
-      document.getElementById("feed-label").textContent = `SYS.FEED // ${skin === "dither" ? "3D" : "64x48"}`;
+      document.getElementById("feed-label").textContent = skin === "dither" ? "3D face" : "8-bit face";
     });
 
     start(document.getElementById("face"));
