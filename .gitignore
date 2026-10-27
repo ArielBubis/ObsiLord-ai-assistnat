@@ -20,3 +20,5 @@ captures/
 /.claude/agents/
 # Handoff docs that come with the face playground folder.
 /web/ai-face/*.md
+# Local speed test for vision models, not part of the app.
+/scripts/vision_bench.py

@@ -40,29 +40,49 @@ before error and idle are sent, so no binary frame follows the idle.
 Without a TTSClient the Phase 2 sequence is kept: state speaking is sent on the
 first text delta.
 
+look() (when a LookTool is given, the tool is declared): if the first request
+ends with a ToolCall, the speech queued so far is sent first, then state
+looking, then the look (only the first look call runs; others get
+MSG_ONE_LOOK, unknown tools an error), then state thinking. A second cap check
+follows, then one follow-up request with the tool results and
+allow_tool_calls=False. Speaking is sent again on the follow-up's first audio
+frame (or text delta without TTS). At most two requests per turn. If the cap
+is reached before the follow-up, the turn ends with the cap error.
+
 Usage accounting: once a request has been started, usage is always recorded,
 in a finally block, so failed, timed-out, and cancelled streams count toward
-the cap:
+the cap. Each request is recorded on its own:
 - Done arrived: its counts.
 - Otherwise the last UsageUpdate seen, flagged partial.
 - Otherwise a conservative estimate, flagged estimated: (history characters +
-  the client's prompt_overhead_chars, i.e. the system prompt) / 4 for input and
-  max_output_tokens for output.
+  the client's prompt_overhead_chars, i.e. the system prompt, + the tool
+  results) / 4 for input and max_output_tokens for output.
 
 History is updated once the LLM has finished with a non-empty reply (before
-speech ends), so failed LLM turns leave it unchanged.
+speech ends), so failed LLM turns leave it unchanged. It holds the user text
+and the reply text only, never tool calls or results.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable
 
-from obsilord.llm.base import Done, LLMClient, Message, TextDelta, UsageUpdate
+from obsilord.llm.base import (
+    Done,
+    LLMClient,
+    Message,
+    TextDelta,
+    ToolCall,
+    ToolResult,
+    UsageUpdate,
+)
+from obsilord.look import LOOK_TOOL, MSG_ONE_LOOK, LookTool
 from obsilord.sentences import SentenceSplitter
 from obsilord.stt.base import SAMPLE_RATE, STTClient, pcm16_duration_ms
 from obsilord.tts.base import TTSClient
@@ -114,29 +134,43 @@ async def _send_quietly(send: Send, msg: dict[str, Any]) -> None:
 
 
 @dataclass
-class _TurnState:
-    parts: list[str] = field(default_factory=list)
+class _RequestUsage:
+    """Counts seen during one LLM request."""
+
     done: Done | None = None
     last_usage: UsageUpdate | None = None
+
+
+@dataclass
+class _TurnState:
+    parts: list[str] = field(default_factory=list)
     ttft_ms: int | None = None
     done_ms: int | None = None  # turn start to the end of a successful LLM stream
+    requests: int = 0
+    # Sums over the requests whose Done arrived, for the turn usage line.
+    tokens_in: int = 0
+    tokens_out: int = 0
+    tokens_thinking: int = 0
 
 
 def _record_usage(
     usage: UsageTracker,
     llm: LLMClient,
-    st: _TurnState,
+    ru: _RequestUsage,
     messages: list[Message],
     max_output_tokens: int,
     total_ms: int,
+    extra_chars: int = 0,
 ) -> None:
+    """Record one request. extra_chars: request input besides the history and
+    the system prompt (tool results), for the estimate."""
     model = llm.model
     try:
-        if st.done is not None:
-            d = st.done
+        if ru.done is not None:
+            d = ru.done
             usage.record(model, d.tokens_in, d.tokens_out, d.tokens_thinking, total_ms)
-        elif st.last_usage is not None:
-            u = st.last_usage
+        elif ru.last_usage is not None:
+            u = ru.last_usage
             usage.record(
                 model, u.tokens_in, u.tokens_out, u.tokens_thinking, total_ms, partial=True
             )
@@ -144,7 +178,9 @@ def _record_usage(
         else:
             usage.record(
                 model,
-                estimate_tokens(messages, getattr(llm, "prompt_overhead_chars", 0)),
+                estimate_tokens(
+                    messages, getattr(llm, "prompt_overhead_chars", 0) + max(0, extra_chars)
+                ),
                 max_output_tokens,
                 0,
                 total_ms,
@@ -164,6 +200,12 @@ class _SpeechState:
     first_audio_ms: int | None = None  # turn start to first binary frame sent
     failures: int = 0
     error_sent: bool = False
+    # State speaking was sent since the turn started or the last look.
+    speaking_sent: bool = False
+
+
+# A queue item that the worker sets when it reaches it (see _drain_speech).
+SpeechItem = str | asyncio.Event | None
 
 
 async def _speak_sentence(
@@ -198,6 +240,8 @@ async def _speak_sentence(
                 )
             if sp.first_audio_ms is None:
                 sp.first_audio_ms = int((time.monotonic() - t0) * 1000)
+            if not sp.speaking_sent:
+                sp.speaking_sent = True
                 await send({"type": "state", "state": "speaking"})
             await send(frame)
     finally:
@@ -213,19 +257,42 @@ async def _speak_sentence(
 
 async def _tts_worker(
     tts: TTSClient,
-    queue: asyncio.Queue[str | None],
+    queue: asyncio.Queue[SpeechItem],
     send: Send,
     sp: _SpeechState,
     t0: float,
 ) -> None:
-    """Speak queued sentences in order until the None sentinel arrives."""
+    """Speak queued sentences in order until the None sentinel arrives. An
+    Event in the queue is set when reached."""
     while True:
-        sentence = await queue.get()
-        if sentence is None:
+        item = await queue.get()
+        if item is None:
             return
-        speech = clean_for_speech(sentence)
+        if isinstance(item, asyncio.Event):
+            item.set()
+            continue
+        speech = clean_for_speech(item)
         if speech:
             await _speak_sentence(tts, speech, send, sp, t0)
+
+
+async def _drain_speech(
+    queue: asyncio.Queue[SpeechItem], worker: asyncio.Task[None] | None
+) -> None:
+    """Wait until the worker has sent every sentence queued so far. Raises if
+    the worker failed (a send error: the socket is gone)."""
+    if worker is None:
+        return
+    if not worker.done():
+        reached = asyncio.Event()
+        queue.put_nowait(reached)
+        waiter = asyncio.ensure_future(reached.wait())
+        try:
+            await asyncio.wait([waiter, worker], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+    if worker.done():
+        await worker
 
 
 async def _stop_worker(worker: asyncio.Task[None] | None) -> None:
@@ -255,10 +322,12 @@ async def run_text_turn(
     max_output_tokens: int = 200,
     turn_timeout_s: float = 60.0,
     tts: TTSClient | None = None,
+    looker: LookTool | None = None,
 ) -> str | None:
     """Run one turn. Returns the reply text, or None if the turn failed.
 
     tts: speak the reply sentence by sentence; None keeps text-only behavior.
+    looker: declares look() and runs it; None offers no tools.
 
     Never raises except CancelledError. Unexpected errors are logged (type name
     only) and reported to the client as a generic error, best effort.
@@ -276,6 +345,7 @@ async def run_text_turn(
             history_turns,
             max_output_tokens,
             tts,
+            looker,
             t0=t0,
             deadline=deadline,
         )
@@ -301,6 +371,7 @@ async def run_voice_turn(
     max_output_tokens: int = 200,
     turn_timeout_s: float = 60.0,
     tts: TTSClient | None = None,
+    looker: LookTool | None = None,
 ) -> str | None:
     """Run one spoken turn: STT, then the text turn body with the transcript.
 
@@ -324,6 +395,7 @@ async def run_voice_turn(
             max_output_tokens,
             turn_timeout_s,
             tts,
+            looker,
         )
     except asyncio.CancelledError:
         raise
@@ -334,12 +406,18 @@ async def run_voice_turn(
         return None
 
 
-async def _cap_allows(usage: UsageTracker, send: Send) -> bool:
-    """False (after sending the cap error and idle) if the daily cap is reached."""
+def _cap_reached(usage: UsageTracker) -> bool:
     try:
         usage.check()
     except CapExceeded:
         log.warning("turn blocked: daily token cap reached (%d tokens today)", usage.today_total)
+        return True
+    return False
+
+
+async def _cap_allows(usage: UsageTracker, send: Send) -> bool:
+    """False (after sending the cap error and idle) if the daily cap is reached."""
+    if _cap_reached(usage):
         await send({"type": "error", "message": MSG_CAP})
         await send({"type": "state", "state": "idle"})
         return False
@@ -365,6 +443,7 @@ async def _run_voice_turn(
     max_output_tokens: int,
     turn_timeout_s: float,
     tts: TTSClient | None,
+    looker: LookTool | None,
 ) -> str | None:
     t0 = time.monotonic()
     # One deadline for STT and the rest of the turn.
@@ -421,6 +500,7 @@ async def _run_voice_turn(
         history_turns,
         max_output_tokens,
         tts,
+        looker,
         t0=t0,
         deadline=deadline,
         voice=_VoiceTiming(stt_ms, audio_ms),
@@ -436,6 +516,7 @@ async def _run_turn(
     history_turns: int,
     max_output_tokens: int,
     tts: TTSClient | None,
+    looker: LookTool | None = None,
     *,
     t0: float,
     deadline: float,
@@ -451,17 +532,20 @@ async def _run_turn(
         return None
 
     messages = [*history, Message(role="user", text=text)]
+    tools = [LOOK_TOOL] if looker is not None else []
     splitter = SentenceSplitter()
     sentence_count = 0
     st = _TurnState()
     sp = _SpeechState()
     failed: Exception | None = None
     timed_out = False
-    started = False
+    capped = False
     reply: str | None = None
     llm_ms = 0
+    look_ms: int | None = None
+    calls: list[ToolCall] = []
 
-    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    queue: asyncio.Queue[SpeechItem] = asyncio.Queue()
     worker: asyncio.Task[None] | None = None
     if tts is not None:
         worker = asyncio.create_task(_tts_worker(tts, queue, send, sp, t0))
@@ -473,54 +557,114 @@ async def _run_turn(
             for sentence in sentences:
                 queue.put_nowait(sentence)
 
+    async def stream_once(tool_results: list[ToolResult] | None) -> Exception | None:
+        """One LLM request. Its usage is always recorded. Returns the provider
+        error, if any. ToolCalls are collected from the first request only."""
+        nonlocal llm_ms
+        ru = _RequestUsage()
+        error: Exception | None = None
+        started = False
+        extra_chars = sum(len(json.dumps(r.response)) for r in tool_results or [])
+        # The follow-up's text joins the text from before the call: keep a space.
+        gap = tool_results is not None and bool(st.parts) and not st.parts[-1][-1:].isspace()
+        t_llm = time.monotonic()
+        try:
+            stream = llm.stream_reply(
+                messages, tools, tool_results=tool_results, allow_tool_calls=tool_results is None
+            )
+            started = True
+            try:
+                while True:
+                    try:
+                        event = await anext(stream)
+                    except StopAsyncIteration:
+                        # Done is the last event, so this is "LLM done".
+                        st.done_ms = int((time.monotonic() - t0) * 1000)
+                        break
+                    except Exception as exc:  # noqa: BLE001 - any provider error ends the turn
+                        error = exc
+                        break
+                    if isinstance(event, TextDelta):
+                        if not event.text:
+                            continue
+                        if st.ttft_ms is None:
+                            st.ttft_ms = int((time.monotonic() - t0) * 1000)
+                        if tts is None and not sp.speaking_sent:
+                            sp.speaking_sent = True
+                            await send({"type": "state", "state": "speaking"})
+                        if gap:
+                            gap = False
+                            if not event.text[:1].isspace():
+                                st.parts.append(" ")
+                        st.parts.append(event.text)
+                        await send(
+                            {
+                                "type": "transcript",
+                                "role": "assistant",
+                                "text": "".join(st.parts),
+                                "final": False,
+                            }
+                        )
+                        enqueue(splitter.feed(event.text))
+                    elif isinstance(event, ToolCall):
+                        if tool_results is None:
+                            calls.append(event)
+                    elif isinstance(event, UsageUpdate):
+                        ru.last_usage = event
+                    elif isinstance(event, Done):
+                        ru.done = event
+            finally:
+                await _close_stream(stream)
+        finally:
+            # Runs on success, failure, timeout, and cancellation alike.
+            ms = int((time.monotonic() - t_llm) * 1000)
+            llm_ms += ms
+            if started:
+                st.requests += 1
+                _record_usage(usage, llm, ru, messages, max_output_tokens, ms, extra_chars)
+                if ru.done is not None:
+                    st.tokens_in += ru.done.tokens_in
+                    st.tokens_out += ru.done.tokens_out
+                    st.tokens_thinking += ru.done.tokens_thinking
+        return error
+
+    async def run_tools(lookup: LookTool) -> list[ToolResult]:
+        """Answer every call of the first request; only the first look runs."""
+        nonlocal look_ms
+        # Speech from before the call (including a sentence the splitter still
+        # holds) goes out first, so no speaking state lands in the look.
+        rest = splitter.flush()
+        if rest:
+            enqueue([rest])
+        await _drain_speech(queue, worker)
+        await send({"type": "state", "state": "looking"})
+        sp.speaking_sent = False
+        t_look = time.monotonic()
+        results: list[ToolResult] = []
+        looked = False
+        for call in calls:
+            if call.name != LOOK_TOOL.name:
+                results.append(ToolResult(call, {"error": f"Unknown tool: {call.name}."}))
+            elif looked:
+                results.append(ToolResult(call, {"error": MSG_ONE_LOOK}))
+            else:
+                looked = True
+                results.append(ToolResult(call, await lookup.look(call.args.get("question"))))
+        look_ms = int((time.monotonic() - t_look) * 1000)
+        await send({"type": "state", "state": "thinking"})
+        return results
+
     try:
         async with asyncio.timeout_at(deadline):
-            t_llm = time.monotonic()
-            try:
-                stream = llm.stream_reply(messages, [])
-                started = True
-                try:
-                    while True:
-                        try:
-                            event = await anext(stream)
-                        except StopAsyncIteration:
-                            # Done is the last event, so this is "LLM done".
-                            st.done_ms = int((time.monotonic() - t0) * 1000)
-                            break
-                        except Exception as exc:  # noqa: BLE001 - any provider error ends the turn
-                            failed = exc
-                            break
-                        if isinstance(event, TextDelta):
-                            if not event.text:
-                                continue
-                            if st.ttft_ms is None:
-                                st.ttft_ms = int((time.monotonic() - t0) * 1000)
-                                if tts is None:
-                                    await send({"type": "state", "state": "speaking"})
-                            st.parts.append(event.text)
-                            await send(
-                                {
-                                    "type": "transcript",
-                                    "role": "assistant",
-                                    "text": "".join(st.parts),
-                                    "final": False,
-                                }
-                            )
-                            enqueue(splitter.feed(event.text))
-                        elif isinstance(event, UsageUpdate):
-                            st.last_usage = event
-                        elif isinstance(event, Done):
-                            st.done = event
-                        # ToolCall is ignored until Phase 5 (no tools are passed).
-                finally:
-                    await _close_stream(stream)
-            finally:
-                # Runs on success, failure, timeout, and cancellation alike.
-                llm_ms = int((time.monotonic() - t_llm) * 1000)
-                if started:
-                    _record_usage(usage, llm, st, messages, max_output_tokens, llm_ms)
+            failed = await stream_once(None)
+            if failed is None and calls and looker is not None:
+                results = await run_tools(looker)
+                if _cap_reached(usage):
+                    capped = True
+                else:
+                    failed = await stream_once(results)
 
-            if failed is None:
+            if failed is None and not capped:
                 rest = splitter.flush()
                 if rest:
                     enqueue([rest])
@@ -532,6 +676,8 @@ async def _run_turn(
                     history.append(Message(role="user", text=text))
                     history.append(Message(role="assistant", text=reply))
                     trim_history(history, history_turns)
+                else:
+                    log.warning("turn: the model gave no text (%d requests)", st.requests)
                 if worker is not None:
                     queue.put_nowait(None)
                     await worker  # raises if a send failed inside the worker
@@ -554,26 +700,32 @@ async def _run_turn(
         await send({"type": "state", "state": "idle"})
         return None
 
-    d = st.done
+    if capped:
+        await send({"type": "error", "message": MSG_CAP})
+        await send({"type": "state", "state": "idle"})
+        return None
+
     log.info(
         "turn latency: stt_ms=%s audio_ms=%s llm_ttft_ms=%s llm_done_ms=%s "
-        "tts_first_chunk_ms=%s total_ms=%d sentences=%d spoken=%d tts_failures=%d",
+        "tts_first_chunk_ms=%s look_ms=%s total_ms=%d sentences=%d spoken=%d tts_failures=%d",
         voice.stt_ms if voice is not None else "n/a",
         voice.audio_ms if voice is not None else "n/a",
         st.ttft_ms if st.ttft_ms is not None else "-",
         st.done_ms if st.done_ms is not None else "-",
         sp.first_audio_ms if sp.first_audio_ms is not None else "-",
+        look_ms if look_ms is not None else "-",
         total_ms,
         sentence_count,
         sp.sentence_id,
         sp.failures,
     )
     log.info(
-        "turn usage: llm_ms=%d tokens_in=%s tokens_out=%s tokens_thinking=%s",
+        "turn usage: llm_ms=%d requests=%d tokens_in=%d tokens_out=%d tokens_thinking=%d",
         llm_ms,
-        d.tokens_in if d else "-",
-        d.tokens_out if d else "-",
-        d.tokens_thinking if d else "-",
+        st.requests,
+        st.tokens_in,
+        st.tokens_out,
+        st.tokens_thinking,
     )
 
     await send({"type": "state", "state": "idle"})

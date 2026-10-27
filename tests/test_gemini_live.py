@@ -59,6 +59,45 @@ def test_say_hi_streams_text_and_tokens() -> None:
     assert done.tokens_in > 0 and done.tokens_out > 0
 
 
+def test_look_round_trip_with_thought_signatures() -> None:
+    """A real tool call and follow-up: the parts go back as received, so a
+    missing thought signature would fail this with a 400. The look result is
+    made up; no camera is used."""
+    from obsilord.llm.base import ToolCall, ToolResult
+    from obsilord.look import LOOK_TOOL
+
+    client = _client()
+    history = [Message("user", "Look at what I am holding and tell me what it is.")]
+
+    async def go() -> tuple[list[ToolCall], str, Done | None]:
+        calls: list[ToolCall] = []
+        parts: list[str] = []
+        done: Done | None = None
+        try:
+            async for ev in client.stream_reply(history, [LOOK_TOOL]):
+                if isinstance(ev, ToolCall):
+                    calls.append(ev)
+            if not calls:
+                return calls, "", None
+            results = [ToolResult(calls[0], {"output": "The user is holding a red coffee mug."})]
+            async for ev in client.stream_reply(
+                history, [LOOK_TOOL], tool_results=results, allow_tool_calls=False
+            ):
+                if isinstance(ev, TextDelta):
+                    parts.append(ev.text)
+                elif isinstance(ev, Done):
+                    done = ev
+        finally:
+            await client.aclose()
+        return calls, "".join(parts), done
+
+    calls, text, done = asyncio.run(go())
+    assert calls, "the model did not call look()"
+    print(f"\ncalls={len(calls)} question={calls[0].args.get('question')!r} reply_chars={len(text)}")
+    assert done is not None and done.tokens_in > 0
+    assert "mug" in text.lower()
+
+
 def test_cap_blocks_second_live_call(tmp_path: Path) -> None:
     """With a cap of 1, one real turn goes through and the next is blocked locally."""
     base = (REPO_ROOT / "config.example.toml").read_text(encoding="utf-8")
@@ -72,10 +111,10 @@ def test_cap_blocks_second_live_call(tmp_path: Path) -> None:
     calls = 0
     real_stream = client.stream_reply
 
-    def counting_stream(history: list[Message], tools: list[Any]) -> Any:
+    def counting_stream(history: list[Message], tools: list[Any], **kwargs: Any) -> Any:
         nonlocal calls
         calls += 1
-        return real_stream(history, tools)
+        return real_stream(history, tools, **kwargs)
 
     client.stream_reply = counting_stream  # type: ignore[method-assign]
 

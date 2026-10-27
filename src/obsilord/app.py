@@ -33,6 +33,12 @@ A configured [face] character file is checked first (face_character.py:
 missing, not binary glTF 2.0, compressed, or linking external files), and a
 failed check also stops startup with an error. GET /face/character.glb serves
 it, or answers 404 when the key is empty.
+
+look(): with [vision] model set, startup checks the vision files (server for
+the backend, model, mmproj) and builds the Looker (camera, per-look
+llama-server, cooldown and hourly cap); a missing file stops startup with a
+readable error. Nothing is loaded until a look runs. An empty model turns
+look() off: the tool is not declared.
 """
 
 from __future__ import annotations
@@ -48,9 +54,11 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from obsilord import promptlog
 from obsilord.config import Settings
 from obsilord.face_character import check_character
 from obsilord.llm.base import LLMClient, Message
+from obsilord.look import LookTool
 from obsilord.pipeline import MSG_NOT_CAUGHT, run_text_turn, run_voice_turn
 from obsilord.stt.base import SAMPLE_RATE as STT_SAMPLE_RATE
 from obsilord.stt.base import STTClient, pcm16_bytes_for_ms
@@ -157,22 +165,67 @@ def _default_stt(settings: Settings) -> STTClient | None:
     return stt
 
 
+def _default_looker(settings: Settings) -> LookTool | None:
+    """The look() tool from [camera] and [vision], or None if [vision] model is empty."""
+    vision = settings.vision
+    if not vision.enabled:
+        log.info("look: disabled ([vision] model is empty), no camera tool")
+        return None
+    # Imported here so OpenCV and the vision module are only loaded when used.
+    from obsilord.camera import CameraService
+    from obsilord.look import LookLimiter, Looker
+    from obsilord.vision.llama_server import LlamaServerVision, check_files
+
+    try:
+        check_files(vision, settings.repo_root)
+    except ValueError as exc:
+        log.error(
+            '%s; run "python -m obsilord.vision.fetch", or set [vision] model = "" '
+            "to start without look()",
+            exc,
+        )
+        raise
+    camera = settings.camera
+    looker = Looker(
+        CameraService(camera),
+        LlamaServerVision(vision, settings.repo_root),
+        LookLimiter(camera.cooldown_s, camera.max_per_hour),
+    )
+    log.info(
+        "look: enabled (backend %s, camera %d via %s, cooldown %g s, %d per hour)",
+        vision.backend,
+        camera.device_index,
+        camera.api,
+        camera.cooldown_s,
+        camera.max_per_hour,
+    )
+    return looker
+
+
 def create_app(
     settings: Settings,
     llm: LLMClient | None = None,
     usage: UsageTracker | None = None,
     tts: TTSClient | None = None,
     stt: STTClient | None = None,
+    looker: LookTool | None = None,
 ) -> FastAPI:
-    """Build the app. Pass llm, usage, tts, and stt to inject fakes (tests).
+    """Build the app. Pass llm, usage, tts, stt, and looker to inject fakes (tests).
 
     tts=None loads the voice from settings (nothing is loaded when [tts] voice
     is empty). stt=None loads the STT model from settings (nothing is loaded
-    when [stt] model is empty).
+    when [stt] model is empty). looker=None builds look() from settings (off
+    when [vision] model is empty).
     """
     web_dir = settings.repo_root / "web"
     index_path = web_dir / "index.html"
 
+    promptlog.set_enabled(settings.debug.log_prompts)
+    if settings.debug.log_prompts:
+        log.warning(
+            "debug.log_prompts is on: every Gemini and vision request and reply is "
+            "printed (camera frames as their size only)"
+        )
     # Cheap file check first, so a bad character fails before any model loads.
     character_path = _checked_character(settings)
     if llm is None:
@@ -181,6 +234,8 @@ def create_app(
         tts = _default_tts(settings)
     if stt is None:
         stt = _default_stt(settings)
+    if looker is None:
+        looker = _default_looker(settings)
     if usage is None:
         usage = UsageTracker(
             settings.repo_root / "logs" / "usage.jsonl", settings.llm.daily_token_cap
@@ -201,6 +256,7 @@ def create_app(
     app.state.usage = usage
     app.state.tts = tts
     app.state.stt = stt
+    app.state.looker = looker
 
     stt_cfg = settings.stt
     max_audio_bytes = pcm16_bytes_for_ms(stt_cfg.max_utterance_s * 1000, STT_SAMPLE_RATE)
@@ -326,6 +382,7 @@ def create_app(
                     max_output_tokens=settings.llm.max_output_tokens,
                     turn_timeout_s=settings.llm.turn_timeout_s,
                     tts=app.state.tts,
+                    looker=app.state.looker,
                 )
             )
 
@@ -444,6 +501,7 @@ def create_app(
                     max_output_tokens=settings.llm.max_output_tokens,
                     turn_timeout_s=settings.llm.turn_timeout_s,
                     tts=app.state.tts,
+                    looker=app.state.looker,
                 )
             )
 

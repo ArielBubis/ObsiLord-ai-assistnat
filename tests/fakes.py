@@ -1,5 +1,5 @@
-"""Test doubles for the LLM, STT, and TTS interfaces, and a minimal .glb builder.
-No network, no model."""
+"""Test doubles for the LLM, STT, TTS, and look() interfaces, and a minimal
+.glb builder. No network, no model, no camera."""
 
 from __future__ import annotations
 
@@ -11,16 +11,25 @@ import threading
 from typing import Any, AsyncIterator
 
 from obsilord.config import Settings
-from obsilord.llm.base import Done, LLMEvent, Message, TextDelta, ToolSpec, UsageUpdate
+from obsilord.llm.base import (
+    Done,
+    LLMEvent,
+    Message,
+    TextDelta,
+    ToolResult,
+    ToolSpec,
+    UsageUpdate,
+)
 
 
 def text_only(settings: Settings) -> Settings:
-    """Settings with TTS and STT disabled, so create_app loads no voice and no
-    STT model."""
+    """Settings with TTS, STT, and look() disabled, so create_app loads no
+    voice, no STT model, and no vision files."""
     return dataclasses.replace(
         settings,
         tts=dataclasses.replace(settings.tts, voice=""),
         stt=dataclasses.replace(settings.stt, model=""),
+        vision=dataclasses.replace(settings.vision, model=""),
     )
 
 
@@ -68,13 +77,19 @@ class FakeLLM:
         self.usage = usage
         self.hang_s = hang_s
         self.calls: list[list[Message]] = []
+        self.tools: list[list[ToolSpec]] = []
         self.closed = threading.Event()
         self.cancelled = threading.Event()
 
     async def stream_reply(
-        self, history: list[Message], tools: list[ToolSpec]
+        self,
+        history: list[Message],
+        tools: list[ToolSpec],
+        tool_results: list[ToolResult] | None = None,
+        allow_tool_calls: bool = True,
     ) -> AsyncIterator[LLMEvent]:
         self.calls.append(list(history))
+        self.tools.append(list(tools))
         try:
             if self.usage is not None:
                 yield self.usage
@@ -96,6 +111,59 @@ class FakeLLM:
             raise
         finally:
             self.closed.set()
+
+
+@dataclasses.dataclass
+class LLMRequest:
+    history: list[Message]
+    tools: list[ToolSpec]
+    tool_results: list[ToolResult] | None
+    allow_tool_calls: bool
+
+
+class FakeToolLLM:
+    """Scripted per request: rounds[i] holds the events of request i, in order.
+
+    An Exception in a round is raised at that point instead of yielded.
+    requests records what each request was called with.
+    """
+
+    def __init__(self, rounds: list[list[Any]]) -> None:
+        self.model = "fake-model"
+        self.rounds = rounds
+        self.requests: list[LLMRequest] = []
+
+    async def stream_reply(
+        self,
+        history: list[Message],
+        tools: list[ToolSpec],
+        tool_results: list[ToolResult] | None = None,
+        allow_tool_calls: bool = True,
+    ) -> AsyncIterator[LLMEvent]:
+        i = len(self.requests)
+        self.requests.append(LLMRequest(list(history), list(tools), tool_results, allow_tool_calls))
+        for event in self.rounds[i]:
+            if isinstance(event, Exception):
+                raise event
+            yield event
+
+
+class FakeLooker:
+    """Returns `response` for every look; questions records the arguments.
+
+    delay_s: sleep before answering (lets other tasks run).
+    """
+
+    def __init__(self, response: dict[str, Any] | None = None, delay_s: float = 0.0) -> None:
+        self.response = response if response is not None else {"output": "A red mug."}
+        self.delay_s = delay_s
+        self.questions: list[Any] = []
+
+    async def look(self, question: Any) -> dict[str, Any]:
+        self.questions.append(question)
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
+        return dict(self.response)
 
 
 class FakeTTS:

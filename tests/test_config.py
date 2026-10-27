@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,7 @@ from obsilord.config import (
     REPO_ROOT,
     Secrets,
     Settings,
+    VisionSettings,
     load_secrets,
     load_settings,
     parse_dotenv,
@@ -592,3 +594,121 @@ def test_only_missing_face_keys_are_defaulted(
     assert (s.face.skin, s.face.character) == ("dither", "")
     [line] = [r.getMessage() for r in caplog.records if "using defaults" in r.getMessage()]
     assert line.endswith(": face.character, face.skin")
+
+
+def _load(path: Path, tmp_path: Path) -> Settings:
+    return load_settings(path, env_path=tmp_path / "missing.env", environ={})
+
+
+def test_camera_and_vision_from_example(tmp_path: Path) -> None:
+    s = _load(EXAMPLE, tmp_path)
+    assert s.camera.api == "dshow"
+    assert s.camera.timeout_s == 20.0
+    assert s.vision.enabled
+    assert s.vision.backend == "vulkan"
+    assert s.vision.ctx == 2048 and s.vision.cpu_max_edge_px == 512
+    assert s.vision == VisionSettings()  # the example spells out every default
+
+
+def _without_vision_section(tmp_path: Path) -> Path:
+    text = EXAMPLE.read_text(encoding="utf-8")
+    start = text.index("[vision]")
+    end = text.index("[face]")
+    path = tmp_path / "config.toml"
+    path.write_text(text[:start] + text[end:], encoding="utf-8")
+    return path
+
+
+def test_vision_section_is_optional(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="obsilord.config")
+    s = _load(_without_vision_section(tmp_path), tmp_path)
+    assert s.vision == VisionSettings()
+    assert "vision.backend" in caplog.text  # listed as defaulted
+
+
+def test_camera_keys_added_in_phase_5_are_optional(tmp_path: Path) -> None:
+    path = _write_replaced(tmp_path, 'api = "dshow"\ntimeout_s = 20', "")
+    s = _load(path, tmp_path)
+    assert s.camera.api == "dshow" and s.camera.timeout_s == 20.0
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "match"),
+    [
+        ('api = "dshow"', 'api = "v4l2"', "camera.api"),
+        ("max_edge_px = 768", "max_edge_px = 32", "camera.max_edge_px"),
+        ("warmup_frames = 5", "warmup_frames = -1", "camera.warmup_frames"),
+        ("max_per_hour = 30", "max_per_hour = 0", "camera.max_per_hour"),
+        ("cooldown_s = 10", "cooldown_s = -1", "camera.cooldown_s"),
+        ('backend = "vulkan"', 'backend = "cuda"', "vision.backend"),
+        ("ctx = 2048", "ctx = 0", "vision.ctx"),
+        ("cpu_max_edge_px = 512", "cpu_max_edge_px = 10", "vision.cpu_max_edge_px"),
+        ("start_timeout_s = 30", "start_timeout_s = 0", "vision.start_timeout_s"),
+    ],
+)
+def test_camera_and_vision_ranges(tmp_path: Path, old: str, new: str, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        _load(_write_replaced(tmp_path, old, new), tmp_path)
+
+
+def test_empty_vision_model_disables_look(tmp_path: Path) -> None:
+    path = _write_replaced(
+        tmp_path,
+        'model = "models/vision/qwen3-vl-2b/Qwen3VL-2B-Instruct-Q4_K_M.gguf"',
+        'model = ""',
+    )
+    assert not _load(path, tmp_path).vision.enabled
+
+
+def test_debug_section_is_optional_and_off_by_default(tmp_path: Path) -> None:
+    s = _load(EXAMPLE, tmp_path)
+    assert s.debug.log_prompts is False
+    text = EXAMPLE.read_text(encoding="utf-8")
+    path = tmp_path / "config.toml"
+    path.write_text(text[: text.index("[debug]")], encoding="utf-8")
+    assert _load(path, tmp_path).debug.log_prompts is False
+    path.write_text(text.replace("log_prompts = false", "log_prompts = true"), encoding="utf-8")
+    assert _load(path, tmp_path).debug.log_prompts is True
+
+
+def test_prompt_log_is_off_until_enabled() -> None:
+    from obsilord import promptlog
+
+    assert not promptlog.enabled()
+    promptlog.set_enabled(True)
+    try:
+        assert promptlog.enabled()
+    finally:
+        promptlog.set_enabled(False)
+    assert not promptlog.enabled()
+
+
+def test_log_prompts_must_be_a_bool(tmp_path: Path) -> None:
+    text = EXAMPLE.read_text(encoding="utf-8").replace("log_prompts = false", "log_prompts = 1")
+    path = tmp_path / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="debug.log_prompts expected bool, got int"):
+        _load(path, tmp_path)
+
+
+def test_prompt_log_emit_never_raises_and_skips_work_when_off(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from obsilord import promptlog
+
+    calls: list[str] = []
+
+    def broken() -> str:
+        calls.append("called")
+        raise KeyError("odd part")
+
+    promptlog.emit(broken)  # off: the formatter is not called
+    assert calls == []
+    caplog.set_level(logging.INFO, logger="obsilord.prompts")
+    promptlog.emit(broken)
+    assert calls == ["called"]
+    assert "prompt log failed (KeyError)" in caplog.text
+    promptlog.emit(lambda name: f"hello {name}", "Qwenny")
+    assert "hello Qwenny" in caplog.text

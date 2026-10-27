@@ -123,6 +123,12 @@ class TTSSettings:
         return bool(self.voice.strip())
 
 
+CAMERA_APIS = ("dshow", "msmf", "any")
+CAMERA_MAX_EDGE_MIN_PX = 64
+CAMERA_MAX_EDGE_MAX_PX = 4096
+CAMERA_WARMUP_MAX = 60
+
+
 @dataclass(frozen=True)
 class CameraSettings:
     device_index: int
@@ -130,6 +136,50 @@ class CameraSettings:
     warmup_frames: int
     cooldown_s: float
     max_per_hour: int
+    # OpenCV capture backend, one of CAMERA_APIS: "dshow" (DirectShow),
+    # "msmf" (Media Foundation, which hung on open on the dev machine), or
+    # "any" (OpenCV picks).
+    api: str = "dshow"  # added in Phase 5
+    # Limit for opening the camera and grabbing one frame, in seconds.
+    timeout_s: float = 20.0  # added in Phase 5
+
+
+VISION_BACKENDS = ("vulkan", "cpu")
+
+
+@dataclass(frozen=True, kw_only=True)
+class VisionSettings:
+    """[vision], added in Phase 5. The whole section is optional.
+
+    Local vision model for look(): llama.cpp's llama-server, started for each
+    look on 127.0.0.1 and stopped after. Paths are relative to the repo root
+    (or absolute); `python -m obsilord.vision.fetch` downloads the defaults.
+    An empty model disables look().
+    """
+
+    # One of VISION_BACKENDS. "vulkan" falls back to the CPU build for a look
+    # whose Vulkan server fails to start.
+    backend: str = "vulkan"
+    server_vulkan: str = "models/llama.cpp/b11919-vulkan/llama-server.exe"
+    server_cpu: str = "models/llama.cpp/b11919-cpu/llama-server.exe"
+    model: str = "models/vision/qwen3-vl-2b/Qwen3VL-2B-Instruct-Q4_K_M.gguf"
+    mmproj: str = "models/vision/qwen3-vl-2b/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf"
+    # Context size in tokens: the image (about 350 to 450 tokens at 640 to
+    # 768 px), the prompt, and the answer.
+    ctx: int = 2048
+    # Longest answer, in tokens.
+    max_tokens: int = 120
+    # On the CPU build the frame is shrunk to this edge first (about half the
+    # time of 768 px in the bench).
+    cpu_max_edge_px: int = 512
+    # From process start until the server answers /health.
+    start_timeout_s: float = 30.0
+    # One describe request.
+    request_timeout_s: float = 30.0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.model.strip())
 
 
 FACE_SKINS = ("dither", "code")
@@ -152,6 +202,15 @@ class AudioSettings:
     push_to_talk_key: str
 
 
+@dataclass(frozen=True, kw_only=True)
+class DebugSettings:
+    """[debug], optional."""
+
+    # Print every Gemini and llama-server request and reply to the console
+    # (see obsilord.promptlog). Camera frames show as their size only.
+    log_prompts: bool = False
+
+
 @dataclass(frozen=True)
 class Secrets:
     gemini_api_key: str | None = field(default=None, repr=False)
@@ -166,6 +225,8 @@ class Settings:
     camera: CameraSettings
     face: FaceSettings
     audio: AudioSettings
+    vision: VisionSettings = field(default_factory=VisionSettings)
+    debug: DebugSettings = field(default_factory=DebugSettings)
     secrets: Secrets = field(default_factory=Secrets, repr=False)
     repo_root: Path = REPO_ROOT
 
@@ -220,12 +281,16 @@ def _type_name(tp: Any) -> str:
 def _check_value(value: Any, tp: Any, where: str) -> Any:
     """Check value against a field type and return it (int coerced to float).
 
-    Supports str, int, float, and tuple[float, ...]. bool is rejected where a
-    number is expected even though it subclasses int.
+    Supports str, bool, int, float, and tuple[float, ...]. bool is rejected
+    where a number is expected even though it subclasses int, and a number is
+    rejected where a bool is expected.
     """
     got = type(value).__name__
     if tp is str:
         if isinstance(value, str):
+            return value
+    elif tp is bool:
+        if isinstance(value, bool):
             return value
     elif tp is int:
         if isinstance(value, int) and not isinstance(value, bool):
@@ -252,14 +317,21 @@ def _has_default(f: Any) -> bool:
 
 
 def _build(
-    cls: type, section: str, data: Mapping[str, Any], defaulted: list[str] | None = None
+    cls: type,
+    section: str,
+    data: Mapping[str, Any],
+    defaulted: list[str] | None = None,
+    optional: bool = False,
 ) -> Any:
     """Build a settings dataclass from one TOML section.
 
     Fields with a default may be omitted (their names, as section.key, are
-    appended to defaulted); fields without one are required.
+    appended to defaulted); fields without one are required. optional: the
+    section itself may be missing (all its fields must have defaults).
     """
     raw = data.get(section)
+    if raw is None and optional:
+        raw = {}
     if not isinstance(raw, dict):
         raise ValueError(f"config: missing [{section}] section")
     hints = get_type_hints(cls)
@@ -370,6 +442,55 @@ def _check_face_skin(face: FaceSettings) -> None:
         )
 
 
+def _check_camera(camera: CameraSettings) -> None:
+    """Range checks for the [camera] keys."""
+    if camera.api not in CAMERA_APIS:
+        raise ValueError(
+            f"config: camera.api must be one of {list(CAMERA_APIS)}, got {camera.api!r}"
+        )
+    if camera.device_index < 0:
+        raise ValueError(f"config: camera.device_index must be >= 0, got {camera.device_index}")
+    if not CAMERA_MAX_EDGE_MIN_PX <= camera.max_edge_px <= CAMERA_MAX_EDGE_MAX_PX:
+        raise ValueError(
+            f"config: camera.max_edge_px must be in "
+            f"{CAMERA_MAX_EDGE_MIN_PX}..{CAMERA_MAX_EDGE_MAX_PX}, got {camera.max_edge_px}"
+        )
+    if not 0 <= camera.warmup_frames <= CAMERA_WARMUP_MAX:
+        raise ValueError(
+            f"config: camera.warmup_frames must be in 0..{CAMERA_WARMUP_MAX}, "
+            f"got {camera.warmup_frames}"
+        )
+    if camera.cooldown_s < 0:
+        raise ValueError(f"config: camera.cooldown_s must be >= 0, got {camera.cooldown_s:g}")
+    if camera.max_per_hour < 1:
+        raise ValueError(
+            "config: camera.max_per_hour must be >= 1 (set [vision] model = \"\" to "
+            f"turn look() off), got {camera.max_per_hour}"
+        )
+    if not camera.timeout_s > 0:
+        raise ValueError(f"config: camera.timeout_s must be > 0, got {camera.timeout_s:g}")
+
+
+def _check_vision(vision: VisionSettings) -> None:
+    """Range checks for the [vision] keys. Files are checked by app startup."""
+    if vision.backend not in VISION_BACKENDS:
+        raise ValueError(
+            f"config: vision.backend must be one of {list(VISION_BACKENDS)}, "
+            f"got {vision.backend!r}"
+        )
+    for name in ("ctx", "max_tokens"):
+        if getattr(vision, name) < 1:
+            raise ValueError(f"config: vision.{name} must be >= 1, got {getattr(vision, name)}")
+    if not CAMERA_MAX_EDGE_MIN_PX <= vision.cpu_max_edge_px <= CAMERA_MAX_EDGE_MAX_PX:
+        raise ValueError(
+            f"config: vision.cpu_max_edge_px must be in "
+            f"{CAMERA_MAX_EDGE_MIN_PX}..{CAMERA_MAX_EDGE_MAX_PX}, got {vision.cpu_max_edge_px}"
+        )
+    for name in ("start_timeout_s", "request_timeout_s"):
+        if not getattr(vision, name) > 0:
+            raise ValueError(f"config: vision.{name} must be > 0, got {getattr(vision, name):g}")
+
+
 def default_config_path() -> Path:
     """config.toml in the repo root, falling back to config.example.toml."""
     path = REPO_ROOT / "config.toml"
@@ -397,6 +518,8 @@ def load_settings(
         camera=_build(CameraSettings, "camera", data, defaulted),
         face=_build(FaceSettings, "face", data, defaulted),
         audio=_build(AudioSettings, "audio", data, defaulted),
+        vision=_build(VisionSettings, "vision", data, defaulted, optional=True),
+        debug=_build(DebugSettings, "debug", data, defaulted, optional=True),
         secrets=load_secrets(env_path, environ),
     )
     if settings.server.host != ALLOWED_HOST:
@@ -424,6 +547,8 @@ def load_settings(
     _check_stt(settings.stt)
     _check_mouth_thresholds(settings.face.mouth_thresholds)
     _check_face_skin(settings.face)
+    _check_camera(settings.camera)
+    _check_vision(settings.vision)
     if defaulted:
         log.info(
             "config: %s not set in %s, using defaults (copy them from "

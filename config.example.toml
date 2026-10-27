@@ -76,11 +76,37 @@ high_shelf_hz = 3500.0
 high_shelf_db = 0.0
 
 [camera]
+# Used by look(). Frames stay in memory: never written to disk or logged.
 device_index = 0
-max_edge_px = 768
-warmup_frames = 5
-cooldown_s = 10
-max_per_hour = 30
+max_edge_px = 768      # longest edge sent to the vision model (64 to 4096)
+warmup_frames = 5      # frames read and dropped after opening (exposure settles)
+cooldown_s = 10        # minimum time between two looks
+max_per_hour = 30      # looks per rolling hour (at least 1)
+# OpenCV capture backend: "dshow" (DirectShow), "msmf" (Media Foundation) or
+# "any". Media Foundation hung on open on the dev machine (Brio 100).
+api = "dshow"
+timeout_s = 20         # limit for opening the camera and grabbing one frame
+
+[vision]
+# Local vision model for look(): the frame is described on this PC and Gemini
+# only gets the text. llama.cpp llama-server, prebuilt Windows build b11919
+# (github.com/ggml-org/llama.cpp, looked up 2026-10-27), started on 127.0.0.1
+# for each look and stopped after. Model: Qwen3-VL-2B-Instruct Q4_K_M with its
+# Q8_0 mmproj (Qwen/Qwen3-VL-2B-Instruct-GGUF on Hugging Face, Apache-2.0,
+# about 1.5 GB). Download all of it once with:
+#   python -m obsilord.vision.fetch
+# Paths are relative to the repo root (models/ is gitignored). An empty model
+# turns look() off.
+backend = "vulkan"     # "vulkan" (GPU) or "cpu"; vulkan falls back to cpu if it fails to start
+server_vulkan = "models/llama.cpp/b11919-vulkan/llama-server.exe"
+server_cpu = "models/llama.cpp/b11919-cpu/llama-server.exe"
+model = "models/vision/qwen3-vl-2b/Qwen3VL-2B-Instruct-Q4_K_M.gguf"
+mmproj = "models/vision/qwen3-vl-2b/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf"
+ctx = 2048             # context tokens: image, prompt and answer
+max_tokens = 120       # longest answer
+cpu_max_edge_px = 512  # on the CPU build the frame is shrunk to this first
+start_timeout_s = 30   # until the server is ready
+request_timeout_s = 30 # one answer
 
 [face]
 logical_width = 64
@@ -98,3 +124,10 @@ character = ""
 
 [audio]
 push_to_talk_key = "Space"
+
+[debug]
+# Optional section. true prints every Gemini and llama-server request and reply
+# to the console: system prompt, conversation, tool calls and results, vision
+# prompt and answer, token counts and timings. Camera frames show as their size
+# only. Leave false in normal use: it puts your conversation in the log.
+log_prompts = false
