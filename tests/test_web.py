@@ -60,10 +60,8 @@ def test_js_served_with_js_mime(client: TestClient, name: str) -> None:
     assert ctype in ("text/javascript", "application/javascript"), ctype
 
 
-@pytest.mark.parametrize("name", ["style.css", "tokens.css", "base.css"])
-def test_css_served_with_css_mime(client: TestClient, name: str) -> None:
-    # style.css imports tokens.css and base.css by relative URL.
-    resp = client.get(f"/static/{name}")
+def test_css_served_with_css_mime(client: TestClient) -> None:
+    resp = client.get("/static/style.css")
     assert resp.status_code == 200
     assert resp.headers["content-type"].split(";")[0].strip() == "text/css"
 
@@ -88,11 +86,10 @@ def test_bundled_character_served(client: TestClient) -> None:
 
 
 def test_stylesheet_urls_exist() -> None:
-    # Fonts are self-hosted; every url() in a stylesheet must be a file in web/.
-    for sheet in ("style.css", "tokens.css", "base.css"):
-        text = (WEB_DIR / sheet).read_text(encoding="utf-8")
-        for target in re.findall(r"""url\(\s*["']?([^"')]+)["']?\s*\)""", text):
-            assert (WEB_DIR / target).is_file(), f"{sheet}: {target} is missing"
+    # Fonts are self-hosted; every url() in the stylesheet must be a file in web/.
+    text = (WEB_DIR / "style.css").read_text(encoding="utf-8")
+    for target in re.findall(r"""url\(\s*["']?([^"')]+)["']?\s*\)""", text):
+        assert (WEB_DIR / target).is_file(), f"style.css: {target} is missing"
 
 
 def test_ids_the_scripts_read_are_in_the_page() -> None:

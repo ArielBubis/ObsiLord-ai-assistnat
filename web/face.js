@@ -106,12 +106,12 @@ export function setIdleEnabled(enabled) {
   idleEnabled = Boolean(enabled);
 }
 
-// CSS px kept free around the face for the chrome in style.css (the sum is
-// spelled out in its comment on main). Vertical: the top bar, the panel
-// padding and caption, the transcript, the control row, the hint and error
-// rows (all fixed heights), the gaps between them, and the page foot.
-// Horizontal: the page and panel side padding.
-const UI_RESERVE_PX = 408;
+// CSS px kept free around the face for the card chrome in style.css.
+// Vertical: page and card padding, the header rail, the frame edges, and the
+// subtitle box, input row, push-to-talk hint, and error rows (#subtitles,
+// #ptt-hint, and #error-line have fixed heights). Horizontal: page padding,
+// card padding, and the card and frame borders.
+const UI_RESERVE_PX = 424;
 const UI_RESERVE_X_PX = 72;
 
 // Pick an integer number of device pixels per logical pixel (k), then size

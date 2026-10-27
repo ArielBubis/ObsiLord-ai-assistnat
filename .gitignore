@@ -20,5 +20,3 @@ captures/
 /.claude/agents/
 # Handoff docs that come with the face playground folder.
 /web/ai-face/*.md
-# Hallmark run records (screenshots, logs, pre-flight): local only.
-.hallmark/

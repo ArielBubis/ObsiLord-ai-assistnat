@@ -17,12 +17,11 @@ import { FACE_CONFIG } from "./config.js";
 const W = FACE_CONFIG.logicalWidth;
 const H = FACE_CONFIG.logicalHeight;
 
-// bg is the screen black of the face bed in style.css; fg is the HUD ink
-// (--color-ink in tokens.css, oklch(93.5% 0.012 85)); rec is the red camera
-// light.
+// bg matches the viewport frame in style.css; fg and rec are the HUD cyan
+// and magenta.
 const COLORS = {
   bg: "#000000",
-  fg: "#ede9e1",
+  fg: "#00f0ff",
   tongue: "#ff6b8b",
   rec: "#ff0055",
 };
