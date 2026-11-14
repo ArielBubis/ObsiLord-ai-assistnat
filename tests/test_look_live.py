@@ -42,7 +42,7 @@ def test_camera_capture() -> None:
     assert jpeg[:2] == b"\xff\xd8"
 
 
-@pytest.mark.parametrize("backend", ["vulkan", "cpu"])
+@pytest.mark.parametrize("backend", ["cuda", "cpu"])
 def test_vision_describes_the_sample_and_stops(backend: str) -> None:
     if not SAMPLE.is_file():
         pytest.skip("sample photo missing")

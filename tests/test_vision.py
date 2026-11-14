@@ -93,7 +93,7 @@ def test_trim_answer() -> None:
 
 def _files(tmp_path: Path, **missing: bool) -> VisionSettings:
     names = {
-        "server_vulkan": "vk/llama-server.exe",
+        "server_cuda": "cuda/llama-server.exe",
         "server_cpu": "cpu/llama-server.exe",
         "model": "m.gguf",
         "mmproj": "mm.gguf",
@@ -109,9 +109,9 @@ def test_check_files(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     check_files(_files(tmp_path), tmp_path)
     with pytest.raises(ValueError, match="model not found"):
         check_files(_files(tmp_path / "a", model=True), tmp_path / "a")
-    with pytest.raises(ValueError, match="server_vulkan not found"):
-        check_files(_files(tmp_path / "b", server_vulkan=True), tmp_path / "b")
-    # A missing CPU build is only a warning for the vulkan backend.
+    with pytest.raises(ValueError, match="server_cuda not found"):
+        check_files(_files(tmp_path / "b", server_cuda=True), tmp_path / "b")
+    # A missing CPU build is only a warning for the cuda backend.
     check_files(_files(tmp_path / "c", server_cpu=True), tmp_path / "c")
     assert "no CPU fallback" in caplog.text
 
@@ -155,7 +155,7 @@ class FakeServer:
         return {"choices": [{"message": {"content": self.answer}}]}
 
     def log_tail(self, n: int) -> list[str]:
-        return ["ggml_vulkan: out of memory"][-n:]
+        return ["ggml_cuda: out of memory"][-n:]
 
     def stop(self) -> None:
         self.stopped = True
@@ -190,49 +190,49 @@ async def _describe(vision: LlamaServerVision, jpeg: bytes, question: str = "q")
         return await session.describe(jpeg, question)
 
 
-def test_vulkan_session_starts_answers_and_stops(tmp_path: Path) -> None:
-    vk = FakeServer("vulkan", ready_after=3)
-    vision, launched = _vision(tmp_path, {"vulkan": vk})
+def test_cuda_session_starts_answers_and_stops(tmp_path: Path) -> None:
+    gpu = FakeServer("cuda", ready_after=3)
+    vision, launched = _vision(tmp_path, {"cuda": gpu})
     answer = asyncio.run(_describe(vision, _jpeg(), "What am I holding?"))
     assert answer == "A red mug."
-    assert launched == ["vulkan"]
-    assert vk.stopped
-    # Vulkan gets the frame at full size; the question is in the prompt.
-    assert _sent_size(vk.posts[0]) == (640, 480)
-    assert vk.posts[0]["messages"][0]["content"][1]["text"] == "What am I holding?"
+    assert launched == ["cuda"]
+    assert gpu.stopped
+    # CUDA gets the frame at full size; the question is in the prompt.
+    assert _sent_size(gpu.posts[0]) == (640, 480)
+    assert gpu.posts[0]["messages"][0]["content"][1]["text"] == "What am I holding?"
 
 
-def test_vulkan_exit_falls_back_to_cpu_with_a_smaller_frame(
+def test_cuda_exit_falls_back_to_cpu_with_a_smaller_frame(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    vk, cpu = FakeServer("vulkan", ready_after=None, exit_code=1), FakeServer("cpu")
-    vision, launched = _vision(tmp_path, {"vulkan": vk, "cpu": cpu}, cpu_max_edge_px=512)
+    gpu, cpu = FakeServer("cuda", ready_after=None, exit_code=1), FakeServer("cpu")
+    vision, launched = _vision(tmp_path, {"cuda": gpu, "cpu": cpu}, cpu_max_edge_px=512)
     answer = asyncio.run(_describe(vision, _jpeg()))
     assert answer == "A red mug."
-    assert launched == ["vulkan", "cpu"]
-    assert vk.stopped and cpu.stopped
+    assert launched == ["cuda", "cpu"]
+    assert gpu.stopped and cpu.stopped
     assert _sent_size(cpu.posts[0]) == (512, 384)
     assert "exited with code 1" in caplog.text
     assert "out of memory" in caplog.text  # the server's own last log lines
 
 
-def test_vulkan_too_slow_falls_back(tmp_path: Path) -> None:
-    vk, cpu = FakeServer("vulkan", ready_after=None), FakeServer("cpu")
-    vision, launched = _vision(tmp_path, {"vulkan": vk, "cpu": cpu})
+def test_cuda_too_slow_falls_back(tmp_path: Path) -> None:
+    gpu, cpu = FakeServer("cuda", ready_after=None), FakeServer("cpu")
+    vision, launched = _vision(tmp_path, {"cuda": gpu, "cpu": cpu})
     t0 = time.monotonic()
     asyncio.run(_describe(vision, _jpeg()))
-    assert launched == ["vulkan", "cpu"]
+    assert launched == ["cuda", "cpu"]
     assert time.monotonic() - t0 < 3
 
 
-def test_vulkan_that_cannot_run_falls_back(tmp_path: Path) -> None:
-    vk, cpu = FakeServer("vulkan", start_error=True), FakeServer("cpu")
-    vision, launched = _vision(tmp_path, {"vulkan": vk, "cpu": cpu})
+def test_cuda_that_cannot_run_falls_back(tmp_path: Path) -> None:
+    gpu, cpu = FakeServer("cuda", start_error=True), FakeServer("cpu")
+    vision, launched = _vision(tmp_path, {"cuda": gpu, "cpu": cpu})
     assert asyncio.run(_describe(vision, _jpeg())) == "A red mug."
-    assert launched == ["vulkan", "cpu"]
+    assert launched == ["cuda", "cpu"]
 
 
-def test_cpu_backend_does_not_try_vulkan(tmp_path: Path) -> None:
+def test_cpu_backend_does_not_try_cuda(tmp_path: Path) -> None:
     cpu = FakeServer("cpu")
     vision, launched = _vision(tmp_path, {"cpu": cpu}, backend="cpu")
     asyncio.run(_describe(vision, _jpeg()))
@@ -241,11 +241,11 @@ def test_cpu_backend_does_not_try_vulkan(tmp_path: Path) -> None:
 
 def test_both_fail(tmp_path: Path) -> None:
     servers = {
-        "vulkan": FakeServer("vulkan", ready_after=None, exit_code=1),
+        "cuda": FakeServer("cuda", ready_after=None, exit_code=1),
         "cpu": FakeServer("cpu", ready_after=None, exit_code=3),
     }
     vision, _ = _vision(tmp_path, servers)
-    with pytest.raises(VisionError, match="vulkan: exited with code 1; cpu: exited with code 3"):
+    with pytest.raises(VisionError, match="cuda: exited with code 1; cpu: exited with code 3"):
         asyncio.run(_describe(vision, _jpeg()))
     assert all(s.stopped for s in servers.values())
 
@@ -255,16 +255,16 @@ def test_request_failure_is_a_vision_error(tmp_path: Path) -> None:
         def post(self, body: dict[str, Any], timeout_s: float) -> Any:
             raise OSError("connection reset")
 
-    vk = Broken("vulkan")
-    vision, _ = _vision(tmp_path, {"vulkan": vk})
+    gpu = Broken("cuda")
+    vision, _ = _vision(tmp_path, {"cuda": gpu})
     with pytest.raises(VisionError, match="OSError"):
         asyncio.run(_describe(vision, _jpeg()))
-    assert vk.stopped
+    assert gpu.stopped
 
 
 def test_cancel_while_loading_stops_the_server(tmp_path: Path) -> None:
-    vk = FakeServer("vulkan", ready_after=None)
-    vision, _ = _vision(tmp_path, {"vulkan": vk}, start_timeout_s=10.0)
+    gpu = FakeServer("cuda", ready_after=None)
+    vision, _ = _vision(tmp_path, {"cuda": gpu}, start_timeout_s=10.0)
 
     async def go() -> None:
         task = asyncio.create_task(_describe(vision, _jpeg()))
@@ -274,7 +274,7 @@ def test_cancel_while_loading_stops_the_server(tmp_path: Path) -> None:
             await task
 
     asyncio.run(go())
-    assert vk.stopped
+    assert gpu.stopped
 
 
 def test_http_error_text() -> None:
@@ -316,7 +316,7 @@ def _error_server() -> Iterator[int]:
 
 
 def test_http_error_is_a_vision_error_with_the_server_message() -> None:
-    proc = ServerProcess("vulkan", Path("server.exe"), Path("m.gguf"), Path("mm.gguf"), 2048)
+    proc = ServerProcess("cuda", Path("server.exe"), Path("m.gguf"), Path("mm.gguf"), 2048)
     with _error_server() as port:
         proc.port = port
         with pytest.raises(VisionError, match="returned HTTP 400: the request exceeds"):
@@ -345,7 +345,7 @@ def test_requests_ignore_proxy_settings(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_server_args_bind_loopback_only() -> None:
-    proc = ServerProcess("vulkan", Path("server.exe"), Path("m.gguf"), Path("mm.gguf"), 2048)
+    proc = ServerProcess("cuda", Path("server.exe"), Path("m.gguf"), Path("mm.gguf"), 2048)
     args = proc.args
     assert args[args.index("--host") + 1] == "127.0.0.1"
     assert args[args.index("-c") + 1] == "2048"
@@ -360,9 +360,33 @@ def test_default_paths_match_fetch() -> None:
     defaults = VisionSettings()
     assert REPO_ROOT / defaults.model == fetch.MODEL_ROOT / fetch.MODEL_KEY / fetch.MODEL.name
     assert REPO_ROOT / defaults.mmproj == fetch.MODEL_ROOT / fetch.MODEL_KEY / fetch.MMPROJ.name
-    for backend in ("vulkan", "cpu"):
+    for backend in ("cuda", "cpu"):
         exe = REPO_ROOT / getattr(defaults, f"server_{backend}")
         assert exe == fetch.binary_dir(backend) / "llama-server.exe"
+
+
+def test_fetch_model_dir_prints_config_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from obsilord.vision import fetch
+
+    targets: list[Path] = []
+
+    def fake_download(remote: fetch.Remote, dest_dir: Path) -> Path:
+        targets.append(dest_dir)
+        return dest_dir / remote.name
+
+    monkeypatch.setattr(fetch, "download", fake_download)
+    fetch.fetch_model()
+    assert targets == [fetch.MODEL_ROOT / fetch.MODEL_KEY] * 2
+    assert "config.toml" not in capsys.readouterr().out  # the defaults already match
+
+    shared = tmp_path / "shared"
+    fetch.fetch_model(shared)
+    assert targets[2:] == [shared, shared]
+    out = capsys.readouterr().out
+    assert f'model = "{(shared / fetch.MODEL.name).resolve().as_posix()}"' in out
+    assert f'mmproj = "{(shared / fetch.MMPROJ.name).resolve().as_posix()}"' in out
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows job objects")
@@ -386,13 +410,13 @@ def test_prompt_log_shows_the_prompt_but_not_the_image(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO, logger="obsilord.prompts")
-    vk = FakeServer("vulkan")
-    vision, _ = _vision(tmp_path, {"vulkan": vk})
+    gpu = FakeServer("cuda")
+    vision, _ = _vision(tmp_path, {"cuda": gpu})
     jpeg = _jpeg()
     asyncio.run(_describe(vision, jpeg, "What am I holding?"))
     request, response = [r.getMessage() for r in caplog.records if r.name == "obsilord.prompts"]
     assert request.splitlines() == [
-        'vision request (vulkan): {"max_tokens": 120, "temperature": 0.2, '
+        'vision request (cuda): {"max_tokens": 120, "temperature": 0.2, '
         '"cache_prompt": false, "stream": false}',
         "[user image_url] data:image/jpeg;base64, "
         f"{len(jpeg) / 1024:.0f} KB (not shown)",
@@ -401,5 +425,5 @@ def test_prompt_log_shows_the_prompt_but_not_the_image(
     ]
     b64 = base64.b64encode(jpeg).decode("ascii")
     assert b64[:40] not in caplog.text
-    assert response.startswith("vision response (vulkan) after ")
+    assert response.startswith("vision response (cuda) after ")
     assert response.endswith('"usage": null, "timings": null}\nA red mug.')

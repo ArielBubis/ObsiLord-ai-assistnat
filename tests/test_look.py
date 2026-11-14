@@ -134,7 +134,7 @@ class FakeVision:
         if self.while_loading is not None:
             await self.while_loading()
         if self.start_error:
-            raise VisionError("llama-server did not start (vulkan: exited with code 1)")
+            raise VisionError("llama-server did not start (cuda: exited with code 1)")
         try:
             yield FakeSession(self)
         finally:

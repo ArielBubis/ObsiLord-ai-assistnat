@@ -40,7 +40,8 @@ beam_size = 1
 # recordings shorter than min_utterance_ms (50 to 5000) are rejected.
 max_utterance_s = 30.0
 min_utterance_ms = 300
-# Model cache, relative to the repo root (models/ is gitignored).
+# Model cache, relative to the repo root (models/ is gitignored), or an
+# absolute path to a folder you keep models in.
 download_root = "models"
 
 [tts]
@@ -97,8 +98,20 @@ timeout_s = 20         # limit for opening the camera and grabbing one frame
 #   python -m obsilord.vision.fetch
 # Paths are relative to the repo root (models/ is gitignored). An empty model
 # turns look() off.
-backend = "vulkan"     # "vulkan" (GPU) or "cpu"; vulkan falls back to cpu if it fails to start
-server_vulkan = "models/llama.cpp/b11919-vulkan/llama-server.exe"
+#
+# Model location: model and mmproj may also be absolute paths, so the files
+# can live in a folder you already keep models in (LM Studio's models folder,
+# for example) instead of inside this repo. Download them there with
+#   python -m obsilord.vision.fetch --model-dir "D:/your/models/Qwen/Qwen3-VL-2B-Instruct-GGUF"
+# and set model and mmproj below to the two lines that command prints. The
+# same goes for [stt] download_root. The llama.cpp programs (server_cuda,
+# server_cpu) stay under models/llama.cpp/, pinned to the build this app was
+# tested with.
+#
+# The "cuda" backend needs an NVIDIA GPU and driver (CUDA 13.4 build, runtime
+# DLLs included in the download). Without one, set backend = "cpu".
+backend = "cuda"       # "cuda" (NVIDIA GPU) or "cpu"; cuda falls back to cpu if it fails to start
+server_cuda = "models/llama.cpp/b11919-cuda/llama-server.exe"
 server_cpu = "models/llama.cpp/b11919-cpu/llama-server.exe"
 model = "models/vision/qwen3-vl-2b/Qwen3VL-2B-Instruct-Q4_K_M.gguf"
 mmproj = "models/vision/qwen3-vl-2b/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf"

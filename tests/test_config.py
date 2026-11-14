@@ -605,7 +605,7 @@ def test_camera_and_vision_from_example(tmp_path: Path) -> None:
     assert s.camera.api == "dshow"
     assert s.camera.timeout_s == 20.0
     assert s.vision.enabled
-    assert s.vision.backend == "vulkan"
+    assert s.vision.backend == "cuda"
     assert s.vision.ctx == 2048 and s.vision.cpu_max_edge_px == 512
     assert s.vision == VisionSettings()  # the example spells out every default
 
@@ -642,7 +642,7 @@ def test_camera_keys_added_in_phase_5_are_optional(tmp_path: Path) -> None:
         ("warmup_frames = 5", "warmup_frames = -1", "camera.warmup_frames"),
         ("max_per_hour = 30", "max_per_hour = 0", "camera.max_per_hour"),
         ("cooldown_s = 10", "cooldown_s = -1", "camera.cooldown_s"),
-        ('backend = "vulkan"', 'backend = "cuda"', "vision.backend"),
+        ('backend = "cuda"', 'backend = "vulkan"', "vision.backend"),
         ("ctx = 2048", "ctx = 0", "vision.ctx"),
         ("cpu_max_edge_px = 512", "cpu_max_edge_px = 10", "vision.cpu_max_edge_px"),
         ("start_timeout_s = 30", "start_timeout_s = 0", "vision.start_timeout_s"),

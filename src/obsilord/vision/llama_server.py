@@ -10,7 +10,8 @@ with a local bench script (not in the repo) on 2026-10-27 (Windows 11, RX 6600 X
   previous prompt; the answer is choices[0].message.content.
 - Qwen3-VL-2B Q4_K_M, started per look: load 1.3 s plus 0.7 s per answer on
   Vulkan (1.6 s with LM Studio's 7B model in VRAM); on the CPU build about
-  3.8 s per answer at 768 px and 1.7 s at 512 px.
+  3.8 s per answer at 768 px and 1.7 s at 512 px. The GPU build was switched
+  from Vulkan to CUDA on 2026-11-14 (RTX 5070 Ti); these timings predate it.
 - The server log did not contain the image data. It is kept in memory anyway
   and only its last lines are logged, when a server fails to start (before any
   image was sent).
@@ -20,7 +21,7 @@ with a local bench script (not in the repo) on 2026-10-27 (Windows 11, RX 6600 X
   llama-server's message, goes to the log.
 
 session() starts the server for [vision] backend, waits for /health, and stops
-it on exit, so nothing stays loaded between looks. If the Vulkan server exits
+it on exit, so nothing stays loaded between looks. If the CUDA server exits
 or is not ready within start_timeout_s, the CPU build is tried for that look
 and the frame is shrunk to cpu_max_edge_px first. On Windows each server is
 put in a job object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, so it dies with
@@ -93,15 +94,15 @@ def resolve(repo_root: Path, value: str) -> Path:
 
 def check_files(vision: VisionSettings, repo_root: Path) -> None:
     """Raise ValueError naming the first missing file. A missing CPU build is
-    only a warning when the backend is vulkan (no fallback then)."""
+    only a warning when the backend is cuda (no fallback then)."""
     required = [("model", vision.model), ("mmproj", vision.mmproj)]
     required.append((f"server_{vision.backend}", getattr(vision, f"server_{vision.backend}")))
     for key, value in required:
         if not resolve(repo_root, value).is_file():
             raise ValueError(f"vision: [vision] {key} not found: {value}")
-    if vision.backend == "vulkan" and not resolve(repo_root, vision.server_cpu).is_file():
+    if vision.backend == "cuda" and not resolve(repo_root, vision.server_cpu).is_file():
         log.warning(
-            "vision: [vision] server_cpu not found (%s), no CPU fallback if Vulkan fails",
+            "vision: [vision] server_cpu not found (%s), no CPU fallback if CUDA fails",
             vision.server_cpu,
         )
 
@@ -338,7 +339,7 @@ class ServerProcess:
             "-c", str(ctx),
             "--no-webui",
         ]
-        if backend == "vulkan":
+        if backend == "cuda":
             self.args += ["-ngl", "99"]
         self._log: collections.deque[str] = collections.deque(maxlen=LOG_LINES)
         self._proc: subprocess.Popen[str] | None = None
@@ -459,7 +460,7 @@ class LlamaServerVision:
         self.prompt = prompt if prompt is not None else load_prompt()
         self._repo_root = repo_root
         self._launch = launcher if launcher is not None else self._new_server
-        self._order = ["vulkan", "cpu"] if settings.backend == "vulkan" else ["cpu"]
+        self._order = ["cuda", "cpu"] if settings.backend == "cuda" else ["cpu"]
         # One look at a time: two servers would compete for the GPU and RAM.
         self._lock = asyncio.Lock()
 

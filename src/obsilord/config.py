@@ -144,7 +144,7 @@ class CameraSettings:
     timeout_s: float = 20.0  # added in Phase 5
 
 
-VISION_BACKENDS = ("vulkan", "cpu")
+VISION_BACKENDS = ("cuda", "cpu")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -153,14 +153,15 @@ class VisionSettings:
 
     Local vision model for look(): llama.cpp's llama-server, started for each
     look on 127.0.0.1 and stopped after. Paths are relative to the repo root
-    (or absolute); `python -m obsilord.vision.fetch` downloads the defaults.
+    (or absolute, for example a shared model folder such as LM Studio's);
+    `python -m obsilord.vision.fetch` downloads the defaults.
     An empty model disables look().
     """
 
-    # One of VISION_BACKENDS. "vulkan" falls back to the CPU build for a look
-    # whose Vulkan server fails to start.
-    backend: str = "vulkan"
-    server_vulkan: str = "models/llama.cpp/b11919-vulkan/llama-server.exe"
+    # One of VISION_BACKENDS. "cuda" (NVIDIA GPU) falls back to the CPU build
+    # for a look whose CUDA server fails to start.
+    backend: str = "cuda"
+    server_cuda: str = "models/llama.cpp/b11919-cuda/llama-server.exe"
     server_cpu: str = "models/llama.cpp/b11919-cpu/llama-server.exe"
     model: str = "models/vision/qwen3-vl-2b/Qwen3VL-2B-Instruct-Q4_K_M.gguf"
     mmproj: str = "models/vision/qwen3-vl-2b/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf"

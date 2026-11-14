@@ -70,7 +70,7 @@ def _with_vision_files(tmp_path: Path, skip: str = "") -> Settings:
         REPO_ROOT / "config.example.toml", env_path=tmp_path / "missing.env", environ={}
     )
     paths = {}
-    for key in ("server_vulkan", "server_cpu", "model", "mmproj"):
+    for key in ("server_cuda", "server_cpu", "model", "mmproj"):
         path = tmp_path / f"{key}.bin"
         if key != skip:
             path.write_bytes(b"x")
