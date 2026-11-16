@@ -2,13 +2,15 @@
 
 Desktop prototype of a voice assistant with an 8-bit animated face. Everything runs on one PC with a webcam. The camera only takes a photo during a conversation turn: when you ask ("what am I holding?") or when the assistant decides to look, limited by a cooldown and an hourly cap.
 
-Status: working prototype. Text and voice chat, the animated face (pixel and 3D skins), and look() with a local vision model.
+Status: working prototype. Text and voice chat, the animated face (pixel and 3D skins), look() with a local vision model, and an optional online lookup for a cut-out of the frame.
 
 ## How it works
 
 - A browser page is the face, the microphone input, and the speaker output.
 - A Python backend does speech-to-text, the LLM call (Gemini), text-to-speech (Piper), and the webcam grab.
-- Camera frames never leave the PC: a small local vision model (Qwen3-VL-2B on llama.cpp, started only while it looks) describes the frame, and Gemini gets that text. Download it once with `python -m obsilord.vision.fetch` (add `--sample` for the photo the live tests use).
+- Camera frames stay on the PC by default: a small local vision model (Qwen3-VL-2B on llama.cpp, started only while it looks) describes the frame, and Gemini gets that text. Download it once with `python -m obsilord.vision.fetch` (add `--sample` for the photo the live tests use).
+- Optional, off by default: web image search (`[image_search]` in config.toml) for things the local model cannot name, such as an album cover. The local model finds the thing in the frame, the app cuts it out, and only that cut-out is uploaded: to Gemini (the default, same API key as the chat) or to Google Cloud Vision web detection (needs its own key). This is the one feature that sends part of a camera frame off the PC. The assistant is told to use it only when you ask it to identify something, and it has hourly and monthly caps.
+- The Snapshots switch on the page shows the frame the camera took and the cut-out that was sent to the search. The pictures are kept in memory only.
 - They talk over a WebSocket bound to 127.0.0.1 only.
 
 ## Files

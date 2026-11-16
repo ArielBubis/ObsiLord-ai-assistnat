@@ -89,3 +89,57 @@ def test_full_look() -> None:
     print(f"\nlook: {(time.perf_counter() - t0) * 1000:.0f} ms: {first}")
     assert first.get("output")
     assert second["error"].startswith("Camera cooldown")
+
+
+def test_search_image_crops_the_sample_with_the_real_model(tmp_path: Path) -> None:
+    """The real vision model boxes the bee, the app crops it, and a fake search
+    client gets only the crop. Nothing is uploaded and no camera is used."""
+    import cv2
+    import numpy
+
+    from obsilord.imagesearch.base import ImageMatches
+    from obsilord.imagesearch.budget import SearchBudget
+    from obsilord.look import ImageSearch
+
+    if not SAMPLE.is_file():
+        pytest.skip("sample photo missing")
+    settings = _settings()
+    frame = shrink_jpeg(SAMPLE.read_bytes(), settings.camera.max_edge_px)
+
+    class SampleCamera:
+        async def capture_jpeg(self) -> bytes:
+            return frame
+
+    class RecordingSearch:
+        provider = "fake"
+        uploads: list[bytes] = []
+
+        async def search(self, jpeg: bytes) -> ImageMatches:
+            self.uploads.append(jpeg)
+            return ImageMatches(best_guesses=("bumblebee",))
+
+    def size(jpeg: bytes) -> tuple[int, int]:
+        image = cv2.imdecode(numpy.frombuffer(jpeg, numpy.uint8), cv2.IMREAD_COLOR)
+        return image.shape[1], image.shape[0]
+
+    client = RecordingSearch()
+    looker = Looker(
+        SampleCamera(),
+        LlamaServerVision(settings.vision, settings.repo_root),
+        LookLimiter(0, 30),
+        ImageSearch(client, SearchBudget(tmp_path / "image_search.jsonl", 10, 10), 0.8),
+    )
+    snaps: list[tuple[str, tuple[int, int]]] = []
+
+    async def snapshot(kind: str, jpeg: bytes) -> None:
+        snaps.append((kind, size(jpeg)))
+
+    t0 = time.perf_counter()
+    result = asyncio.run(looker.search_image("the bee", snapshot))
+    print(f"\nsearch_image: {(time.perf_counter() - t0) * 1000:.0f} ms, snapshots {snaps}: {result}")
+    assert "bumblebee" in result["output"]
+    (upload,) = client.uploads
+    full, crop = size(frame), size(upload)
+    # The bee is a small part of the photo.
+    assert crop[0] < full[0] / 3 and crop[1] < full[1] / 3
+    assert snaps == [("camera", full), ("search", crop)]

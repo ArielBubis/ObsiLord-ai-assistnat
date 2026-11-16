@@ -11,6 +11,7 @@ import threading
 from typing import Any, AsyncIterator
 
 from obsilord.config import Settings
+from obsilord.look import LOOK_TOOL, SEARCH_IMAGE_TOOL
 from obsilord.llm.base import (
     Done,
     LLMEvent,
@@ -149,21 +150,41 @@ class FakeToolLLM:
 
 
 class FakeLooker:
-    """Returns `response` for every look; questions records the arguments.
+    """Returns `response` for every look or search; questions and targets
+    record the arguments. search: also declare search_image().
 
     delay_s: sleep before answering (lets other tasks run).
     """
 
-    def __init__(self, response: dict[str, Any] | None = None, delay_s: float = 0.0) -> None:
+    def __init__(
+        self,
+        response: dict[str, Any] | None = None,
+        delay_s: float = 0.0,
+        search: bool = False,
+    ) -> None:
         self.response = response if response is not None else {"output": "A red mug."}
         self.delay_s = delay_s
         self.questions: list[Any] = []
+        self.targets: list[Any] = []
+        self.tools = [LOOK_TOOL, SEARCH_IMAGE_TOOL] if search else [LOOK_TOOL]
+        # Sent through the snapshot callback of each call, as (kind, jpeg).
+        self.snapshots: list[tuple[str, bytes]] = []
 
-    async def look(self, question: Any) -> dict[str, Any]:
-        self.questions.append(question)
+    async def _answer(self, snapshot: Any) -> dict[str, Any]:
         if self.delay_s:
             await asyncio.sleep(self.delay_s)
+        if snapshot is not None:
+            for kind, jpeg in self.snapshots:
+                await snapshot(kind, jpeg)
         return dict(self.response)
+
+    async def look(self, question: Any, snapshot: Any = None) -> dict[str, Any]:
+        self.questions.append(question)
+        return await self._answer(snapshot)
+
+    async def search_image(self, target: Any, snapshot: Any = None) -> dict[str, Any]:
+        self.targets.append(target)
+        return await self._answer(snapshot)
 
 
 class FakeTTS:

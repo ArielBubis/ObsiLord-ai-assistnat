@@ -66,6 +66,7 @@ and the reply text only, never tool calls or results.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import math
@@ -82,7 +83,7 @@ from obsilord.llm.base import (
     ToolResult,
     UsageUpdate,
 )
-from obsilord.look import LOOK_TOOL, MSG_ONE_LOOK, LookTool
+from obsilord.look import MSG_ONE_LOOK, MSG_SEARCH_OFF, SEARCH_IMAGE_TOOL, LookTool
 from obsilord.sentences import SentenceSplitter
 from obsilord.stt.base import SAMPLE_RATE, STTClient, pcm16_duration_ms
 from obsilord.tts.base import TTSClient
@@ -532,7 +533,15 @@ async def _run_turn(
         return None
 
     messages = [*history, Message(role="user", text=text)]
-    tools = [LOOK_TOOL] if looker is not None else []
+    tools = list(looker.tools) if looker is not None else []
+    tool_names = {tool.name for tool in tools}
+
+    async def snapshot(kind: str, jpeg: bytes) -> None:
+        # The frame (kind "camera") or the crop about to be uploaded ("search")
+        # for the page's snapshot panel. The app's send drops these unless the
+        # page asked for them. Never logged.
+        b64 = base64.b64encode(jpeg).decode("ascii")
+        await send({"type": "snapshot", "kind": kind, "jpeg_b64": b64})
     splitter = SentenceSplitter()
     sentence_count = 0
     st = _TurnState()
@@ -629,7 +638,8 @@ async def _run_turn(
         return error
 
     async def run_tools(lookup: LookTool) -> list[ToolResult]:
-        """Answer every call of the first request; only the first look runs."""
+        """Answer every call of the first request; only the first camera tool
+        call (look or search_image) runs."""
         nonlocal look_ms
         # Speech from before the call (including a sentence the splitter still
         # holds) goes out first, so no speaking state lands in the look.
@@ -643,13 +653,21 @@ async def _run_turn(
         results: list[ToolResult] = []
         looked = False
         for call in calls:
-            if call.name != LOOK_TOOL.name:
-                results.append(ToolResult(call, {"error": f"Unknown tool: {call.name}."}))
+            if call.name not in tool_names:
+                # The model may ask for the search although it was not offered.
+                off = call.name == SEARCH_IMAGE_TOOL.name
+                message = MSG_SEARCH_OFF if off else f"Unknown tool: {call.name}."
+                results.append(ToolResult(call, {"error": message}))
             elif looked:
                 results.append(ToolResult(call, {"error": MSG_ONE_LOOK}))
+            elif call.name == SEARCH_IMAGE_TOOL.name:
+                looked = True
+                response = await lookup.search_image(call.args.get("target"), snapshot)
+                results.append(ToolResult(call, response))
             else:
                 looked = True
-                results.append(ToolResult(call, await lookup.look(call.args.get("question"))))
+                response = await lookup.look(call.args.get("question"), snapshot)
+                results.append(ToolResult(call, response))
         look_ms = int((time.monotonic() - t_look) * 1000)
         await send({"type": "state", "state": "thinking"})
         return results

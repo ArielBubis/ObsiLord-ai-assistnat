@@ -450,6 +450,88 @@ body[data-status="thinking"] .scan-line {
   content: "[!] ";
 }
 
+/* Snapshot panel: a switch, and under it the frame of the last look and the
+   crop that went to the image search. */
+#snapshots {
+  margin-top: 8px;
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  contain: inline-size;
+}
+
+.snap-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.snap-switch input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--cyan);
+  cursor: pointer;
+}
+
+.snap-switch input:checked + span {
+  color: var(--cyan);
+}
+
+.snap-switch input:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+#snap-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+#snap-panel[hidden] {
+  display: none;
+}
+
+#snap-panel figure {
+  min-width: 0;
+  margin: 0;
+}
+
+#snap-panel figcaption {
+  margin-bottom: 4px;
+}
+
+.snap-frame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 150px;
+  background: var(--border-black);
+  border: 2px solid var(--dim);
+}
+
+.snap-frame img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.snap-frame img[hidden] {
+  display: none;
+}
+
+#snap-note {
+  min-height: 16px;
+  margin: 4px 0 0;
+  font-weight: 400;
+  text-transform: none;
+}
+
 /* Debug panel (?debug=1 only). */
 #debug {
   display: flex;

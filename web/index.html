@@ -37,6 +37,23 @@
     </form>
     <p id="ptt-hint" data-mode="off"><span id="ptt-dot" aria-hidden="true"></span><span id="ptt-text"></span></p>
     <p id="error-line" role="alert"></p>
+    <section id="snapshots">
+      <label class="snap-switch">
+        <input id="snap-toggle" type="checkbox">
+        <span>Snapshots</span>
+      </label>
+      <div id="snap-panel" hidden>
+        <figure>
+          <figcaption>Camera</figcaption>
+          <div class="snap-frame"><img id="snap-camera" alt="The frame the camera took" hidden></div>
+        </figure>
+        <figure>
+          <figcaption>Sent to search</figcaption>
+          <div class="snap-frame"><img id="snap-search" alt="The crop sent to the image search" hidden></div>
+          <p id="snap-note"></p>
+        </figure>
+      </div>
+    </section>
     <section id="debug" hidden>
       <div id="debug-states"></div>
       <label>mouth

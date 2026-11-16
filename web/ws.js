@@ -18,6 +18,9 @@
 // max_utterance_s ends the recording: the last partial frame is flushed,
 // then audio_end goes out (only after listening came) and the turn runs
 // like a text turn. The mic tracks are stopped after every recording.
+//
+// Snapshots: with the Snapshots switch on, the server sends the frame of
+// each look and the crop sent to the image search (snapshots.js).
 
 import {
   setState, getState, mouthText, mouthEnd, mouthReset, setAudioLevelSource, setAudioMouth,
@@ -26,6 +29,7 @@ import { appendedText } from "./mouth.js";
 import { createPlayer } from "./audio.js";
 import { createMic, micErrorMessage } from "./audio_in.js";
 import { loadAudioSettings, MAX_UTTERANCE_DEFAULT_S } from "./config.js";
+import { initSnapshots } from "./snapshots.js";
 import {
   busyAfterMessage, stateAction, drainTimeoutMs, textDrivesMouth, closesOpenSentence,
   pressAction, recordingAction, controlsDisabled, orphanAction,
@@ -51,6 +55,29 @@ const hintText = document.getElementById("ptt-text");
 const userLine = document.getElementById("user-line");
 const subtitle = document.getElementById("subtitle");
 const errorLine = document.getElementById("error-line");
+
+// localStorage itself can throw when storage is blocked.
+function safeStorage() {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+const snapshots = initSnapshots(
+  {
+    toggle: document.getElementById("snap-toggle"),
+    panel: document.getElementById("snap-panel"),
+    camera: document.getElementById("snap-camera"),
+    search: document.getElementById("snap-search"),
+    note: document.getElementById("snap-note"),
+  },
+  safeStorage(),
+  (text) => {
+    if (isOpen()) ws.send(text);
+  },
+);
 
 let ws = null;
 let connected = false;
@@ -539,6 +566,9 @@ function handleMessage(event) {
     case "error":
       showError(msg.message);
       break;
+    case "snapshot":
+      snapshots.show(msg);
+      break;
     default:
       break;
   }
@@ -558,6 +588,7 @@ function connect() {
     statusEl.textContent = "connected";
     if (errorLine.textContent === NOT_CONNECTED) errorLine.textContent = "";
     sock.send(JSON.stringify({ type: "ping" }));
+    snapshots.announce();
     updateHint();
   });
 

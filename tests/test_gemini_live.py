@@ -146,3 +146,31 @@ def test_cap_blocks_second_live_call(tmp_path: Path) -> None:
         {"type": "error", "message": MSG_CAP},
         {"type": "state", "state": "idle"},
     ]
+
+
+def test_gemini_identifies_a_crop_of_the_sample(tmp_path: Path) -> None:
+    """The [image_search] "gemini" provider on a crop of the sample photo (the
+    flower with the bee), not a camera frame."""
+    from obsilord.camera import crop_jpeg, shrink_jpeg
+    from obsilord.imagesearch.base import format_matches
+    from obsilord.imagesearch.gemini import GeminiImageIdentify
+    from obsilord.vision import fetch
+
+    sample = fetch.SAMPLE_DIR / fetch.SAMPLE.name
+    if not sample.is_file():
+        pytest.skip("sample photo missing")
+    settings = load_settings()
+    if settings.secrets.gemini_api_key is None:
+        pytest.skip("no API key configured")
+    # The box the local model gave for "the large pink flower" on 2026-11-14.
+    crop = crop_jpeg(shrink_jpeg(sample.read_bytes(), 768), (0.243, 0.189, 0.734, 0.925), 48)
+    usage = UsageTracker(tmp_path / "usage.jsonl", 100_000)
+    client = GeminiImageIdentify(
+        settings.secrets.gemini_api_key, settings.llm.model, usage, settings.image_search.timeout_s
+    )
+    t0 = time.monotonic()
+    matches = asyncio.run(client.search(crop))
+    text = format_matches(matches)
+    print(f"\ngemini identify: {(time.monotonic() - t0) * 1000:.0f} ms, {usage.today_total} tokens: {text}")
+    assert "flower" in text.lower() or "bee" in text.lower() or "cosmos" in text.lower()
+    assert 0 < usage.today_total < 3000

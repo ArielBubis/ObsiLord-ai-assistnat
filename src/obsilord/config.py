@@ -203,6 +203,37 @@ class AudioSettings:
     push_to_talk_key: str
 
 
+IMAGE_SEARCH_PROVIDERS = ("gemini", "google_vision")
+
+
+@dataclass(frozen=True, kw_only=True)
+class ImageSearchSettings:
+    """[image_search], optional, off by default.
+
+    The search_image() tool: the local vision model finds the target in one
+    webcam frame, the app crops it, and the crop is uploaded to be identified.
+    This is the only place a piece of a camera frame leaves the PC. Needs
+    [vision], and the API key of the provider in .env.
+    """
+
+    enabled: bool = False
+    # One of IMAGE_SEARCH_PROVIDERS. "gemini": the [llm] model names what the
+    # crop shows (GEMINI_API_KEY, tokens count toward the daily cap).
+    # "google_vision": Cloud Vision web detection (GOOGLE_VISION_API_KEY).
+    provider: str = "gemini"
+    # Cost guards: uploads per rolling hour (in memory) and per calendar month
+    # (counted from logs/image_search.jsonl).
+    max_per_hour: int = 10
+    max_per_month: int = 900
+    # A box covering more of the frame than this is not uploaded: it usually
+    # means the model did not find the target and boxed the whole view.
+    max_crop_fraction: float = 0.8
+    # Results kept per kind (best guesses, related names, page titles).
+    max_results: int = 5
+    # One upload and its answer.
+    timeout_s: float = 15.0
+
+
 @dataclass(frozen=True, kw_only=True)
 class DebugSettings:
     """[debug], optional."""
@@ -215,6 +246,7 @@ class DebugSettings:
 @dataclass(frozen=True)
 class Secrets:
     gemini_api_key: str | None = field(default=None, repr=False)
+    google_vision_api_key: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -227,6 +259,7 @@ class Settings:
     face: FaceSettings
     audio: AudioSettings
     vision: VisionSettings = field(default_factory=VisionSettings)
+    image_search: ImageSearchSettings = field(default_factory=ImageSearchSettings)
     debug: DebugSettings = field(default_factory=DebugSettings)
     secrets: Secrets = field(default_factory=Secrets, repr=False)
     repo_root: Path = REPO_ROOT
@@ -261,6 +294,9 @@ def parse_dotenv(text: str) -> dict[str, str]:
     return result
 
 
+SECRET_KEYS = ("GEMINI_API_KEY", "GOOGLE_VISION_API_KEY")
+
+
 def load_secrets(
     env_path: Path | None = None, environ: Mapping[str, str] | None = None
 ) -> Secrets:
@@ -270,9 +306,11 @@ def load_secrets(
     values: dict[str, str] = {}
     if env_path.is_file():
         values.update(parse_dotenv(env_path.read_text(encoding="utf-8")))
-    values.update({k: v for k, v in environ.items() if k == "GEMINI_API_KEY"})
-    key = values.get("GEMINI_API_KEY") or None
-    return Secrets(gemini_api_key=key)
+    values.update({k: v for k, v in environ.items() if k in SECRET_KEYS})
+    return Secrets(
+        gemini_api_key=values.get("GEMINI_API_KEY") or None,
+        google_vision_api_key=values.get("GOOGLE_VISION_API_KEY") or None,
+    )
 
 
 def _type_name(tp: Any) -> str:
@@ -492,6 +530,34 @@ def _check_vision(vision: VisionSettings) -> None:
             raise ValueError(f"config: vision.{name} must be > 0, got {getattr(vision, name):g}")
 
 
+def _check_image_search(search: ImageSearchSettings, vision: VisionSettings) -> None:
+    if search.provider not in IMAGE_SEARCH_PROVIDERS:
+        raise ValueError(
+            f"config: image_search.provider must be one of {list(IMAGE_SEARCH_PROVIDERS)}, "
+            f"got {search.provider!r}"
+        )
+    for key in ("max_per_hour", "max_per_month", "max_results"):
+        if getattr(search, key) < 1:
+            raise ValueError(
+                f"config: image_search.{key} must be >= 1, got {getattr(search, key)} "
+                "(set image_search.enabled = false to turn the search off)"
+            )
+    if not 0 < search.max_crop_fraction <= 1:
+        raise ValueError(
+            "config: image_search.max_crop_fraction must be > 0 and <= 1, "
+            f"got {search.max_crop_fraction:g}"
+        )
+    if not search.timeout_s > 0:
+        raise ValueError(
+            f"config: image_search.timeout_s must be > 0, got {search.timeout_s:g}"
+        )
+    if search.enabled and not vision.enabled:
+        raise ValueError(
+            "config: image_search.enabled needs the local vision model "
+            '([vision] model is empty)'
+        )
+
+
 def default_config_path() -> Path:
     """config.toml in the repo root, falling back to config.example.toml."""
     path = REPO_ROOT / "config.toml"
@@ -520,6 +586,9 @@ def load_settings(
         face=_build(FaceSettings, "face", data, defaulted),
         audio=_build(AudioSettings, "audio", data, defaulted),
         vision=_build(VisionSettings, "vision", data, defaulted, optional=True),
+        image_search=_build(
+            ImageSearchSettings, "image_search", data, defaulted, optional=True
+        ),
         debug=_build(DebugSettings, "debug", data, defaulted, optional=True),
         secrets=load_secrets(env_path, environ),
     )
@@ -550,6 +619,7 @@ def load_settings(
     _check_face_skin(settings.face)
     _check_camera(settings.camera)
     _check_vision(settings.vision)
+    _check_image_search(settings.image_search, settings.vision)
     if defaulted:
         log.info(
             "config: %s not set in %s, using defaults (copy them from "

@@ -51,14 +51,14 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Coroutine
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from obsilord import promptlog
 from obsilord.config import Settings
 from obsilord.face_character import check_character
 from obsilord.llm.base import LLMClient, Message
-from obsilord.look import LookTool
+from obsilord.look import ImageSearch, LookTool
 from obsilord.pipeline import MSG_NOT_CAUGHT, run_text_turn, run_voice_turn
 from obsilord.stt.base import SAMPLE_RATE as STT_SAMPLE_RATE
 from obsilord.stt.base import STTClient, pcm16_bytes_for_ms
@@ -106,6 +106,20 @@ def _checked_character(settings: Settings) -> Path | None:
         log.error('%s; set [face] character = "" to use the bundled character', exc)
         raise
     return path
+
+
+# The page and its scripts are checked with the server on every load (the
+# browser still gets a quick 304 when a file is unchanged). Without this a
+# browser keeps old scripts for days after an update, next to a new
+# index.html.
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+class _RevalidatedStatic(StaticFiles):
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers.update(NO_CACHE)
+        return response
 
 
 def _default_llm(settings: Settings) -> LLMClient | None:
@@ -165,7 +179,62 @@ def _default_stt(settings: Settings) -> STTClient | None:
     return stt
 
 
-def _default_looker(settings: Settings) -> LookTool | None:
+def _default_image_search(
+    settings: Settings, usage: UsageTracker | None = None
+) -> ImageSearch | None:
+    """What search_image() needs, from [image_search], or None when it is off
+    or has no API key (the tool is then not declared). usage: the token
+    tracker the "gemini" provider records its requests in."""
+    cfg = settings.image_search
+    if not cfg.enabled:
+        log.info("image search: disabled ([image_search] enabled = false)")
+        return None
+    gemini = cfg.provider == "gemini"
+    key_name = "GEMINI_API_KEY" if gemini else "GOOGLE_VISION_API_KEY"
+    key = settings.secrets.gemini_api_key if gemini else settings.secrets.google_vision_api_key
+    if not key:
+        log.warning(
+            "image search: disabled, %s is not set in .env ([image_search] enabled = true)",
+            key_name,
+        )
+        return None
+    from obsilord.imagesearch.base import ImageSearchClient
+    from obsilord.imagesearch.budget import SearchBudget
+    from obsilord.look import ImageSearch
+
+    client: ImageSearchClient
+    if gemini:
+        from obsilord.imagesearch.gemini import GeminiImageIdentify
+
+        if usage is None:
+            usage = _default_usage(settings)
+        client = GeminiImageIdentify(key, settings.llm.model, usage, cfg.timeout_s)
+    else:
+        from obsilord.imagesearch.google_vision import GoogleVisionSearch
+
+        client = GoogleVisionSearch(key, cfg.max_results, cfg.timeout_s)
+
+    budget = SearchBudget(
+        settings.repo_root / "logs" / "image_search.jsonl", cfg.max_per_hour, cfg.max_per_month
+    )
+    log.warning(
+        "image search: ENABLED (%s). search_image() uploads a crop of a camera "
+        "frame to the provider. Caps: %d per hour, %d per month (%d used this month)",
+        cfg.provider,
+        cfg.max_per_hour,
+        cfg.max_per_month,
+        budget.month_total(),
+    )
+    return ImageSearch(client, budget, cfg.max_crop_fraction)
+
+
+def _default_usage(settings: Settings) -> UsageTracker:
+    return UsageTracker(
+        settings.repo_root / "logs" / "usage.jsonl", settings.llm.daily_token_cap
+    )
+
+
+def _default_looker(settings: Settings, usage: UsageTracker | None = None) -> LookTool | None:
     """The look() tool from [camera] and [vision], or None if [vision] model is empty."""
     vision = settings.vision
     if not vision.enabled:
@@ -190,6 +259,7 @@ def _default_looker(settings: Settings) -> LookTool | None:
         CameraService(camera),
         LlamaServerVision(vision, settings.repo_root),
         LookLimiter(camera.cooldown_s, camera.max_per_hour),
+        _default_image_search(settings, usage),
     )
     log.info(
         "look: enabled (backend %s, camera %d via %s, cooldown %g s, %d per hour)",
@@ -234,12 +304,10 @@ def create_app(
         tts = _default_tts(settings)
     if stt is None:
         stt = _default_stt(settings)
-    if looker is None:
-        looker = _default_looker(settings)
     if usage is None:
-        usage = UsageTracker(
-            settings.repo_root / "logs" / "usage.jsonl", settings.llm.daily_token_cap
-        )
+        usage = _default_usage(settings)
+    if looker is None:
+        looker = _default_looker(settings, usage)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -267,7 +335,7 @@ def create_app(
 
     @app.get("/", include_in_schema=False)
     async def index() -> FileResponse:
-        return FileResponse(index_path, media_type="text/html")
+        return FileResponse(index_path, media_type="text/html", headers=NO_CACHE)
 
     @app.get("/config/face", include_in_schema=False)
     async def face_config() -> dict[str, Any]:
@@ -327,8 +395,13 @@ def create_app(
         # slip in between a watchdog close's error and its idle. Turns run as
         # separate tasks and never take this lock.
         recording_lock = asyncio.Lock()
+        # Set by the page's Snapshots switch ({"type": "snapshots", "on": true}).
+        # While off, no frame or crop is sent to the page.
+        snapshots_on = False
 
         async def send(msg: dict[str, Any] | bytes) -> None:
+            if isinstance(msg, dict) and msg.get("type") == "snapshot" and not snapshots_on:
+                return
             # One lock for JSON and binary frames keeps their order intact.
             async with send_lock:
                 if isinstance(msg, bytes):
@@ -527,6 +600,8 @@ def create_app(
                     await handle_text(payload)
                 elif kind == "ping":
                     continue
+                elif kind == "snapshots":
+                    snapshots_on = payload.get("on") is True
                 elif kind == "audio_start":
                     await handle_audio_start()
                 elif kind == "audio_end":
@@ -552,5 +627,5 @@ def create_app(
                     pass
         log.info("ws disconnected")
 
-    app.mount("/static", StaticFiles(directory=web_dir), name="static")
+    app.mount("/static", _RevalidatedStatic(directory=web_dir), name="static")
     return app

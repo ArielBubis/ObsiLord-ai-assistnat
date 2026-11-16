@@ -1,6 +1,7 @@
 """Gemini implementation of LLMClient (google-genai SDK, async streaming).
 
-This is the only module that imports google.genai. SDK details were checked
+This and imagesearch/gemini.py are the only modules that import google.genai.
+SDK details were checked
 against the installed google-genai 2.28.0 source:
 - await client.aio.models.generate_content_stream(model=, contents=, config=)
   returns an async iterator of GenerateContentResponse chunks.

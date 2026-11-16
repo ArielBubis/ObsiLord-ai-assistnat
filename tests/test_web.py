@@ -48,7 +48,7 @@ def test_index_has_canvas_and_status(client: TestClient) -> None:
 
 
 def test_expected_js_files_exist() -> None:
-    for name in ("state.js", "idle.js", "skin_code.js", "face.js", "ws.js"):
+    for name in ("state.js", "idle.js", "skin_code.js", "face.js", "ws.js", "snapshots.js"):
         assert name in JS_FILES
 
 
@@ -58,6 +58,17 @@ def test_js_served_with_js_mime(client: TestClient, name: str) -> None:
     assert resp.status_code == 200
     ctype = resp.headers["content-type"].split(";")[0].strip()
     assert ctype in ("text/javascript", "application/javascript"), ctype
+
+
+def test_page_and_scripts_are_revalidated_on_every_load(client: TestClient) -> None:
+    # Else a browser runs old scripts next to a new index.html after an update.
+    for url in ("/", "/static/ws.js", "/static/style.css", "/static/ai-face/ai-face.js"):
+        resp = client.get(url)
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-cache", url
+    etag = client.get("/static/ws.js").headers["etag"]
+    again = client.get("/static/ws.js", headers={"If-None-Match": etag})
+    assert again.status_code == 304 and again.headers["cache-control"] == "no-cache"
 
 
 def test_css_served_with_css_mime(client: TestClient) -> None:

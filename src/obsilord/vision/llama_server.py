@@ -20,6 +20,13 @@ with a local bench script (not in the repo) on 2026-10-27 (Windows 11, RX 6600 X
   at most [camera] max_edge_px, 768 by default; the error text, status and
   llama-server's message, goes to the log.
 
+- Asked to locate something (LOCATE_PROMPT), Qwen3-VL-2B answers with
+  {"bbox_2d": [x1, y1, x2, y2], "label": "..."} inside a ```json fence, the
+  numbers on a 0 to 1000 grid over the image width and height (checked
+  2026-11-14 on the 768x512 sample: the bee and the flower were both boxed
+  correctly, about 240 ms each on CUDA). It tends to return some box even
+  when the target is not there.
+
 session() starts the server for [vision] backend, waits for /health, and stops
 it on exit, so nothing stays loaded between looks. If the CUDA server exits
 or is not ready within start_timeout_s, the CPU build is tried for that look
@@ -59,7 +66,7 @@ from typing import Any, AsyncIterator, Callable, Protocol
 from obsilord import promptlog
 from obsilord.camera import shrink_jpeg
 from obsilord.config import REPO_ROOT, VisionSettings
-from obsilord.vision.base import VisionError, VisionSession
+from obsilord.vision.base import Box, VisionError, VisionSession
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +112,31 @@ def check_files(vision: VisionSettings, repo_root: Path) -> None:
             "vision: [vision] server_cpu not found (%s), no CPU fallback if CUDA fails",
             vision.server_cpu,
         )
+
+
+# The target goes in at QUESTION_PLACEHOLDER.
+LOCATE_PROMPT = (
+    "Locate {question} in the image. Answer with JSON only, in this form: "
+    '{"bbox_2d": [x1, y1, x2, y2], "label": "..."}'
+)
+LOCATE_MAX_TOKENS = 64
+BOX_GRID = 1000.0
+
+_NUM = r"(\d+(?:\.\d+)?)"
+_BOX = re.compile(rf"\[\s*{_NUM}\s*,\s*{_NUM}\s*,\s*{_NUM}\s*,\s*{_NUM}\s*\]")
+
+
+def parse_box(text: str) -> Box | None:
+    """The first [x1, y1, x2, y2] in the model's answer, from the 0 to 1000
+    grid to fractions. None if there is no box, a value is off the grid, or
+    the box has no area."""
+    m = _BOX.search(text)
+    if m is None:
+        return None
+    x1, y1, x2, y2 = (float(v) for v in m.groups())
+    if max(x1, y1, x2, y2) > BOX_GRID or x2 <= x1 or y2 <= y1:
+        return None
+    return (x1 / BOX_GRID, y1 / BOX_GRID, x2 / BOX_GRID, y2 / BOX_GRID)
 
 
 def build_request(jpeg: bytes, question: str, prompt: str, max_tokens: int) -> dict[str, Any]:
@@ -422,13 +454,20 @@ class _Session:
 
     async def describe(self, jpeg: bytes, question: str) -> str:
         owner = self._owner
+        return await self._ask(jpeg, question, owner.prompt, owner.settings.max_tokens)
+
+    async def locate(self, jpeg: bytes, target: str) -> Box | None:
+        return parse_box(await self._ask(jpeg, target, LOCATE_PROMPT, LOCATE_MAX_TOKENS))
+
+    async def _ask(self, jpeg: bytes, question: str, prompt: str, max_tokens: int) -> str:
+        owner = self._owner
         backend = self._server.backend
         if backend == "cpu":
             try:
                 jpeg = await asyncio.to_thread(shrink_jpeg, jpeg, owner.settings.cpu_max_edge_px)
             except ValueError as exc:
                 raise VisionError(f"could not shrink the frame: {exc}") from None
-        body = build_request(jpeg, question, owner.prompt, owner.settings.max_tokens)
+        body = build_request(jpeg, question, prompt, max_tokens)
         promptlog.emit(format_request, backend, body)
         t0 = time.perf_counter()
         try:

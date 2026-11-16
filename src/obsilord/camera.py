@@ -79,6 +79,26 @@ def shrink_jpeg(jpeg: bytes, max_edge_px: int) -> bytes:
     return encode_frame(frame, max_edge_px)
 
 
+def crop_jpeg(
+    jpeg: bytes, box: tuple[float, float, float, float], min_edge_px: int
+) -> bytes:
+    """The part of the JPEG inside box (x1, y1, x2, y2 as fractions of the
+    width and height), as a new JPEG in memory. Raises ValueError if the JPEG
+    cannot be decoded or the crop is smaller than min_edge_px on either side."""
+    import cv2
+    import numpy
+
+    frame = cv2.imdecode(numpy.frombuffer(jpeg, numpy.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise ValueError("JPEG decoding failed")
+    h, w = frame.shape[:2]
+    x1, x2 = (min(w, max(0, round(v * w))) for v in (box[0], box[2]))
+    y1, y2 = (min(h, max(0, round(v * h))) for v in (box[1], box[3]))
+    if x2 - x1 < min_edge_px or y2 - y1 < min_edge_px:
+        raise ValueError("crop too small")
+    return encode_frame(frame[y1:y2, x1:x2], max(w, h))
+
+
 def _open_cv2(index: int, api: str) -> Any:
     import cv2
 
