@@ -42,6 +42,17 @@ class ImageSearchClient(Protocol):
 
     async def search(self, jpeg: bytes) -> ImageMatches: ...
 
+    # Optional: a readable reason the client cannot search right now (for
+    # example a spent token cap), or None. Asked before the camera opens and
+    # again before the upload. Callers read it with getattr(..., None).
+    # def refusal(self) -> str | None: ...
+
+
+def client_refusal(client: ImageSearchClient) -> str | None:
+    """The client's own refusal, if it has a refusal() method."""
+    refusal = getattr(client, "refusal", None)
+    return refusal() if callable(refusal) else None
+
 
 def clean_field(value: object) -> str:
     """One result field as plain single-line text: markup and entities

@@ -38,6 +38,7 @@ log = logging.getLogger(__name__)
 
 PROVIDER = "gemini"
 MAX_ANSWER_CHARS = 300
+MSG_CAP = "The daily token limit is reached, so the online lookup is off until tomorrow."
 MAX_OUTPUT_TOKENS = 80
 # Used for the usage estimate when a request gives no token counts: a small
 # image plus the prompt, and the whole output allowance.
@@ -81,6 +82,15 @@ class GeminiImageIdentify:
             max_output_tokens=MAX_OUTPUT_TOKENS,
             thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL),
         )
+
+    def refusal(self) -> str | None:
+        """MSG_CAP when the daily token cap is reached, checked before the camera
+        opens so a capped day costs no photo, crop or search slot."""
+        try:
+            self._usage.check()
+        except CapExceeded:
+            return MSG_CAP
+        return None
 
     async def search(self, jpeg: bytes) -> ImageMatches:
         try:

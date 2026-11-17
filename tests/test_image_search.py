@@ -35,6 +35,7 @@ from google.genai import types
 
 from obsilord.imagesearch.budget import SearchBudget
 from obsilord.imagesearch.gemini import PROMPT as GEMINI_PROMPT
+from obsilord.imagesearch.gemini import MSG_CAP as GEMINI_MSG_CAP
 from obsilord.imagesearch.gemini import GeminiImageIdentify, clean_answer
 from obsilord.imagesearch.google_vision import (
     ENDPOINT,
@@ -454,6 +455,26 @@ def test_search_budget_refusal_does_not_open_the_camera(tmp_path: Path) -> None:
     assert rig.camera.calls == 0 and rig.client.uploads == []
 
 
+def test_search_client_refusal_is_asked_before_the_camera(tmp_path: Path) -> None:
+    # A spent daily token cap (GeminiImageIdentify.refusal) costs no photo,
+    # no crop and no search slot.
+    rig = Rig(tmp_path)
+    rig.client.refusal = lambda: "token cap"  # type: ignore[attr-defined]
+    assert rig.search() == {"error": "token cap"}
+    assert rig.camera.calls == 0 and rig.client.uploads == [] and rig.snaps == []
+    assert rig.budget.month_total() == 0
+
+
+def test_search_client_refusal_after_the_crop_uploads_nothing(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    answers = iter([None, "token cap"])
+    rig.client.refusal = lambda: next(answers)  # type: ignore[attr-defined]
+    assert rig.search() == {"error": "token cap"}
+    assert rig.camera.calls == 1 and rig.client.uploads == []
+    assert rig.budget.month_total() == 0
+    assert [kind for kind, _ in rig.snaps] == ["camera"]
+
+
 def test_search_shares_the_camera_cooldown_with_look(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     assert "output" in rig.search()
@@ -831,6 +852,13 @@ def test_gemini_refuses_at_the_daily_cap_without_a_request(tmp_path: Path) -> No
     with pytest.raises(ImageSearchError, match="daily token cap"):
         asyncio.run(client.search(b"crop"))
     assert fake.calls == []
+
+
+def test_gemini_refusal_follows_the_daily_cap(tmp_path: Path) -> None:
+    client, usage = _gemini(tmp_path, FakeGenai(), cap=10)
+    assert client.refusal() is None
+    usage.record("m", 10, 0, 0, 1)
+    assert client.refusal() == GEMINI_MSG_CAP
 
 
 def test_gemini_failure_counts_an_estimate_and_hides_the_error_text(tmp_path: Path) -> None:

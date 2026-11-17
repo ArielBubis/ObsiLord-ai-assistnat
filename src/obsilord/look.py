@@ -44,7 +44,12 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Protocol
 
 from obsilord.camera import CameraError, crop_jpeg
-from obsilord.imagesearch.base import ImageSearchClient, ImageSearchError, format_matches
+from obsilord.imagesearch.base import (
+    ImageSearchClient,
+    ImageSearchError,
+    client_refusal,
+    format_matches,
+)
 from obsilord.imagesearch.budget import SearchBudget
 from obsilord.llm.base import ToolSpec
 from obsilord.vision.base import Box, VisionClient, VisionError
@@ -322,7 +327,11 @@ class Looker:
         search = self._search
         if search is None:
             return {"error": MSG_SEARCH_OFF}
-        refusal = search.budget.refusal() or self._limiter.refusal()
+        refusal = (
+            search.budget.refusal()
+            or client_refusal(search.client)
+            or self._limiter.refusal()
+        )
         if refusal is not None:
             log.info("search_image: refused (cooldown or cap)")
             return {"error": refusal}
@@ -338,7 +347,7 @@ class Looker:
         crop_ms = (time.perf_counter() - t0) * 1000
         # llama-server has stopped. The cap is checked again and the upload
         # recorded with no await before the request goes out.
-        refusal = search.budget.refusal()
+        refusal = search.budget.refusal() or client_refusal(search.client)
         if refusal is not None:
             log.info("search_image: refused (cap) after the crop")
             return {"error": refusal}
