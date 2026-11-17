@@ -5,6 +5,8 @@ host = "127.0.0.1"   # do not change
 port = 8765
 
 [llm]
+# Provider a page starts with: "gemini" or "local" ([llm_local] below). The
+# page's Settings panel switches between the two at any time.
 provider = "gemini"
 # Looked up 2026-10-06 on ai.google.dev: gemini-3.5-flash-lite (stable, text and
 # image input, function calling, thinking supported). Paid tier: $0.30 per 1M
@@ -20,6 +22,29 @@ thinking_level = "minimal"
 history_turns = 10
 daily_token_cap = 200000   # placeholder, tune after Phase 2
 turn_timeout_s = 60       # server-side limit for one whole reply
+
+[llm_local]
+# A local LLM server with an OpenAI-compatible API, used when the page's
+# Settings panel picks "Local". Nothing leaves this PC for the chat itself, and
+# local tokens are logged but do not count toward daily_token_cap.
+#   LM Studio: start its server (Developer tab), default http://127.0.0.1:1234/v1.
+#              Turn on "Just-in-time model loading" in its server settings so
+#              picking a model in the page loads it; otherwise load it in
+#              LM Studio first ("No models loaded" otherwise).
+#   Ollama:    http://127.0.0.1:11434/v1
+# The address is only set here, never from the page. The page lists the
+# server's models; model below is the one a page starts with (empty: the first
+# one the server lists).
+# Tool use: before each reply the model fills in a small form (which camera
+# tool, if any, and what to ask it) that the server holds to a fixed format.
+# Compare models with: python -m obsilord.llm.routecheck --model <id>
+# The GPU is shared with the local vision model: leave 2 to 3 GB free for look().
+base_url = "http://127.0.0.1:1234/v1"
+model = ""
+max_output_tokens = 400    # reasoning models think inside this budget
+temperature = 0.7
+request_timeout_s = 60     # one request; loading a model counts toward it
+router_context_messages = 4  # recent messages the tool router sees
 
 [stt]
 # faster-whisper 1.2.1 (PyPI, MIT, SYSTRAN/faster-whisper), runs locally, no API

@@ -14,6 +14,9 @@ localhost app; a shared deployment would need a reservation or a lock.
 
 Records can be flagged "partial" (stream did not finish, counts are the last
 ones the provider reported) or "estimated" (no counts were reported at all).
+
+Records with "counted": false (a local model, no cost) are logged but left out
+of the daily total. Lines written before that field existed count.
 """
 
 from __future__ import annotations
@@ -70,7 +73,7 @@ class UsageTracker:
                 if not line:
                     continue
                 entry = json.loads(line)
-                if entry.get("date") != day_str:
+                if entry.get("date") != day_str or entry.get("counted") is False:
                     continue
                 total += int(entry["total"])
             except (ValueError, KeyError, TypeError, AttributeError):
@@ -107,16 +110,19 @@ class UsageTracker:
         latency_ms: int,
         partial: bool = False,
         estimated: bool = False,
+        counted: bool = True,
     ) -> None:
         """Add to today's total, then append one usage line. Counts only.
 
         The total is updated first so a failed log write still counts toward
-        the cap. Write failures are logged at ERROR and not raised.
+        the cap. counted=False logs the line without adding to the total.
+        Write failures are logged at ERROR and not raised.
         """
         now = self._clock()
         self._roll()
         total = int(tokens_in) + int(tokens_out) + int(tokens_thinking)
-        self._total += total
+        if counted:
+            self._total += total
         entry = {
             "ts": now.isoformat(timespec="seconds"),
             "date": now.date().isoformat(),
@@ -128,6 +134,7 @@ class UsageTracker:
             "latency_ms": int(latency_ms),
             "partial": bool(partial),
             "estimated": bool(estimated),
+            "counted": bool(counted),
         }
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)

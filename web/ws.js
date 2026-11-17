@@ -21,6 +21,9 @@
 //
 // Snapshots: with the Snapshots switch on, the server sends the frame of
 // each look and the crop sent to the image search (snapshots.js).
+//
+// Settings: the chat model (Gemini or local) is picked in the Settings panel
+// (settings.js), announced after every connect, and locked while a turn runs.
 
 import {
   setState, getState, mouthText, mouthEnd, mouthReset, setAudioLevelSource, setAudioMouth,
@@ -30,6 +33,7 @@ import { createPlayer } from "./audio.js";
 import { createMic, micErrorMessage } from "./audio_in.js";
 import { loadAudioSettings, MAX_UTTERANCE_DEFAULT_S } from "./config.js";
 import { initSnapshots } from "./snapshots.js";
+import { initSettings } from "./settings.js";
 import {
   busyAfterMessage, stateAction, drainTimeoutMs, textDrivesMouth, closesOpenSentence,
   pressAction, recordingAction, controlsDisabled, orphanAction,
@@ -76,6 +80,31 @@ const snapshots = initSnapshots(
   safeStorage(),
   (text) => {
     if (isOpen()) ws.send(text);
+  },
+);
+
+const settings = initSettings(
+  {
+    gemini: document.getElementById("llm-gemini"),
+    geminiNote: document.getElementById("llm-gemini-note"),
+    local: document.getElementById("llm-local"),
+    model: document.getElementById("llm-model"),
+    refresh: document.getElementById("llm-refresh"),
+    server: document.getElementById("llm-server"),
+    status: document.getElementById("llm-status"),
+    notice: document.getElementById("llm-notice"),
+    noticeTitle: document.getElementById("llm-notice-title"),
+    noticeLines: document.getElementById("llm-notice-lines"),
+    noticeClose: document.getElementById("llm-notice-close"),
+  },
+  safeStorage(),
+  (text) => {
+    if (isOpen()) ws.send(text);
+  },
+  async () => {
+    const resp = await fetch("/config/llm", { cache: "no-store" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.json();
   },
 );
 
@@ -216,6 +245,7 @@ function updateControls() {
   const off = controlsDisabled(busy, rec !== null, orphan !== null);
   input.disabled = off;
   sendBtn.disabled = off;
+  settings.setDisabled(off);
   talkBtn.classList.toggle("recording", recordingLive());
   talkBtn.classList.toggle("opening", recordingHeld() && !recordingLive());
   updateHint();
@@ -569,6 +599,12 @@ function handleMessage(event) {
     case "snapshot":
       snapshots.show(msg);
       break;
+    case "notice":
+      settings.showNotice(msg);
+      break;
+    case "llm_status":
+      settings.showStatus(msg);
+      break;
     default:
       break;
   }
@@ -589,6 +625,7 @@ function connect() {
     if (errorLine.textContent === NOT_CONNECTED) errorLine.textContent = "";
     sock.send(JSON.stringify({ type: "ping" }));
     snapshots.announce();
+    settings.announce();
     updateHint();
   });
 

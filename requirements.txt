@@ -66,6 +66,7 @@ httpcore2==2.13.1
     # via httpx2
 httpx==0.28.1
     # via
+    #   -r requirements.in
     #   google-genai
     #   huggingface-hub
 httpx2==2.13.1

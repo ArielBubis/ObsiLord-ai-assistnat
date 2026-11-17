@@ -39,9 +39,15 @@ class ServerSettings:
 
 
 # kw_only lets fields with defaults (optional in the TOML) sit anywhere.
+LLM_PROVIDERS = ("gemini", "local")
+
+
 @dataclass(frozen=True, kw_only=True)
 class LLMSettings:
+    # One of LLM_PROVIDERS: the provider a new page connection starts with. The
+    # page's Settings panel can switch each connection between the two.
     provider: str
+    # The Gemini model (also used by [image_search] provider "gemini").
     model: str
     max_output_tokens: int
     thinking_level: str = "minimal"  # added in Phase 2
@@ -234,6 +240,31 @@ class ImageSearchSettings:
     timeout_s: float = 15.0
 
 
+LOCAL_ROUTER_CONTEXT_MAX = 20
+
+
+@dataclass(frozen=True, kw_only=True)
+class LocalLLMSettings:
+    """[llm_local], optional. A local OpenAI-compatible server (LM Studio,
+    Ollama, llama-server) used when the page selects the "local" provider.
+
+    base_url is only read from here: the page can pick a model but never the
+    address the server talks to.
+    """
+
+    # Ends with /v1. LM Studio's default port is 1234, Ollama's 11434.
+    base_url: str = "http://127.0.0.1:1234/v1"
+    # Model id as the server lists it. Empty: the first model the server lists.
+    model: str = ""
+    # Reasoning models spend part of this on thinking before the reply.
+    max_output_tokens: int = 400
+    temperature: float = 0.7
+    # Limit for one request (a model that is not loaded yet loads first).
+    request_timeout_s: float = 60.0
+    # Recent messages the tool router sees besides the new one (0..20).
+    router_context_messages: int = 4
+
+
 @dataclass(frozen=True, kw_only=True)
 class DebugSettings:
     """[debug], optional."""
@@ -260,6 +291,7 @@ class Settings:
     audio: AudioSettings
     vision: VisionSettings = field(default_factory=VisionSettings)
     image_search: ImageSearchSettings = field(default_factory=ImageSearchSettings)
+    llm_local: LocalLLMSettings = field(default_factory=LocalLLMSettings)
     debug: DebugSettings = field(default_factory=DebugSettings)
     secrets: Secrets = field(default_factory=Secrets, repr=False)
     repo_root: Path = REPO_ROOT
@@ -558,6 +590,37 @@ def _check_image_search(search: ImageSearchSettings, vision: VisionSettings) -> 
         )
 
 
+def _check_llm_local(llm: LLMSettings, local: LocalLLMSettings) -> None:
+    if llm.provider not in LLM_PROVIDERS:
+        raise ValueError(
+            f"config: llm.provider must be one of {list(LLM_PROVIDERS)}, got {llm.provider!r}"
+        )
+    url = local.base_url.strip()
+    if not url.startswith(("http://", "https://")) or url != local.base_url:
+        raise ValueError(
+            "config: llm_local.base_url must be an http:// or https:// URL without "
+            f"surrounding spaces, got {local.base_url!r}"
+        )
+    if local.max_output_tokens < 1:
+        raise ValueError(
+            f"config: llm_local.max_output_tokens must be >= 1, got {local.max_output_tokens}"
+        )
+    if not 0 <= local.temperature <= 2:
+        raise ValueError(
+            f"config: llm_local.temperature must be in 0..2, got {local.temperature:g}"
+        )
+    if not 0 < local.request_timeout_s < CLIENT_WATCHDOG_S:
+        raise ValueError(
+            f"config: llm_local.request_timeout_s must be > 0 and < {CLIENT_WATCHDOG_S:g}, "
+            f"got {local.request_timeout_s:g}"
+        )
+    if not 0 <= local.router_context_messages <= LOCAL_ROUTER_CONTEXT_MAX:
+        raise ValueError(
+            f"config: llm_local.router_context_messages must be in "
+            f"0..{LOCAL_ROUTER_CONTEXT_MAX}, got {local.router_context_messages}"
+        )
+
+
 def default_config_path() -> Path:
     """config.toml in the repo root, falling back to config.example.toml."""
     path = REPO_ROOT / "config.toml"
@@ -589,6 +652,7 @@ def load_settings(
         image_search=_build(
             ImageSearchSettings, "image_search", data, defaulted, optional=True
         ),
+        llm_local=_build(LocalLLMSettings, "llm_local", data, defaulted, optional=True),
         debug=_build(DebugSettings, "debug", data, defaulted, optional=True),
         secrets=load_secrets(env_path, environ),
     )
@@ -620,6 +684,7 @@ def load_settings(
     _check_camera(settings.camera)
     _check_vision(settings.vision)
     _check_image_search(settings.image_search, settings.vision)
+    _check_llm_local(settings.llm, settings.llm_local)
     if defaulted:
         log.info(
             "config: %s not set in %s, using defaults (copy them from "

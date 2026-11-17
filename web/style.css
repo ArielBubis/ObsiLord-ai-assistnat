@@ -450,6 +450,174 @@ body[data-status="thinking"] .scan-line {
   content: "[!] ";
 }
 
+/* Model switch notice: what changes with the chat model just picked. Cyan
+   frame so it reads as information, not as an error. */
+#llm-notice {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 2px solid var(--cyan);
+  box-shadow: 3px 3px 0 var(--border-black);
+  font-size: 11px;
+  line-height: 1.5;
+  contain: inline-size;
+}
+
+#llm-notice[hidden] {
+  display: none;
+}
+
+.notice-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+#llm-notice-title {
+  margin: 0;
+  color: var(--cyan);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  overflow-wrap: anywhere;
+}
+
+/* Small HUD buttons, styled like the debug panel's. */
+#llm-notice-close,
+#llm-refresh {
+  flex: none;
+  padding: 2px 8px;
+  background: var(--void);
+  color: var(--cyan);
+  border: 2px solid var(--cyan);
+  font: 700 10px var(--font-mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#llm-notice-close:hover,
+#llm-refresh:hover:not(:disabled) {
+  background: var(--cyan);
+  color: var(--border-black);
+}
+
+#llm-notice-close:focus-visible,
+#llm-refresh:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+#llm-refresh:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+#llm-notice-lines {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  color: var(--text);
+}
+
+#llm-notice-lines li + li {
+  margin-top: 3px;
+}
+
+/* Settings panel: the chat model. */
+#settings {
+  margin-top: 8px;
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  contain: inline-size;
+}
+
+#settings summary {
+  cursor: pointer;
+  text-transform: uppercase;
+}
+
+#settings summary:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+#settings[open] summary {
+  color: var(--cyan);
+}
+
+.settings-group {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 2px solid var(--dim);
+}
+
+.settings-group legend {
+  padding: 0 4px;
+  text-transform: uppercase;
+}
+
+.settings-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.settings-choice input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--cyan);
+  cursor: pointer;
+}
+
+.settings-choice input:checked + span {
+  color: var(--cyan);
+}
+
+.settings-choice input:disabled,
+.settings-choice input:disabled + span {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.settings-row {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+#llm-model {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  background: var(--border-black);
+  color: var(--text);
+  border: 2px solid var(--dim);
+  font: inherit;
+  font-weight: 400;
+}
+
+#llm-model:focus-visible,
+.settings-choice input:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+.settings-dim {
+  margin: 0;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
+#llm-status:empty {
+  display: none;
+}
+
 /* Snapshot panel: a switch, and under it the frame of the last look and the
    crop that went to the image search. */
 #snapshots {

@@ -39,6 +39,22 @@ the backend, model, mmproj) and builds the Looker (camera, per-look
 llama-server, cooldown and hourly cap); a missing file stops startup with a
 readable error. Nothing is loaded until a look runs. An empty model turns
 look() off: the tool is not declared.
+
+Chat LLM: Gemini, or a local OpenAI-compatible server ([llm_local]). Both are
+set up at startup (the local one connects only when used). Each connection
+starts on [llm] provider and the page's Settings panel switches it with
+{"type": "llm", "provider": "gemini"|"local", "model": "...", "announce":
+bool}: refused while a turn or recording runs; answered with a
+{"type": "notice"} (what changes and what may work worse) and, for a local
+model, {"type": "llm_status"} while the server loads it. announce: true (sent
+again after every reconnect) applies the choice quietly. GET /config/llm lists
+both providers and the local server's models. The local server address is only
+read from config.
+
+/ws accepts only this app's own page as Origin (or no Origin header), so
+another site open in the browser cannot drive the socket. Every route answers
+only to Host 127.0.0.1 or localhost (TrustedHostMiddleware), against DNS
+rebinding.
 """
 
 from __future__ import annotations
@@ -53,12 +69,15 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Coroutine
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from obsilord import promptlog
 from obsilord.config import Settings
 from obsilord.face_character import check_character
 from obsilord.llm.base import LLMClient, Message
-from obsilord.look import ImageSearch, LookTool
+from obsilord.llm.openai_compat import LocalLLMError, OpenAICompatServer
+from obsilord.llm_switch import GEMINI, LOCAL, clean_model, switch_notice
+from obsilord.look import SEARCH_IMAGE_TOOL, ImageSearch, LookTool
 from obsilord.pipeline import MSG_NOT_CAUGHT, run_text_turn, run_voice_turn
 from obsilord.stt.base import SAMPLE_RATE as STT_SAMPLE_RATE
 from obsilord.stt.base import STTClient, pcm16_bytes_for_ms
@@ -70,7 +89,11 @@ log = logging.getLogger(__name__)
 MAX_TEXT_CHARS = 2000
 
 MSG_INVALID_JSON = "invalid JSON"
-MSG_NO_KEY = "No API key configured."
+MSG_NO_KEY = "No API key configured. Pick Local in Settings to use a local model."
+MSG_SWITCH_BUSY = "Wait for the current reply before switching the model."
+MSG_BAD_PROVIDER = "Unknown provider."
+MSG_BAD_MODEL = "Invalid model name."
+MSG_GEMINI_OFF = "Gemini is not available: GEMINI_API_KEY is not set in .env."
 MSG_BUSY = "Busy, wait for the current reply."
 MSG_EMPTY = "Message is empty."
 MSG_TOO_LONG = f"Message is too long (max {MAX_TEXT_CHARS} characters)."
@@ -129,8 +152,20 @@ def _default_llm(settings: Settings) -> LLMClient | None:
     try:
         return GeminiClient(settings.llm, settings.secrets.gemini_api_key)
     except MissingApiKey:
-        log.warning("no GEMINI_API_KEY configured; text turns will return an error")
+        log.warning("no GEMINI_API_KEY configured; Gemini turns will return an error")
         return None
+
+
+def allowed_origins(settings: Settings) -> frozenset[str]:
+    """The page's own origins. /ws refuses any other Origin header."""
+    port = settings.server.port
+    return frozenset({f"http://127.0.0.1:{port}", f"http://localhost:{port}"})
+
+
+# Host names the app answers to. Any other Host header (a DNS rebinding page
+# under its own domain) gets 400. "testserver" is the name Starlette's
+# TestClient sends; it is not a public domain, so it cannot be rebound.
+ALLOWED_HOSTS = ["127.0.0.1", "localhost", "testserver"]
 
 
 def _default_tts(settings: Settings) -> TTSClient | None:
@@ -279,13 +314,16 @@ def create_app(
     tts: TTSClient | None = None,
     stt: STTClient | None = None,
     looker: LookTool | None = None,
+    local: OpenAICompatServer | None = None,
 ) -> FastAPI:
-    """Build the app. Pass llm, usage, tts, stt, and looker to inject fakes (tests).
+    """Build the app. Pass llm, usage, tts, stt, looker, and local to inject
+    fakes (tests). llm is the Gemini client; local the local LLM server.
 
     tts=None loads the voice from settings (nothing is loaded when [tts] voice
     is empty). stt=None loads the STT model from settings (nothing is loaded
     when [stt] model is empty). looker=None builds look() from settings (off
-    when [vision] model is empty).
+    when [vision] model is empty). local=None builds the server object from
+    [llm_local] (no connection until it is used).
     """
     web_dir = settings.repo_root / "web"
     index_path = web_dir / "index.html"
@@ -293,8 +331,8 @@ def create_app(
     promptlog.set_enabled(settings.debug.log_prompts)
     if settings.debug.log_prompts:
         log.warning(
-            "debug.log_prompts is on: every Gemini and vision request and reply is "
-            "printed (camera frames as their size only)"
+            "debug.log_prompts is on: every Gemini, local LLM and vision request "
+            "and reply is printed (camera frames as their size only)"
         )
     # Cheap file check first, so a bad character fails before any model loads.
     character_path = _checked_character(settings)
@@ -308,23 +346,39 @@ def create_app(
         usage = _default_usage(settings)
     if looker is None:
         looker = _default_looker(settings, usage)
+    if local is None:
+        local = OpenAICompatServer(settings.llm_local)
+    origins = allowed_origins(settings)
+    log.info(
+        "chat LLM: pages start on %s (Gemini %s, local server %s)",
+        settings.llm.provider,
+        "available" if llm is not None else "off, no key",
+        settings.llm_local.base_url,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
-        aclose = getattr(app.state.llm, "aclose", None)
-        if aclose is not None:
-            await aclose()
+        for client in (app.state.llm, app.state.local):
+            aclose = getattr(client, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
     app = FastAPI(
         title="Obsi-Lord", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
     )
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
     app.state.settings = settings
     app.state.llm = llm
     app.state.usage = usage
     app.state.tts = tts
     app.state.stt = stt
     app.state.looker = looker
+    app.state.local = local
+
+    def search_declared() -> bool:
+        tools = getattr(app.state.looker, "tools", None) or []
+        return any(t.name == SEARCH_IMAGE_TOOL.name for t in tools)
 
     stt_cfg = settings.stt
     max_audio_bytes = pcm16_bytes_for_ms(stt_cfg.max_utterance_s * 1000, STT_SAMPLE_RATE)
@@ -375,11 +429,47 @@ def create_app(
             "max_utterance_s": settings.stt.max_utterance_s,
         }
 
+    @app.get("/config/llm", include_in_schema=False)
+    async def llm_config() -> dict[str, Any]:
+        # Both chat providers for the Settings panel. No secrets: only whether
+        # the Gemini key is set. The local model list is fetched from the
+        # server here, so the page never talks to it directly.
+        models: list[dict[str, Any]] = []
+        error: str | None = None
+        try:
+            models = [
+                {"id": m.id, "loaded": m.loaded} for m in await app.state.local.list_models()
+            ]
+        except LocalLLMError as exc:
+            error = str(exc)
+        return {
+            "default_provider": settings.llm.provider,
+            "gemini": {"available": app.state.llm is not None, "model": settings.llm.model},
+            "local": {
+                "base_url": settings.llm_local.base_url,
+                "default_model": settings.llm_local.model,
+                "reachable": error is None,
+                "error": error,
+                "models": models,
+            },
+        }
+
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
+        origin = websocket.headers.get("origin")
+        if origin is not None and origin not in origins:
+            # Another site open in the browser: refused before accept (HTTP 403).
+            log.warning("ws refused: foreign origin")
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         log.info("ws connected")
         history: list[Message] = []
+        # The chat LLM of this connection (Settings panel). local_client is
+        # rebuilt when the page picks another local model.
+        provider = settings.llm.provider
+        local_client: LLMClient = app.state.local.client(settings.llm_local.model)
+        background: set[asyncio.Task[None]] = set()  # model warm-ups
         turn: asyncio.Task[Any] | None = None
         send_lock = asyncio.Lock()
         # Push-to-talk state. recording is None when no recording is open.
@@ -417,6 +507,98 @@ def create_app(
         def turn_running() -> bool:
             return turn is not None and not turn.done()
 
+        def current_llm() -> LLMClient | None:
+            return local_client if provider == LOCAL else app.state.llm
+
+        def current_max_output_tokens() -> int:
+            # Used by the pipeline for the usage estimate of a failed request.
+            if provider == LOCAL:
+                return settings.llm_local.max_output_tokens
+            return settings.llm.max_output_tokens
+
+        async def handle_llm(payload: dict[str, Any]) -> None:
+            async with recording_lock:
+                await _handle_llm_locked(payload)
+
+        async def _handle_llm_locked(payload: dict[str, Any]) -> None:
+            nonlocal provider, local_client
+            wanted = payload.get("provider")
+            model = clean_model(payload.get("model", ""))
+            announce = payload.get("announce") is True
+            if wanted not in (GEMINI, LOCAL):
+                await send({"type": "error", "message": MSG_BAD_PROVIDER})
+                return
+            if model is None:
+                await send({"type": "error", "message": MSG_BAD_MODEL})
+                return
+            if recording is not None or turn_running():
+                # An announce comes from the page itself (reconnect); it is
+                # sent again on the next connect, so it is dropped quietly.
+                if not announce:
+                    await send({"type": "error", "message": MSG_SWITCH_BUSY})
+                return
+            if wanted == GEMINI:
+                if app.state.llm is None:
+                    if not announce:
+                        await send({"type": "error", "message": MSG_GEMINI_OFF})
+                    return
+                provider = GEMINI
+            else:
+                provider = LOCAL
+                local_client = app.state.local.client(model)
+            log.info("chat LLM for this page: %s%s", provider, f" ({model})" if model else "")
+            if announce:
+                return
+            await send(
+                switch_notice(
+                    provider,
+                    settings,
+                    model=model,
+                    vision_on=app.state.looker is not None,
+                    search_on=search_declared(),
+                    today_tokens=app.state.usage.today_total,
+                )
+            )
+            if provider == LOCAL:
+                task = asyncio.create_task(warm_up(model))
+                background.add(task)
+                task.add_done_callback(background.discard)
+
+        async def warm_up(model: str) -> None:
+            try:
+                await _warm_up(model)
+            except Exception as exc:  # noqa: BLE001 - socket gone; nothing to tell
+                log.debug("warm-up: %s", type(exc).__name__)
+
+        async def _warm_up(model: str) -> None:
+            """Load the model now and tell the page how long it took. A failed
+            warm-up is only reported: the next turn gets its own error. An
+            unknown model id shows up here first."""
+            await send({"type": "llm_status", "state": "loading", "model": model})
+            try:
+                if not model:
+                    model = await app.state.local.default_model()
+                seconds, counts = await app.state.local.warm_up(model)
+            except LocalLLMError as exc:
+                log.warning("local LLM warm-up failed: %s", exc)
+                await send(
+                    {"type": "llm_status", "state": "failed", "model": model, "message": str(exc)}
+                )
+                return
+            if counts is not None:
+                app.state.usage.record(
+                    "local:" + model,
+                    counts.tokens_in,
+                    counts.tokens_out,
+                    counts.tokens_thinking,
+                    int(seconds * 1000),
+                    counted=False,
+                )
+            log.info("local LLM %s ready in %.1f s", model, seconds)
+            await send(
+                {"type": "llm_status", "state": "ready", "model": model, "seconds": round(seconds, 1)}
+            )
+
         def start_turn(coro: Coroutine[Any, Any, str | None]) -> None:
             nonlocal turn
             turn = asyncio.create_task(coro)
@@ -441,18 +623,19 @@ def create_app(
             if turn_running():
                 await send({"type": "error", "message": MSG_BUSY})
                 return
-            if app.state.llm is None:
+            llm = current_llm()
+            if llm is None:
                 await send({"type": "error", "message": MSG_NO_KEY})
                 return
             start_turn(
                 run_text_turn(
                     text,
                     history,
-                    app.state.llm,
+                    llm,
                     app.state.usage,
                     send,
                     history_turns=settings.llm.history_turns,
-                    max_output_tokens=settings.llm.max_output_tokens,
+                    max_output_tokens=current_max_output_tokens(),
                     turn_timeout_s=settings.llm.turn_timeout_s,
                     tts=app.state.tts,
                     looker=app.state.looker,
@@ -471,7 +654,7 @@ def create_app(
             if recording is not None or turn_running():
                 await send({"type": "error", "message": MSG_BUSY})
                 return
-            if app.state.llm is None:
+            if current_llm() is None:
                 await send({"type": "error", "message": MSG_NO_KEY})
                 return
             recording = bytearray()
@@ -560,18 +743,23 @@ def create_app(
                 await send({"type": "error", "message": MSG_NOT_CAUGHT})
                 await send({"type": "state", "state": "idle"})
                 return
+            llm = current_llm()
+            if llm is None:  # switched to Gemini without a key mid-recording
+                await send({"type": "error", "message": MSG_NO_KEY})
+                await send({"type": "state", "state": "idle"})
+                return
             start_turn(
                 run_voice_turn(
                     pcm16,
                     history,
-                    app.state.llm,
+                    llm,
                     app.state.usage,
                     send,
                     app.state.stt,
                     language=stt_cfg.language_or_none,
                     sample_rate=STT_SAMPLE_RATE,
                     history_turns=settings.llm.history_turns,
-                    max_output_tokens=settings.llm.max_output_tokens,
+                    max_output_tokens=current_max_output_tokens(),
                     turn_timeout_s=settings.llm.turn_timeout_s,
                     tts=app.state.tts,
                     looker=app.state.looker,
@@ -602,6 +790,8 @@ def create_app(
                     continue
                 elif kind == "snapshots":
                     snapshots_on = payload.get("on") is True
+                elif kind == "llm":
+                    await handle_llm(payload)
                 elif kind == "audio_start":
                     await handle_audio_start()
                 elif kind == "audio_end":
@@ -613,7 +803,7 @@ def create_app(
         finally:
             # An open recording is dropped with the connection (never transcribed).
             recording = None
-            for task in list(timers):
+            for task in [*timers, *background]:
                 task.cancel()
                 try:
                     await task

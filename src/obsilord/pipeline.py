@@ -166,14 +166,23 @@ def _record_usage(
     """Record one request. extra_chars: request input besides the history and
     the system prompt (tool results), for the estimate."""
     model = llm.model
+    counted = _counts_toward_cap(llm)
     try:
         if ru.done is not None:
             d = ru.done
-            usage.record(model, d.tokens_in, d.tokens_out, d.tokens_thinking, total_ms)
+            usage.record(
+                model, d.tokens_in, d.tokens_out, d.tokens_thinking, total_ms, counted=counted
+            )
         elif ru.last_usage is not None:
             u = ru.last_usage
             usage.record(
-                model, u.tokens_in, u.tokens_out, u.tokens_thinking, total_ms, partial=True
+                model,
+                u.tokens_in,
+                u.tokens_out,
+                u.tokens_thinking,
+                total_ms,
+                partial=True,
+                counted=counted,
             )
             log.warning("usage: stream incomplete, recorded last reported counts")
         else:
@@ -187,6 +196,7 @@ def _record_usage(
                 total_ms,
                 partial=True,
                 estimated=True,
+                counted=counted,
             )
             log.warning("usage: no counts reported, recorded a conservative estimate")
     except Exception as exc:  # noqa: BLE001 - never let accounting break the turn
@@ -407,7 +417,14 @@ async def run_voice_turn(
         return None
 
 
-def _cap_reached(usage: UsageTracker) -> bool:
+def _counts_toward_cap(llm: LLMClient) -> bool:
+    """False for clients whose requests cost nothing (a local model)."""
+    return getattr(llm, "counts_toward_cap", True) is not False
+
+
+def _cap_reached(usage: UsageTracker, llm: LLMClient) -> bool:
+    if not _counts_toward_cap(llm):
+        return False
     try:
         usage.check()
     except CapExceeded:
@@ -416,9 +433,10 @@ def _cap_reached(usage: UsageTracker) -> bool:
     return False
 
 
-async def _cap_allows(usage: UsageTracker, send: Send) -> bool:
-    """False (after sending the cap error and idle) if the daily cap is reached."""
-    if _cap_reached(usage):
+async def _cap_allows(usage: UsageTracker, llm: LLMClient, send: Send) -> bool:
+    """False (after sending the cap error and idle) if the daily cap is reached.
+    Always True for a client that does not count toward the cap."""
+    if _cap_reached(usage, llm):
         await send({"type": "error", "message": MSG_CAP})
         await send({"type": "state", "state": "idle"})
         return False
@@ -452,7 +470,7 @@ async def _run_voice_turn(
     audio_ms = pcm16_duration_ms(len(pcm16), sample_rate)
     await send({"type": "state", "state": "thinking"})
     # Checked before STT so a capped day does not spend CPU on transcription.
-    if not await _cap_allows(usage, send):
+    if not await _cap_allows(usage, llm, send):
         return None
 
     stt_error: Exception | None = None
@@ -529,7 +547,7 @@ async def _run_turn(
     turn in event loop time (asyncio.timeout_at). voice: STT timings for the
     latency line, None for text turns.
     """
-    if not await _cap_allows(usage, send):
+    if not await _cap_allows(usage, llm, send):
         return None
 
     messages = [*history, Message(role="user", text=text)]
@@ -677,7 +695,7 @@ async def _run_turn(
             failed = await stream_once(None)
             if failed is None and calls and looker is not None:
                 results = await run_tools(looker)
-                if _cap_reached(usage):
+                if _cap_reached(usage, llm):
                     capped = True
                 else:
                     failed = await stream_once(results)
@@ -713,8 +731,19 @@ async def _run_turn(
         return None
 
     if failed is not None:
-        log.error("LLM request failed: %s (after %d ms)", type(failed).__name__, llm_ms)
-        await send({"type": "error", "message": MSG_LLM_FAILED})
+        # user_message: a provider error that is known to hold no conversation
+        # text and is worth showing (for example "cannot reach the local server").
+        detail = getattr(failed, "user_message", None)
+        detail = detail.strip().rstrip(".") if isinstance(detail, str) else None
+        detail = detail or None
+        log.error(
+            "LLM request failed: %s%s (after %d ms)",
+            type(failed).__name__,
+            f" ({detail})" if detail else "",
+            llm_ms,
+        )
+        message = f"{MSG_LLM_FAILED} {detail[:1].upper()}{detail[1:]}." if detail else MSG_LLM_FAILED
+        await send({"type": "error", "message": message})
         await send({"type": "state", "state": "idle"})
         return None
 

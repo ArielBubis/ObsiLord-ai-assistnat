@@ -11,6 +11,10 @@ faster-whisper==1.2.1
 numpy==2.5.3
 piper-tts==1.8.0
 opencv-python==5.0.0.93
+# Imported directly by llm/openai_compat.py (local LLM server). Same version
+# already locked in requirements.txt as a dependency of google-genai; checked
+# installed 2026-11-17.
+httpx==0.28.1
 pytest==9.1.1
 # Required by FastAPI/Starlette TestClient in tests (Starlette 1.7 deprecates httpx for it).
 httpx2==2.13.1

@@ -5,6 +5,7 @@ import pytest
 
 from obsilord.config import (
     REPO_ROOT,
+    LocalLLMSettings,
     Secrets,
     Settings,
     VisionSettings,
@@ -712,3 +713,62 @@ def test_prompt_log_emit_never_raises_and_skips_work_when_off(
     assert "prompt log failed (KeyError)" in caplog.text
     promptlog.emit(lambda name: f"hello {name}", "Qwenny")
     assert "hello Qwenny" in caplog.text
+
+
+# --- [llm_local] (Phase 5c) ---------------------------------------------------
+
+
+def test_llm_local_from_example(tmp_path: Path) -> None:
+    s = _load(EXAMPLE, tmp_path)
+    assert s.llm.provider == "gemini"
+    assert s.llm_local == LocalLLMSettings()
+    assert s.llm_local.base_url == "http://127.0.0.1:1234/v1"
+
+
+def test_llm_local_section_is_optional(tmp_path: Path) -> None:
+    text = EXAMPLE.read_text(encoding="utf-8")
+    start, end = text.index("\n[llm_local]\n"), text.index("\n[stt]\n")
+    path = tmp_path / "config.toml"
+    path.write_text(text[:start] + text[end:], encoding="utf-8")
+    assert _load(path, tmp_path).llm_local == LocalLLMSettings()
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        (
+            'provider = "gemini"\n# Looked up',
+            'provider = "openai"\n# Looked up',
+            "llm.provider must be one of",
+        ),
+        (
+            'base_url = "http://127.0.0.1:1234/v1"',
+            'base_url = "ftp://127.0.0.1/v1"',
+            "llm_local.base_url must be an http",
+        ),
+        (
+            'base_url = "http://127.0.0.1:1234/v1"',
+            'base_url = " http://127.0.0.1:1234/v1"',
+            "llm_local.base_url must be an http",
+        ),
+        ("max_output_tokens = 400", "max_output_tokens = 0", "llm_local.max_output_tokens"),
+        ("temperature = 0.7", "temperature = 2.5", "llm_local.temperature"),
+        ("request_timeout_s = 60 ", "request_timeout_s = 80 ", "llm_local.request_timeout_s"),
+        ("router_context_messages = 4", "router_context_messages = 21", "router_context_messages"),
+        ("router_context_messages = 4", "router_context_messages = -1", "router_context_messages"),
+    ],
+)
+def test_llm_local_rejects_bad_values(tmp_path: Path, old: str, new: str, message: str) -> None:
+    path = _write_replaced(tmp_path, old, new)
+    with pytest.raises(ValueError, match=message):
+        _load(path, tmp_path)
+
+
+def test_llm_local_accepts_a_lan_server_and_provider_local(tmp_path: Path) -> None:
+    path = _write_replaced(
+        tmp_path, 'base_url = "http://127.0.0.1:1234/v1"', 'base_url = "http://192.168.1.20:11434/v1"'
+    )
+    text = path.read_text(encoding="utf-8").replace('provider = "gemini"', 'provider = "local"', 1)
+    path.write_text(text, encoding="utf-8")
+    s = _load(path, tmp_path)
+    assert s.llm.provider == "local" and s.llm_local.base_url == "http://192.168.1.20:11434/v1"

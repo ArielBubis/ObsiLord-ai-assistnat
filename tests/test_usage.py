@@ -112,13 +112,30 @@ def test_log_has_counts_only(tmp_path: Path) -> None:
     entry = json.loads(lines[0])
     assert set(entry) == {
         "ts", "date", "model", "tokens_in", "tokens_out", "tokens_thinking", "total", "latency_ms",
-        "partial", "estimated",
+        "partial", "estimated", "counted",
     }
-    assert entry["partial"] is False and entry["estimated"] is False
+    assert entry["partial"] is False and entry["estimated"] is False and entry["counted"] is True
     assert entry["total"] == 6
     assert entry["date"] == "2026-10-06"
     assert entry["model"] == "gemini-x"
     assert entry["latency_ms"] == 456
+
+
+def test_uncounted_records_are_logged_but_not_capped(tmp_path: Path) -> None:
+    clock = FakeClock(datetime(2026, 10, 6, 12, 0, tzinfo=TZ))
+    t = _tracker(tmp_path, 10, clock)
+    t.record("local:qwen", 50, 50, 0, 1, counted=False)
+    assert t.today_total == 0
+    t.check()  # not capped
+    t.record("gemini-x", 4, 0, 0, 1)
+    # Rebuilt from the log after a restart: the local line still does not count,
+    # and a line written before the field existed does.
+    path = tmp_path / "logs" / "usage.jsonl"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"date": "2026-10-06", "total": 3}) + "\n")
+    assert UsageTracker(path, 10, clock=clock).today_total == 7
+    entries = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
+    assert entries[0]["counted"] is False and entries[0]["total"] == 100
 
 
 def test_no_log_dir_created_until_record(tmp_path: Path) -> None:

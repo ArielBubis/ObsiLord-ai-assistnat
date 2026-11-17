@@ -50,14 +50,13 @@ import itertools
 import json
 import logging
 import time
-from pathlib import Path
 from typing import Any, AsyncIterator
 
 from google import genai
 from google.genai import types
 
 from obsilord import promptlog
-from obsilord.config import REPO_ROOT, LLMSettings
+from obsilord.config import LLMSettings
 from obsilord.llm.base import (
     Done,
     LLMEvent,
@@ -68,10 +67,10 @@ from obsilord.llm.base import (
     ToolSpec,
     UsageUpdate,
 )
+from obsilord.llm.prompt import SYSTEM_PROMPT_PATH, load_system_prompt  # noqa: F401 - re-exported
 
 log = logging.getLogger(__name__)
 
-SYSTEM_PROMPT_PATH: Path = REPO_ROOT / "prompts" / "system.md"
 REQUEST_TIMEOUT_MS = 30_000
 
 _THINKING_LEVELS = {
@@ -84,12 +83,6 @@ _THINKING_LEVELS = {
 
 class MissingApiKey(RuntimeError):
     """Raised when no Gemini API key is configured."""
-
-
-def load_system_prompt(path: Path | None = None) -> str:
-    """Read the system prompt (prompts/system.md in the repo root by default)."""
-    path = path if path is not None else SYSTEM_PROMPT_PATH
-    return path.read_text(encoding="utf-8").strip()
 
 
 def _counts(usage: types.GenerateContentResponseUsageMetadata) -> tuple[int, int, int]:

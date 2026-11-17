@@ -37,6 +37,33 @@
     </form>
     <p id="ptt-hint" data-mode="off"><span id="ptt-dot" aria-hidden="true"></span><span id="ptt-text"></span></p>
     <p id="error-line" role="alert"></p>
+    <section id="llm-notice" role="status" hidden>
+      <div class="notice-head">
+        <p id="llm-notice-title"></p>
+        <button id="llm-notice-close" type="button" aria-label="Close the notice">Close</button>
+      </div>
+      <ul id="llm-notice-lines"></ul>
+    </section>
+    <details id="settings">
+      <summary>Settings</summary>
+      <fieldset class="settings-group">
+        <legend>Chat model</legend>
+        <label class="settings-choice">
+          <input id="llm-gemini" type="radio" name="llm-provider" value="gemini">
+          <span>Gemini <span id="llm-gemini-note" class="settings-dim"></span></span>
+        </label>
+        <label class="settings-choice">
+          <input id="llm-local" type="radio" name="llm-provider" value="local">
+          <span>Local</span>
+        </label>
+        <div class="settings-row">
+          <select id="llm-model" aria-label="Local model"></select>
+          <button id="llm-refresh" type="button">Refresh</button>
+        </div>
+        <p id="llm-server" class="settings-dim"></p>
+        <p id="llm-status" class="settings-dim" aria-live="polite"></p>
+      </fieldset>
+    </details>
     <section id="snapshots">
       <label class="snap-switch">
         <input id="snap-toggle" type="checkbox">
