@@ -724,6 +724,13 @@ def test_llm_local_from_example(tmp_path: Path) -> None:
     assert s.llm_local == LocalLLMSettings()
     assert s.llm_local.base_url == "http://127.0.0.1:1234/v1"
     assert s.llm_local.tool_mode == "auto"
+    assert s.llm_local.reasoning_effort == "none"
+
+
+@pytest.mark.parametrize("effort", ["", "low", "high"])
+def test_llm_local_reasoning_effort_values(tmp_path: Path, effort: str) -> None:
+    path = _write_replaced(tmp_path, 'reasoning_effort = "none"', f'reasoning_effort = "{effort}"')
+    assert _load(path, tmp_path).llm_local.reasoning_effort == effort
 
 
 @pytest.mark.parametrize("mode", ["native", "router"])
@@ -764,6 +771,7 @@ def test_llm_local_section_is_optional(tmp_path: Path) -> None:
         ("router_context_messages = 4", "router_context_messages = 21", "router_context_messages"),
         ("router_context_messages = 4", "router_context_messages = -1", "router_context_messages"),
         ('tool_mode = "auto"', 'tool_mode = "sometimes"', "llm_local.tool_mode must be one of"),
+        ('reasoning_effort = "none"', 'reasoning_effort = "off"', "llm_local.reasoning_effort must be one of"),
     ],
 )
 def test_llm_local_rejects_bad_values(tmp_path: Path, old: str, new: str, message: str) -> None:

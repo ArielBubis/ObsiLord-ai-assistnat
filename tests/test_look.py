@@ -190,6 +190,13 @@ def test_camera_failure() -> None:
     assert vision.exited == vision.entered  # any server started is stopped
 
 
+def test_camera_failure_tells_the_model_what_the_user_can_check() -> None:
+    # The assistant passes this on: the usual causes are on the user's side.
+    assert MSG_CAMERA_FAILED.startswith("The camera could not take a photo.")
+    for hint in ("plugged in", "other app", "Privacy and security", "Camera"):
+        assert hint in MSG_CAMERA_FAILED
+
+
 def test_camera_failure_does_not_wait_for_the_model() -> None:
     async def go() -> tuple[dict[str, Any], FakeVision]:
         loading = asyncio.Event()

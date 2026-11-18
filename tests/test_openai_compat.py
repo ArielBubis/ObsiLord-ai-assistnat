@@ -569,6 +569,116 @@ def test_forced_native_reports_a_model_without_tools_readably() -> None:
         native(Script(NO_TOOLS_400))
 
 
+# --- reasoning effort ------------------------------------------------------------
+
+
+def test_every_chat_request_asks_for_no_thinking_by_default() -> None:
+    native_script = Script(sse(delta("Hi."), usage_chunk()))
+    native(native_script)
+    router_script = Script(route("none"), sse(delta("Hi."), usage_chunk()))
+    events(router_script, ASK)
+    bodies = native_script.bodies() + router_script.bodies()
+    assert [b.get("reasoning_effort") for b in bodies] == ["none", "none", "none"]
+
+
+def test_warm_up_and_an_empty_setting_send_no_reasoning_effort() -> None:
+    script = Script(route("none"), sse(delta("Hi."), usage_chunk()), route("none", usage=None))
+
+    async def go() -> None:
+        srv = server(script, reasoning_effort="")
+        try:
+            await _collect(srv.client("m", system_prompt="S", tool_mode="router").stream_reply(ASK, TOOLS))
+            await srv.warm_up("m")
+        finally:
+            await srv.aclose()
+
+    asyncio.run(go())
+    assert all("reasoning_effort" not in b for b in script.bodies())
+
+
+# LM Studio's own answer for a value it does not take (seen live 2026-11-18,
+# for "off").
+REASONING_400 = httpx.Response(
+    400,
+    json={
+        "error": {
+            "message": "Invalid 'reasoning_effort' value: 'off'. Supported values: none, minimal, low, medium, high, xhigh.",
+            "type": "invalid_request_error",
+            "param": "reasoning_effort",
+            "code": "invalid_value",
+        }
+    },
+)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "qwen3-4b-thinking-2507 does not support tools",  # "thinking" only in the model id
+        "Error rendering prompt: I think the template failed",  # prompt text in the error
+    ],
+)
+def test_other_400s_never_turn_reasoning_effort_off(message: str) -> None:
+    script = Script(httpx.Response(400, json={"error": {"message": message}}))
+
+    async def go() -> None:
+        srv = server(script)
+        try:
+            client = srv.client("qwen3-4b-thinking-2507", system_prompt="S", tool_mode="router")
+            with pytest.raises(LocalLLMError):
+                await _collect(client.stream_reply(ASK, []))
+            assert srv.reasoning_fields("qwen3-4b-thinking-2507") == {"reasoning_effort": "none"}
+        finally:
+            await srv.aclose()
+
+    asyncio.run(go())
+    assert len(script.requests) == 1
+
+
+def test_a_model_that_cannot_think_gets_no_reasoning_effort() -> None:
+    # Ollama-style wording; the model id itself also says "thinking".
+    refusal = httpx.Response(400, json={"error": {"message": '"qwen3-thinking" does not support thinking'}})
+    script = Script(refusal, sse(delta("Hi."), usage_chunk()))
+
+    async def go() -> list[Any]:
+        srv = server(script)
+        try:
+            return await _collect(srv.client("qwen3-thinking", system_prompt="S").stream_reply(ASK, []))
+        finally:
+            await srv.aclose()
+
+    assert [e.text for e in asyncio.run(go()) if isinstance(e, TextDelta)] == ["Hi."]
+    assert [b.get("reasoning_effort") for b in script.bodies()] == ["none", None]
+
+
+def test_a_server_that_refuses_reasoning_effort_gets_it_no_more() -> None:
+    script = Script(
+        REASONING_400,  # native reply
+        sse(delta("Hi."), usage_chunk()),  # the same request again, without it
+        sse(delta("Again."), usage_chunk()),  # next turn: not sent at all
+    )
+
+    async def go() -> list[list[Any]]:
+        srv = server(script)
+        try:
+            client = srv.client("m", system_prompt="S", tool_mode="native")
+            return [await _collect(client.stream_reply(ASK, TOOLS)), await _collect(client.stream_reply(ASK, TOOLS))]
+        finally:
+            await srv.aclose()
+
+    first, second = asyncio.run(go())
+    assert [e.text for e in first if isinstance(e, TextDelta)] == ["Hi."]
+    assert [e.text for e in second if isinstance(e, TextDelta)] == ["Again."]
+    assert [b.get("reasoning_effort") for b in script.bodies()] == ["none", None, None]
+
+
+def test_the_router_request_also_retries_without_reasoning_effort() -> None:
+    script = Script(REASONING_400, route("look", "q"))
+    got = events(script, ASK)
+    assert [e.name for e in got if isinstance(e, ToolCall)] == ["look"]
+    assert [b.get("reasoning_effort") for b in script.bodies()] == ["none", None]
+
+
 def test_no_tools_means_no_model_list_fetch() -> None:
     script = Script(sse(delta("Hi."), usage_chunk()))
     events(script, ASK, tools=[], tool_mode=None)

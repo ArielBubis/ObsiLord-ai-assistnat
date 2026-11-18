@@ -44,6 +44,7 @@ Requests and replies are not logged except through [debug] log_prompts.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import logging
@@ -553,6 +554,12 @@ _SAFE_ERRORS = re.compile(
     re.IGNORECASE,
 )
 _TOOLS_UNSUPPORTED = re.compile(r"does not support tools", re.IGNORECASE)
+# The field named in the message (LM Studio: "Invalid 'reasoning_effort'
+# value"), or a model that cannot think (Ollama-style wording). Matched with
+# the model id taken out, since ids often contain "thinking" or "reasoning".
+_REASONING_REFUSED = re.compile(
+    r"reasoning_effort|does not support (thinking|reasoning)", re.IGNORECASE
+)
 MSG_ROUTER_HINT = ' (set [llm_local] tool_mode = "router" for it)'
 _CONTEXT_ERROR = re.compile(r"context|n_ctx|too many tokens", re.IGNORECASE)
 
@@ -574,6 +581,25 @@ def _error_text(status: int, body: bytes) -> str:
     except ValueError:
         pass
     return f"local LLM server answered HTTP {status}" + (f": {detail}" if detail else "")
+
+
+def _refuses_reasoning(body: bytes, model: str) -> bool:
+    """Whether an error response refuses the reasoning_effort field. The
+    message is only matched, never shown or logged (it may quote the prompt)."""
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return False
+    err = data.get("error") if isinstance(data, dict) else None
+    if isinstance(err, dict):
+        if err.get("param") == "reasoning_effort":
+            return True
+        err = err.get("message")
+    if not isinstance(err, str):
+        return False
+    if model:
+        err = err.replace(model, "")
+    return bool(_REASONING_REFUSED.search(err))
 
 
 def _parse_lmstudio_models(data: Any) -> list[LocalModel] | None:
@@ -649,6 +675,27 @@ class OpenAICompatServer:
         self._tools: dict[str, bool | None] | None = None
         # Models that refused a request with tools; kept across list refreshes.
         self._no_tools: set[str] = set()
+        # Models whose server refused reasoning_effort; it is not sent again.
+        self._no_reasoning: set[str] = set()
+
+    def reasoning_fields(self, model: str) -> dict[str, Any]:
+        """{"reasoning_effort": ...} for a chat request, or {} when it is off
+        in config or the server refused it for model."""
+        effort = self.settings.reasoning_effort
+        if not effort or model in self._no_reasoning:
+            return {}
+        return {"reasoning_effort": effort}
+
+    def drop_reasoning(self, payload: dict[str, Any], status: int, body: bytes) -> dict[str, Any] | None:
+        """The payload without reasoning_effort when the server refused that
+        field (HTTP 400 naming reasoning or thinking), else None. Remembered
+        for the model."""
+        model = payload.get("model", "")
+        if status != 400 or "reasoning_effort" not in payload or not _refuses_reasoning(body, model):
+            return None
+        log.warning("local: the server refused reasoning_effort for this model, sending it no more")
+        self._no_reasoning.add(model)
+        return {k: v for k, v in payload.items() if k != "reasoning_effort"}
 
     def next_id(self) -> int:
         return next(self._ids)
@@ -728,10 +775,15 @@ class OpenAICompatServer:
         n = self.next_id()
         promptlog.emit(_format_request, n, kind, payload)
         t0 = time.perf_counter()
-        try:
-            r = await self._http.post(f"{self.base_url}/chat/completions", json=payload)
-        except httpx.HTTPError as exc:
-            raise self._transport_error(exc) from None
+        for _ in range(2):  # once more without reasoning_effort if it is refused
+            try:
+                r = await self._http.post(f"{self.base_url}/chat/completions", json=payload)
+            except httpx.HTTPError as exc:
+                raise self._transport_error(exc) from None
+            retry = self.drop_reasoning(payload, r.status_code, r.content)
+            if retry is None:
+                break
+            payload = retry
         if r.status_code != 200:
             raise LocalLLMError(_error_text(r.status_code, r.content))
         try:
@@ -767,9 +819,21 @@ class OpenAICompatServer:
         )
         return time.perf_counter() - t0, usage
 
-    def stream(self, payload: dict[str, Any]) -> Any:
-        """The streamed request as an httpx response context manager."""
-        return self._http.stream("POST", f"{self.base_url}/chat/completions", json=payload)
+    @contextlib.asynccontextmanager
+    async def stream(self, payload: dict[str, Any]) -> AsyncIterator[httpx.Response]:
+        """The streamed request as an httpx response. Sent once more without
+        reasoning_effort when the server refuses that field."""
+        for _ in range(2):
+            async with self._http.stream(
+                "POST", f"{self.base_url}/chat/completions", json=payload
+            ) as response:
+                if response.status_code != 200:
+                    retry = self.drop_reasoning(payload, response.status_code, await response.aread())
+                    if retry is not None:
+                        payload = retry
+                        continue
+                yield response
+                return
 
     def _transport_error(self, exc: httpx.HTTPError) -> LocalLLMError:
         if isinstance(exc, httpx.TimeoutException):
@@ -829,8 +893,10 @@ class LocalClient:
         """Ask the router which tool to use: ((tool, arg) or None, usage).
         Raises LocalLLMError when the request fails."""
         settings = self._server.settings
+        model = await self._model()
         payload = {
-            "model": await self._model(),
+            **self._server.reasoning_fields(model),
+            "model": model,
             "messages": [
                 {"role": "system", "content": router_instructions(tools)},
                 {
@@ -856,8 +922,10 @@ class LocalClient:
         routecheck): ((tool or "none", first text argument), usage, whether
         the call was written as text). Raises LocalLLMError."""
         settings = self._server.settings
+        model = await self._model()
         payload = {
-            "model": await self._model(),
+            **self._server.reasoning_fields(model),
+            "model": model,
             "messages": [{"role": "system", "content": self._prompt}, *_history_messages(history)],
             "temperature": settings.temperature,
             "max_tokens": settings.max_output_tokens,
@@ -963,13 +1031,15 @@ class LocalClient:
 
     async def _payload(self, messages: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
         settings = self._server.settings
+        model = await self._model()
         return {
-            "model": await self._model(),
+            "model": model,
             "messages": messages,
             "temperature": settings.temperature,
             "max_tokens": settings.max_output_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
+            **self._server.reasoning_fields(model),
             **extra,
         }
 

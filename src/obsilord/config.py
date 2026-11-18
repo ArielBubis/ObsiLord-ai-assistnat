@@ -41,6 +41,9 @@ class ServerSettings:
 # kw_only lets fields with defaults (optional in the TOML) sit anywhere.
 LLM_PROVIDERS = ("gemini", "local")
 TOOL_MODES = ("auto", "native", "router")
+# OpenAI-style reasoning_effort values; LM Studio listed these in its 400 for
+# "off" (checked 2026-11-18). "" means the field is not sent.
+REASONING_EFFORTS = ("", "none", "minimal", "low", "medium", "high", "xhigh")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -267,6 +270,10 @@ class LocalLLMSettings:
     # "native": tools declared like for Gemini; "router": a routing request
     # before each reply; "auto": per model from the server's model list.
     tool_mode: str = "auto"
+    # Sent as reasoning_effort with every chat request. "none" turns thinking
+    # off: spoken replies are short, and thinking used up max_output_tokens
+    # before any text. "" leaves it to the server.
+    reasoning_effort: str = "none"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -626,6 +633,11 @@ def _check_llm_local(llm: LLMSettings, local: LocalLLMSettings) -> None:
     if local.tool_mode not in TOOL_MODES:
         raise ValueError(
             f"config: llm_local.tool_mode must be one of {list(TOOL_MODES)}, got {local.tool_mode!r}"
+        )
+    if local.reasoning_effort not in REASONING_EFFORTS:
+        raise ValueError(
+            f"config: llm_local.reasoning_effort must be one of {list(REASONING_EFFORTS)}, "
+            f"got {local.reasoning_effort!r}"
         )
 
 

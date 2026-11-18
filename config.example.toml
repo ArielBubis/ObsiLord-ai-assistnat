@@ -50,6 +50,12 @@ router_context_messages = 4  # recent messages the tool router sees
 # routing request before each reply (for models without tool support), "auto"
 # picks per model from LM Studio's model list (native when it cannot tell).
 tool_mode = "auto"
+# Thinking: "none" turns it off for thinking models (replies in under a second
+# instead of several, and no reply lost to thinking that used up
+# max_output_tokens). Also "minimal", "low", "medium", "high", "xhigh", or ""
+# to leave it to the server. A server that refuses it gets the request again
+# without it.
+reasoning_effort = "none"
 
 [stt]
 # faster-whisper 1.2.1 (PyPI, MIT, SYSTRAN/faster-whisper), runs locally, no API

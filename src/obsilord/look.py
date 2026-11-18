@@ -61,7 +61,12 @@ DEFAULT_QUESTION = "What is in front of the camera?"
 MAX_QUESTION_CHARS = 300
 
 MSG_ONE_LOOK = "Only one look per turn."
-MSG_CAMERA_FAILED = "The camera could not take a photo."
+# Passed on by the assistant: the usual causes are on the user's side.
+MSG_CAMERA_FAILED = (
+    "The camera could not take a photo. Ask the user to check that the camera is "
+    "plugged in, that no other app is using it, and that Windows lets desktop apps "
+    "use the camera (Settings, Privacy and security, Camera)."
+)
 MSG_VISION_FAILED = "The local vision model failed."
 MSG_NO_ANSWER = "The local vision model gave no answer."
 MSG_LOOK_FAILED = "Looking failed."
