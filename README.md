@@ -1,8 +1,8 @@
 # Obsi-Lord
 
-A voice assistant with an 8-bit face that lives on your desktop, sees through your webcam when it needs to, and keeps your conversations on your own PC.
+A voice assistant with an animated 3D face that lives on your desktop, sees through your webcam when it needs to, and keeps your conversations on your own PC.
 
-Obsi-Lord is a personal prototype. You talk to it (or type), it answers out loud with a short, dry reply, and its pixel face reacts while it listens, thinks, looks and speaks. It can run fully offline on a local model, or use Gemini when you want a smarter chat model.
+Obsi-Lord is a personal prototype. You talk to it (or type), it answers out loud with a short, dry reply, and its face reacts while it listens, thinks, looks and speaks, with the mouth following its voice. It can run fully offline on a local model, or use Gemini when you want a smarter chat model.
 
 **Status:** working prototype. Voice and text chat, the animated face, camera looks, an optional image lookup, and conversation memory all work today.
 
@@ -18,11 +18,11 @@ Most assistants live in the cloud, listen all the time, and forget you between s
 ## Features
 
 - **Talk or type.** Hold to talk, or type in the chat box. Replies stream as subtitles and are spoken as they arrive.
-- **An animated face.** A 64x48 pixel face with idle, listening, thinking, looking and speaking states, and an optional 3D skin.
+- **An animated face.** A 3D character rendered with three.js and redrawn as dots (dither, halftone or ASCII), with a backdrop of a voice ring and drifting orbs. It has idle, listening, thinking, looking and speaking states, blinks and glances, a mouth driven by the speech audio, and expressions saved in the character. Bring your own character as a .glb or .vrm file. A 64x48 8-bit face is the alternative skin, and the fallback when WebGL is not available.
 - **Pick your brain.** Gemini, or any local model behind an OpenAI-compatible server (LM Studio, Ollama), switchable from the page. Models with tool support call the camera themselves; for the rest, a small routing step picks the tool.
 - **Looks when it matters.** `look()` takes one photo and asks Qwenny, a small local vision model (Qwen3-VL-2B on llama.cpp), about it.
 - **Identifies things (opt-in).** For things a description can't name, like an album cover or a product, the local model cuts the object out of the photo and only that cut-out goes to an online lookup. Off by default, with hourly and monthly caps.
-- **Conversation memory.** Recent turns go with every request, a reload picks up where you left off, and with a local model the assistant can search older conversations ("what did we talk about yesterday?").
+- **Conversation memory.** Recent turns go with every request, a reload within 30 minutes picks up where you left off (older conversations can be continued from Settings), and with a local model the assistant can search older conversations ("what did we talk about yesterday?").
 - **Cost guards built in.** Usage logging, a daily token cap, and look() limits exist before any model call does.
 
 ## How it works
@@ -49,7 +49,7 @@ One turn: you speak, the backend transcribes it, the chat model answers or calls
 
 ## Built with
 
-Python 3.12, FastAPI, faster-whisper, Piper, llama.cpp, OpenCV, SQLite, plain JavaScript with a canvas face (three.js for the 3D skin), and the Gemini API or any OpenAI-compatible local server.
+Python 3.12, FastAPI, faster-whisper, Piper, llama.cpp, OpenCV, SQLite, plain JavaScript with three.js and WebGL shaders for the face, and the Gemini API or any OpenAI-compatible local server.
 
 ## Running it
 
