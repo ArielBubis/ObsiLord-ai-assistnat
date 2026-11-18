@@ -438,7 +438,8 @@ def create_app(
         error: str | None = None
         try:
             models = [
-                {"id": m.id, "loaded": m.loaded} for m in await app.state.local.list_models()
+                {"id": m.id, "loaded": m.loaded, "tools": m.tools}
+                for m in await app.state.local.list_models()
             ]
         except LocalLLMError as exc:
             error = str(exc)
@@ -557,6 +558,8 @@ def create_app(
                     vision_on=app.state.looker is not None,
                     search_on=search_declared(),
                     today_tokens=app.state.usage.today_total,
+                    # From the model list the page loaded; never a request here.
+                    tool_mode=app.state.local.known_tool_mode(model),
                 )
             )
             if provider == LOCAL:

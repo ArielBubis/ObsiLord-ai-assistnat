@@ -40,6 +40,7 @@ class ServerSettings:
 
 # kw_only lets fields with defaults (optional in the TOML) sit anywhere.
 LLM_PROVIDERS = ("gemini", "local")
+TOOL_MODES = ("auto", "native", "router")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -263,6 +264,9 @@ class LocalLLMSettings:
     request_timeout_s: float = 60.0
     # Recent messages the tool router sees besides the new one (0..20).
     router_context_messages: int = 4
+    # "native": tools declared like for Gemini; "router": a routing request
+    # before each reply; "auto": per model from the server's model list.
+    tool_mode: str = "auto"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -618,6 +622,10 @@ def _check_llm_local(llm: LLMSettings, local: LocalLLMSettings) -> None:
         raise ValueError(
             f"config: llm_local.router_context_messages must be in "
             f"0..{LOCAL_ROUTER_CONTEXT_MAX}, got {local.router_context_messages}"
+        )
+    if local.tool_mode not in TOOL_MODES:
+        raise ValueError(
+            f"config: llm_local.tool_mode must be one of {list(TOOL_MODES)}, got {local.tool_mode!r}"
         )
 
 

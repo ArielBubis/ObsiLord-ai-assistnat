@@ -29,7 +29,16 @@ from obsilord.llm.openai_compat import OpenAICompatServer
 from obsilord.llm_switch import clean_model, switch_notice
 from obsilord.pipeline import MSG_CAP
 from obsilord.usage import UsageTracker
-from test_openai_compat import LMSTUDIO_MODELS, Script, delta, route, sse, usage_chunk
+from test_openai_compat import (
+    LMSTUDIO_MODELS,
+    LMSTUDIO_MODELS_TOOLS,
+    Script,
+    delta,
+    route,
+    sse,
+    tc_delta,
+    usage_chunk,
+)
 
 ORIGIN = "http://127.0.0.1:8765"
 
@@ -109,6 +118,24 @@ def test_config_lists_both_providers_and_the_local_models(tmp_path: Path) -> Non
     assert [m["id"] for m in local["models"]] == ["qwen3-14b", "gemma-12b", "qwen3-vl-8b"]
     assert local["models"][0]["loaded"] is True
     assert "key" not in json.dumps(data).lower().replace("api_key", "")
+
+
+def test_config_llm_lists_tool_support(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, Script(httpx.Response(200, json=LMSTUDIO_MODELS_TOOLS)))
+    models = rig.client.get("/config/llm").json()["local"]["models"]
+    assert {m["id"]: m["tools"] for m in models} == {"qwen3-14b": True, "gemma-12b": False, "qwen3-vl-8b": True}
+
+
+def test_switch_notice_follows_the_model_tool_support(tmp_path: Path) -> None:
+    # The page loads /config/llm first, so the server knows each model's mode.
+    script = Script(httpx.Response(200, json=LMSTUDIO_MODELS_TOOLS), WARM, WARM)
+    rig = Rig(tmp_path, script, looker=FakeLooker())
+    rig.client.get("/config/llm")
+    with rig.client.websocket_connect("/ws") as ws:
+        native_notice = _switch_local(ws, "qwen3-14b")[0]
+        router_notice = _switch_local(ws, "gemma-12b")[0]
+    assert "decides itself" in "\n".join(native_notice["lines"])
+    assert "routing step" in "\n".join(router_notice["lines"])
 
 
 def test_config_when_the_local_server_is_down(tmp_path: Path) -> None:
@@ -319,6 +346,32 @@ def test_router_look_runs_the_camera_and_the_reply_uses_the_result(tmp_path: Pat
     assert [x["counted"] for x in rig.usage_lines()] == [False, False]
 
 
+def test_native_look_runs_the_camera_and_the_follow_up_gets_a_tool_message(tmp_path: Path) -> None:
+    # The loaded model is marked tool_use: the tools are declared, no router.
+    script = Script(
+        httpx.Response(200, json=LMSTUDIO_MODELS_TOOLS),
+        sse(delta("Let me look."), tc_delta(0, "c1", "look", '{"question": "what is in the hand"}'), usage_chunk()),
+        sse(delta("A red mug, how dull."), usage_chunk()),
+    )
+    looker = FakeLooker({"output": "A red mug."})
+    rig = Rig(tmp_path, script, looker=looker, provider="local")
+    with rig.client.websocket_connect("/ws") as ws:
+        ws.send_json({"type": "text", "text": "What am I holding?"})
+        msgs = _turn(ws)
+    assert {"type": "state", "state": "looking"} in msgs
+    assert looker.questions == ["what is in the hand"]
+    assert _final_reply(msgs) == "Let me look. A red mug, how dull."
+    first, follow = script.bodies()
+    assert first["tool_choice"] == "auto" and "response_format" not in first
+    assert follow["messages"][-2]["tool_calls"][0]["id"] == "c1"
+    assert follow["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": '{"output": "A red mug."}',
+    }
+    assert [x["counted"] for x in rig.usage_lines()] == [False, False]
+
+
 def test_router_none_does_not_open_the_camera(tmp_path: Path) -> None:
     script = Script(MODELS, route("none"), sse(delta("Hi."), usage_chunk()))
     looker = FakeLooker()
@@ -369,9 +422,30 @@ def test_ws_accepts_the_page_origin(tmp_path: Path, origin: str) -> None:
 
 
 def _notice(tmp_path: Path, provider: str, **kw: Any) -> dict[str, Any]:
-    args = {"model": "qwen3-14b", "vision_on": True, "search_on": False, "today_tokens": 1234}
+    args = {
+        "model": "qwen3-14b",
+        "vision_on": True,
+        "search_on": False,
+        "today_tokens": 1234,
+        "tool_mode": "router",
+    }
     args.update(kw)
     return switch_notice(provider, _settings(tmp_path), **args)
+
+
+def test_local_notice_native_says_the_model_decides(tmp_path: Path) -> None:
+    text = "\n".join(_notice(tmp_path, "local", tool_mode="native", search_on=True)["lines"])
+    assert (
+        "Camera: the model decides itself when to use look() or search_image(), like Gemini, "
+        "but a small model can miss a request or look when not asked. If it misses, ask "
+        'plainly, for example "look at me".'
+    ) in text
+    assert "routing step" not in text
+
+
+def test_local_notice_router_keeps_the_routing_line(tmp_path: Path) -> None:
+    text = "\n".join(_notice(tmp_path, "local", tool_mode="router")["lines"])
+    assert "routing step" in text and "decides itself" not in text
 
 
 def test_local_notice_lists_what_is_lost_and_what_works_worse(tmp_path: Path) -> None:

@@ -723,6 +723,13 @@ def test_llm_local_from_example(tmp_path: Path) -> None:
     assert s.llm.provider == "gemini"
     assert s.llm_local == LocalLLMSettings()
     assert s.llm_local.base_url == "http://127.0.0.1:1234/v1"
+    assert s.llm_local.tool_mode == "auto"
+
+
+@pytest.mark.parametrize("mode", ["native", "router"])
+def test_llm_local_tool_mode_can_be_forced(tmp_path: Path, mode: str) -> None:
+    path = _write_replaced(tmp_path, 'tool_mode = "auto"', f'tool_mode = "{mode}"')
+    assert _load(path, tmp_path).llm_local.tool_mode == mode
 
 
 def test_llm_local_section_is_optional(tmp_path: Path) -> None:
@@ -756,6 +763,7 @@ def test_llm_local_section_is_optional(tmp_path: Path) -> None:
         ("request_timeout_s = 60 ", "request_timeout_s = 80 ", "llm_local.request_timeout_s"),
         ("router_context_messages = 4", "router_context_messages = 21", "router_context_messages"),
         ("router_context_messages = 4", "router_context_messages = -1", "router_context_messages"),
+        ('tool_mode = "auto"', 'tool_mode = "sometimes"', "llm_local.tool_mode must be one of"),
     ],
 )
 def test_llm_local_rejects_bad_values(tmp_path: Path, old: str, new: str, message: str) -> None:

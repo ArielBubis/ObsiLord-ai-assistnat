@@ -16,15 +16,28 @@ it puts reasoning text. Both are handled: reasoning fields in a delta are
 dropped, <think> blocks in the content are stripped (ThinkFilter), and a reply
 without counts leaves the usage estimate to the pipeline.
 
-Tool use (the "router"): small local models often skip tool calls or send them
-malformed, so tools are never declared to the model. At the start of a turn a
-short router request asks only "which camera tool, if any, and with what
-argument", with the answer held to a JSON schema by the server. A picked tool
-comes back as a ToolCall like any provider's, the pipeline runs it, and the
-reply request then gets the result inside its system message. With no tool,
-the reply request follows in the same stream_reply call: up to two requests
-per call, an exception to the one-request rule that is fine because local
-requests cost nothing and do not count toward the daily cap.
+Tool use has two modes per model ([llm_local] tool_mode; "auto" reads LM
+Studio's capabilities "tool_use" from /api/v0/models, checked 2026-11-18):
+
+- native: the tools are declared like for Gemini (tool_choice "auto"), the
+  streamed delta.tool_calls fragments are assembled into ToolCalls, and the
+  follow-up sends the model's calls back as its assistant message plus one
+  "tool" message per result (tool_choice "none"; Ollama ignores tool_choice,
+  so a call in a follow-up is dropped here). One request per call.
+- router, for models without tool support: tools are never declared. At the
+  start of a turn a short router request asks only "which camera tool, if
+  any, and with what argument", with the answer held to a JSON schema by the
+  server. A picked tool comes back as a ToolCall, the pipeline runs it, and
+  the reply request then gets the result inside its system message. With no
+  tool, the reply request follows in the same stream_reply call: up to two
+  requests per call, an exception to the one-request rule that is fine
+  because local requests cost nothing and do not count toward the daily cap.
+
+In both modes a model sometimes writes a call as text (Claude-style
+<function_calls> XML or a <tool_call> JSON block) instead of a real one.
+ToolTextFilter keeps that text from being shown or spoken. On the first
+request of a turn, a call that names an offered tool becomes a real ToolCall,
+so the model can still look on its own; in a follow-up it is dropped.
 
 Requests and replies are not logged except through [debug] log_prompts.
 """
@@ -36,7 +49,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator
 
 import httpx
@@ -71,6 +84,7 @@ MSG_NO_TEXT = (
     "the model gave no answer (it may have spent [llm_local] max_output_tokens "
     "thinking; raise it or pick a model without thinking)"
 )
+MSG_TOOL_TEXT_ONLY = "the model wrote a tool call instead of an answer"
 
 ROUTER_INTRO = (
     "You are the tool router of a voice assistant that has a webcam. Read the "
@@ -112,6 +126,12 @@ class LocalLLMUnreachable(LocalLLMError):
     """No connection to the local server. The router does not fall back on it."""
 
 
+class LocalToolsUnsupported(LocalLLMError):
+    """The server refused a request with tools because the model has no tool
+    support (Ollama answers HTTP 400). In "auto" mode the turn goes on with the
+    router instead."""
+
+
 class LocalLLMTimeout(LocalLLMError):
     """A request took longer than request_timeout_s. The router does not fall
     back on it either (the reply would wait the whole timeout again)."""
@@ -123,6 +143,10 @@ class LocalModel:
     # True or False when the server says whether the model is in memory
     # (LM Studio), None when it does not.
     loaded: bool | None = None
+    # Whether the model was trained for tool calls in a format the server
+    # parses (LM Studio's capabilities "tool_use"), None when the server does
+    # not say.
+    tools: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -212,6 +236,86 @@ class ThinkFilter:
         rest = "" if self._inside else self._buf
         self._buf = ""
         return rest
+
+
+# Starts of the tool call formats models write as text when they have no real
+# tools: Claude-style XML and Hermes/Qwen <tool_call> JSON.
+TOOL_TEXT_OPENS = ("<function_calls", "<invoke", "<tool_call")
+_INVOKE = re.compile(r"""<invoke\s+name\s*=\s*["']([^"']+)["']""")
+_PARAM = re.compile(
+    r"""<parameter\s+name\s*=\s*["']([^"']+)["']\s*>(.*?)(?=</parameter>|</invoke>|</function_calls>|\Z)""",
+    re.S,
+)
+
+
+class ToolTextFilter:
+    """Holds back a tool call that the model wrote as text, also when the
+    opening tag is split across chunks. Everything from the first opening tag
+    to the end of the reply goes to captured and is never shown or spoken:
+    after a call, the reply continues in the follow-up request."""
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._inside = False
+        self.captured = ""
+
+    def feed(self, text: str) -> str:
+        if self._inside:
+            self.captured += text
+            return ""
+        self._buf += text
+        found = [i for tag in TOOL_TEXT_OPENS if (i := self._buf.find(tag)) >= 0]
+        if found:
+            i = min(found)
+            out, self.captured, self._buf = self._buf[:i], self._buf[i:], ""
+            self._inside = True
+            return out
+        keep = max(_partial_suffix(self._buf, tag) for tag in TOOL_TEXT_OPENS)
+        out, self._buf = self._buf[: len(self._buf) - keep], self._buf[len(self._buf) - keep:]
+        return out
+
+    def flush(self) -> str:
+        rest, self._buf = self._buf, ""
+        return rest
+
+
+def _text_call_parts(text: str) -> tuple[Any, dict[str, Any]]:
+    """(name, args) from a tool call written as text; name is None when there
+    is none."""
+    invoke = _INVOKE.search(text)
+    if invoke:
+        return invoke.group(1).strip(), {k.strip(): v for k, v in _PARAM.findall(text)}
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None, {}
+    try:
+        data = json.loads(text[start: end + 1], strict=False)
+    except ValueError:
+        return None, {}
+    if not isinstance(data, dict):
+        return None, {}
+    args = data.get("arguments", data.get("parameters", {}))
+    if isinstance(args, str):
+        try:
+            args = json.loads(args, strict=False)
+        except ValueError:
+            args = {}
+    return data.get("name"), args if isinstance(args, dict) else {}
+
+
+def parse_text_tool_call(text: str, tools: list[ToolSpec], user_text: str) -> ToolCall | None:
+    """The ToolCall a reply wrote as text, or None when it names no offered
+    tool. The argument is the tool's own one, else the first text argument,
+    else the user's message."""
+    name, args = _text_call_parts(text)
+    tool = next((t for t in tools if t.name == name), None)
+    if tool is None:
+        return None
+    key = arg_name(tool) or "question"
+    value = args.get(key)
+    if not isinstance(value, str) or not value.strip():
+        value = next((v for v in args.values() if isinstance(v, str) and v.strip()), user_text)
+    return ToolCall(name=tool.name, args={key: " ".join(value.split())[:ROUTER_ARG_MAX_CHARS]})
 
 
 def arg_name(tool: ToolSpec) -> str | None:
@@ -321,13 +425,135 @@ def tool_results_text(results: list[ToolResult]) -> str:
     return "\n".join(lines)
 
 
+# --- native tool calls ------------------------------------------------------
+
+
+def _history_messages(history: list[Message]) -> list[dict[str, Any]]:
+    return [{"role": m.role, "content": m.text} for m in history]
+
+
+def openai_tools(tools: list[ToolSpec]) -> list[dict[str, Any]]:
+    """The tool declarations in the OpenAI chat completions format."""
+    return [
+        {
+            "type": "function",
+            "function": {"name": t.name, "description": t.description, "parameters": t.parameters},
+        }
+        for t in tools
+    ]
+
+
+def tool_message_content(result: ToolResult) -> str:
+    """A tool result for a "tool" message: JSON with the output or the error,
+    flattened to one capped line like in router mode (camera and web text)."""
+    if "output" in result.response:
+        return json.dumps({"output": _one_line(result.response["output"], MAX_TOOL_RESULT_CHARS)})
+    error = result.response.get("error", "no answer")
+    return json.dumps({"error": _one_line(error, MAX_TOOL_RESULT_CHARS)})
+
+
+def assistant_message(text: str | None, calls: list[ToolCall]) -> dict[str, Any]:
+    """The model's message with its tool calls, as the follow-up sends it back."""
+    return {
+        "role": "assistant",
+        "content": text or None,
+        "tool_calls": [
+            {
+                "id": c.call_id,
+                "type": "function",
+                "function": {"name": c.name, "arguments": json.dumps(c.args, ensure_ascii=False)},
+            }
+            for c in calls
+        ],
+    }
+
+
+def follow_up_messages(results: list[ToolResult]) -> list[dict[str, Any]]:
+    """The model's calls, then one tool message per result with the same ids.
+    Chat templates reject a call id without an answer."""
+    calls = [
+        r.call if r.call.call_id else replace(r.call, call_id=f"call_{i}")
+        for i, r in enumerate(results, 1)
+    ]
+    raw = results[0].call.raw
+    if not isinstance(raw, dict) or any(not r.call.call_id for r in results):
+        raw = assistant_message(None, calls)
+    return [
+        raw,
+        *(
+            {"role": "tool", "tool_call_id": c.call_id, "content": tool_message_content(r)}
+            for c, r in zip(calls, results)
+        ),
+    ]
+
+
+class ToolCallAccumulator:
+    """Assembles streamed delta.tool_calls fragments (by index; a fragment
+    without an index starts a new call)."""
+
+    def __init__(self) -> None:
+        self._calls: dict[int, dict[str, str]] = {}
+
+    def __bool__(self) -> bool:
+        return any(c["name"] for c in self._calls.values())
+
+    def feed(self, items: Any) -> None:
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            index = item.get("index")
+            if not isinstance(index, int):
+                index = len(self._calls)
+            slot = self._calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+            if isinstance(item.get("id"), str) and item["id"]:
+                slot["id"] = item["id"]
+            fn = item.get("function")
+            if isinstance(fn, dict):
+                if isinstance(fn.get("name"), str) and not slot["name"]:
+                    slot["name"] = fn["name"].strip()
+                if isinstance(fn.get("arguments"), str):
+                    slot["arguments"] += fn["arguments"]
+
+    def calls(self, tools: list[ToolSpec], user_text: str) -> list[ToolCall]:
+        """The calls in index order. Arguments that are not a JSON object count
+        as none; a missing argument of a known one-argument tool gets the
+        user's message. Missing ids become call_<n>."""
+        out: list[ToolCall] = []
+        for n, (_, slot) in enumerate(sorted(self._calls.items()), 1):
+            if not slot["name"]:
+                continue
+            try:
+                args = json.loads(slot["arguments"] or "{}", strict=False)
+            except ValueError:
+                args = {}
+            if not isinstance(args, dict):
+                args = {}
+            tool = next((t for t in tools if t.name == slot["name"]), None)
+            key = arg_name(tool) if tool is not None else None
+            value = args.get(key) if key else None
+            if key and not (isinstance(value, str) and value.strip()):
+                args = {**args, key: " ".join(user_text.split())[:ROUTER_ARG_MAX_CHARS]}
+            out.append(ToolCall(slot["name"], args, call_id=slot["id"] or f"call_{n}"))
+        return out
+
+    def summary(self) -> str:
+        """The calls as text for the prompt log."""
+        return "".join(
+            f"\n[tool call] {c['name']} {c['arguments']}" for c in self._calls.values() if c["name"]
+        )
+
+
 # Server error texts that are shown as they are. Anything else could quote the
 # prompt (a parse error, a context overflow), so only the status is shown.
 _SAFE_ERRORS = re.compile(
     r"^(model .{1,200} not found|no models loaded.*|model .{1,200} (is )?not loaded.*|"
-    r"model not found.*|failed to load model .{1,200})$",
+    r"model not found.*|failed to load model .{1,200}|\S{1,200} does not support tools)$",
     re.IGNORECASE,
 )
+_TOOLS_UNSUPPORTED = re.compile(r"does not support tools", re.IGNORECASE)
+MSG_ROUTER_HINT = ' (set [llm_local] tool_mode = "router" for it)'
 _CONTEXT_ERROR = re.compile(r"context|n_ctx|too many tokens", re.IGNORECASE)
 
 
@@ -362,7 +588,10 @@ def _parse_lmstudio_models(data: Any) -> list[LocalModel] | None:
             continue
         state = item.get("state")
         loaded = True if state == "loaded" else False if state == "not-loaded" else None
-        models.append(LocalModel(item["id"], loaded))
+        # LM Studio leaves the key out for models without tool support.
+        caps = item.get("capabilities")
+        tools = isinstance(caps, list) and "tool_use" in caps
+        models.append(LocalModel(item["id"], loaded, tools))
     return models
 
 
@@ -415,9 +644,39 @@ class OpenAICompatServer:
             trust_env=False,
         )
         self._ids = itertools.count(1)  # numbers requests in the prompt log
+        # Tool support per model id from the last model list; None until a
+        # list came back (a failed one is asked for again on the next turn).
+        self._tools: dict[str, bool | None] | None = None
+        # Models that refused a request with tools; kept across list refreshes.
+        self._no_tools: set[str] = set()
 
     def next_id(self) -> int:
         return next(self._ids)
+
+    def known_tool_mode(self, model: str) -> str:
+        """"native" or "router" for model from [llm_local] tool_mode and the
+        last model list. Never makes a request. "auto" gives "router" only
+        when the server said the model has no tool support."""
+        mode = self.settings.tool_mode
+        if mode != "auto":
+            return mode
+        if model in self._no_tools or (self._tools or {}).get(model) is False:
+            return "router"
+        return "native"
+
+    async def tool_mode(self, model: str) -> str:
+        """known_tool_mode, after asking for the model list if none came back
+        yet. A failed list counts as "the server does not say" for this turn."""
+        if self._tools is None and self.settings.tool_mode == "auto":
+            try:
+                await self.list_models()
+            except LocalLLMError as exc:
+                log.warning("local: model list for the tool mode failed (%s)", exc)
+        return self.known_tool_mode(model)
+
+    def mark_no_tools(self, model: str) -> None:
+        """model refused tools: "auto" uses the router for it from now on."""
+        self._no_tools.add(model)
 
     async def list_models(self) -> list[LocalModel]:
         """Chat models the server offers, loaded ones first. Raises LocalLLMError."""
@@ -443,6 +702,7 @@ class OpenAICompatServer:
                 models = _parse_openai_models(r.json())
             except ValueError:
                 raise LocalLLMError("local LLM server sent an unexpected model list") from None
+        self._tools = {m.id: m.tools for m in models}
         return sorted(models, key=lambda m: m.loaded is not True)
 
     async def default_model(self) -> str:
@@ -456,6 +716,15 @@ class OpenAICompatServer:
 
     async def complete(self, payload: dict[str, Any], kind: str) -> tuple[str, Usage | None]:
         """One non-streamed request: (content, usage). Raises LocalLLMError."""
+        message, usage = await self.complete_message(payload, kind)
+        content = message.get("content")
+        return content if isinstance(content, str) else "", usage
+
+    async def complete_message(
+        self, payload: dict[str, Any], kind: str
+    ) -> tuple[dict[str, Any], Usage | None]:
+        """One non-streamed request: (the reply message, usage). Raises
+        LocalLLMError."""
         n = self.next_id()
         promptlog.emit(_format_request, n, kind, payload)
         t0 = time.perf_counter()
@@ -470,13 +739,17 @@ class OpenAICompatServer:
             message = data["choices"][0]["message"]
         except (ValueError, KeyError, IndexError, TypeError):
             raise LocalLLMError("local LLM server sent an unexpected reply") from None
-        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(message, dict):
+            raise LocalLLMError("local LLM server sent an unexpected reply")
+        content = message.get("content")
         usage = parse_usage(data.get("usage"))
         text = content if isinstance(content, str) else ""
+        if message.get("tool_calls"):
+            text += f"\n[tool calls] {json.dumps(message['tool_calls'], ensure_ascii=False)}"
         promptlog.emit(
             _format_response, n, kind, text, usage, (time.perf_counter() - t0) * 1000
         )
-        return text, usage
+        return message, usage
 
     async def warm_up(self, model: str) -> tuple[float, Usage | None]:
         """A one-token request so the server loads the model now rather than on
@@ -505,8 +778,10 @@ class OpenAICompatServer:
             return LocalLLMUnreachable(f"cannot reach the local LLM server at {self.base_url}")
         return LocalLLMError(f"local LLM request failed: {type(exc).__name__}")
 
-    def client(self, model: str, system_prompt: str | None = None) -> LocalClient:
-        return LocalClient(self, model, system_prompt)
+    def client(
+        self, model: str, system_prompt: str | None = None, tool_mode: str | None = None
+    ) -> LocalClient:
+        return LocalClient(self, model, system_prompt, tool_mode)
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -520,13 +795,22 @@ class LocalClient:
     counts_toward_cap = False
 
     def __init__(
-        self, server: OpenAICompatServer, model: str, system_prompt: str | None = None
+        self,
+        server: OpenAICompatServer,
+        model: str,
+        system_prompt: str | None = None,
+        tool_mode: str | None = None,
     ) -> None:
         self._server = server
         # Empty: resolved to the server's default on the first request.
         self.model_id = model
+        # "native" or "router"; None: asked from the server per request
+        # (only when tools are given).
+        self._tool_mode = tool_mode
         prompt = system_prompt if system_prompt is not None else load_system_prompt()
-        self._system = prompt + LOCAL_MODE_NOTE
+        self._prompt = prompt  # native mode: the model calls tools itself
+        self._system = prompt + LOCAL_MODE_NOTE  # router mode and turns without tools
+        # The longer of the two until a request shows which one is sent.
         self.prompt_overhead_chars = len(self._system)
 
     @property
@@ -565,6 +849,41 @@ class LocalClient:
         content, usage = await self._server.complete(payload, "router")
         return parse_route(content, tools, history[-1].text), usage
 
+    async def native_route(
+        self, history: list[Message], tools: list[ToolSpec]
+    ) -> tuple[tuple[str, str], Usage | None, bool]:
+        """The tool the model calls with the tools declared, non-streamed (for
+        routecheck): ((tool or "none", first text argument), usage, whether
+        the call was written as text). Raises LocalLLMError."""
+        settings = self._server.settings
+        payload = {
+            "model": await self._model(),
+            "messages": [{"role": "system", "content": self._prompt}, *_history_messages(history)],
+            "temperature": settings.temperature,
+            "max_tokens": settings.max_output_tokens,
+            "stream": False,
+            "tools": openai_tools(tools),
+            "tool_choice": "auto",
+        }
+        message, usage = await self._server.complete_message(payload, "native route")
+        user_text = history[-1].text
+        native_calls = ToolCallAccumulator()
+        native_calls.feed(message.get("tool_calls"))
+        calls = native_calls.calls(tools, user_text)
+        as_text = False
+        if not calls:
+            content = message.get("content")
+            text_filter = ToolTextFilter()
+            if isinstance(content, str):
+                think = ThinkFilter()
+                text_filter.feed(think.feed(content) + think.flush())
+            call = parse_text_tool_call(text_filter.captured, tools, user_text) if text_filter.captured else None
+            calls, as_text = ([call], True) if call is not None else ([], False)
+        if not calls:
+            return (NO_TOOL, ""), usage, False
+        arg = next((v for v in calls[0].args.values() if isinstance(v, str)), "")
+        return (calls[0].name, arg), usage, as_text
+
     async def stream_reply(
         self,
         history: list[Message],
@@ -576,6 +895,17 @@ class LocalClient:
         # Resolve an empty model first, so a failure here is not taken for a
         # router failure.
         await self._model()
+        if tools and await self._mode() == "native":
+            try:
+                async for event in self._native(history, tools, tool_results, allow_tool_calls):
+                    yield event
+                return
+            except LocalToolsUnsupported:
+                # Raised before any event, so the router can take the turn.
+                if self._tool_mode is not None or self._server.settings.tool_mode != "auto":
+                    raise
+                log.warning("local: the model refused tools, using the router for it")
+                self._server.mark_no_tools(self.model_id)
         routing = (
             bool(tools)
             and allow_tool_calls
@@ -607,29 +937,78 @@ class LocalClient:
                 return
             else:
                 log.info("local: router picked no tool in %d ms", ms)
-        async for event in self._reply(history, tool_results, so_far):
+        # A tool call the reply writes as text runs only where a real one could.
+        async for event in self._reply(history, tool_results, so_far, tools if routing else []):
             yield event
 
     async def _reply(
-        self, history: list[Message], tool_results: list[ToolResult] | None, so_far: Usage
+        self,
+        history: list[Message],
+        tool_results: list[ToolResult] | None,
+        so_far: Usage,
+        call_tools: list[ToolSpec],
     ) -> AsyncIterator[LLMEvent]:
-        settings = self._server.settings
         system = self._system + (tool_results_text(tool_results) if tool_results else "")
-        payload = {
+        self.prompt_overhead_chars = len(self._system)
+        payload = await self._payload(
+            [{"role": "system", "content": system}, *_history_messages(history)]
+        )
+        async for event in self._stream(payload, history, so_far, call_tools, native=False):
+            yield event
+
+    async def _mode(self) -> str:
+        if self._tool_mode is not None:
+            return self._tool_mode
+        return await self._server.tool_mode(await self._model())
+
+    async def _payload(self, messages: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
+        settings = self._server.settings
+        return {
             "model": await self._model(),
-            "messages": [
-                {"role": "system", "content": system},
-                *({"role": m.role, "content": m.text} for m in history),
-            ],
+            "messages": messages,
             "temperature": settings.temperature,
             "max_tokens": settings.max_output_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
+            **extra,
         }
+
+    async def _native(
+        self,
+        history: list[Message],
+        tools: list[ToolSpec],
+        tool_results: list[ToolResult] | None,
+        allow_tool_calls: bool,
+    ) -> AsyncIterator[LLMEvent]:
+        """One request with the tools declared. On a follow-up, the model's
+        calls and one tool message per result are added after the history."""
+        first = allow_tool_calls and tool_results is None
+        self.prompt_overhead_chars = len(self._prompt)
+        messages = [{"role": "system", "content": self._prompt}, *_history_messages(history)]
+        if tool_results:
+            messages.extend(follow_up_messages(tool_results))
+        payload = await self._payload(
+            messages, tools=openai_tools(tools), tool_choice="auto" if first else "none"
+        )
+        async for event in self._stream(payload, history, Usage(), tools if first else [], native=True):
+            yield event
+
+    async def _stream(
+        self,
+        payload: dict[str, Any],
+        history: list[Message],
+        so_far: Usage,
+        call_tools: list[ToolSpec],
+        native: bool,
+    ) -> AsyncIterator[LLMEvent]:
+        """Streams one request. Calls (native ones, or one written as text)
+        are yielded only when call_tools is not empty."""
         n = self._server.next_id()
         promptlog.emit(_format_request, n, "reply", payload)
         t0 = time.perf_counter()
         think = ThinkFilter()
+        tool_text = ToolTextFilter()
+        native_calls = ToolCallAccumulator()
         started = False  # leading whitespace (after a think block) is dropped
         usage: Usage | None = None
         parts: list[str] = []
@@ -637,7 +1016,10 @@ class LocalClient:
             async with self._server.stream(payload) as response:
                 if response.status_code != 200:
                     body = await response.aread()
-                    raise LocalLLMError(_error_text(response.status_code, body))
+                    reason = _error_text(response.status_code, body)
+                    if native and _TOOLS_UNSUPPORTED.search(reason):
+                        raise LocalToolsUnsupported(reason + MSG_ROUTER_HINT)
+                    raise LocalLLMError(reason)
                 async for line in response.aiter_lines():
                     line = line.strip()
                     if not line.startswith("data:"):
@@ -663,11 +1045,13 @@ class LocalClient:
                     if not isinstance(choices, list) or not choices:
                         continue
                     delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+                    if native and isinstance(delta, dict):
+                        native_calls.feed(delta.get("tool_calls"))
                     content = delta.get("content") if isinstance(delta, dict) else None
                     # reasoning_content / reasoning fields are never spoken.
                     if not isinstance(content, str) or not content:
                         continue
-                    text = think.feed(content)
+                    text = tool_text.feed(think.feed(content))
                     if not started:
                         text = text.lstrip()
                         started = bool(text)
@@ -676,19 +1060,45 @@ class LocalClient:
                         yield TextDelta(text)
         except httpx.HTTPError as exc:
             raise self._server._transport_error(exc) from None
-        rest = think.flush()
+        rest = tool_text.feed(think.flush()) + tool_text.flush()
         if not started:
             rest = rest.lstrip()
         if rest:
             parts.append(rest)
             yield TextDelta(rest)
         promptlog.emit(
-            _format_response, n, "reply", "".join(parts), usage, (time.perf_counter() - t0) * 1000
+            _format_response,
+            n,
+            "reply",
+            "".join(parts) + tool_text.captured + native_calls.summary(),
+            usage,
+            (time.perf_counter() - t0) * 1000,
         )
-        if not parts:
+        user_text = history[-1].text if history and history[-1].role == "user" else ""
+        calls: list[ToolCall] = []
+        if native_calls:
+            if call_tools:
+                calls = native_calls.calls(call_tools, user_text)
+            else:
+                log.warning("local: dropped a tool call in a reply that may not call tools")
+        if not calls and tool_text.captured:
+            call = parse_text_tool_call(tool_text.captured, call_tools, user_text) if call_tools else None
+            if call is not None:
+                log.info("local: the reply wrote a %s call as text, running it", call.name)
+                calls = [replace(call, call_id="call_1")] if native else [call]
+            else:
+                log.warning("local: dropped a tool call the reply wrote as text")
+        if not parts and not calls:
             # For example a think block cut off by max_tokens. Raised after the
             # last UsageUpdate, so the pipeline still records the counts.
-            raise LocalLLMError(MSG_NO_TEXT)
+            only_call = bool(tool_text.captured or native_calls)
+            raise LocalLLMError(MSG_TOOL_TEXT_ONLY if only_call else MSG_NO_TEXT)
+        if native and calls:
+            # The follow-up sends the calls back as the model's own message.
+            raw = assistant_message("".join(parts), calls)
+            calls = [replace(c, raw=raw) for c in calls]
+        for call in calls:
+            yield call
         if usage is None:
             # No counts: the pipeline records an estimate (flagged estimated).
             log.info("local: reply came without token counts")

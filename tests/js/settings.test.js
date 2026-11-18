@@ -92,6 +92,26 @@ test("modelOptions marks loaded models and keeps an unlisted selection", () => {
   assert.deepEqual(modelOptions(withDefault, "qwen3-14b"), [{ value: "qwen3-14b", label: "qwen3-14b" }]);
 });
 
+test("modelOptions marks models without tool support", () => {
+  const config = {
+    local: {
+      default_model: "x",
+      models: [
+        { id: "a", loaded: true, tools: false },
+        { id: "b", tools: false },
+        { id: "c", tools: true },
+        { id: "d" },
+      ],
+    },
+  };
+  assert.deepEqual(modelOptions(config, "a"), [
+    { value: "a", label: "a (loaded, routing step)" },
+    { value: "b", label: "b (routing step)" },
+    { value: "c", label: "c" },
+    { value: "d", label: "d" },
+  ]);
+});
+
 test("serverLine says how many models or that the server is down", () => {
   assert.equal(serverLine(CONFIG), "Local server http://127.0.0.1:1234/v1: 2 models.");
   assert.equal(

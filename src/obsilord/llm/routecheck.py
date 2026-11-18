@@ -1,13 +1,16 @@
-"""Score a local model as the camera tool router.
+"""Score a local model on picking the camera tools.
 
     python -m obsilord.llm.routecheck [--model ID] [--no-search] [--repeat N]
+                                      [--mode auto|native|router]
 
 Sends a fixed set of labelled messages (some need look(), some
-search_image(), most need no tool, a few are follow-ups) through the same
-router request the app uses, against the [llm_local] server in config.toml,
-and prints the misses, the accuracy per expected tool, and the router
-latency. Run it once per model to compare them. Nothing is logged to the usage
-file and no camera is used.
+search_image(), most need no tool, a few are follow-ups) against the
+[llm_local] server in config.toml, the way the app would: in native mode one
+request with the tools declared and the app's system prompt, in router mode
+the routing request. Prints the misses, the accuracy per expected tool, how
+many calls came back written as text, and the latency. Run it per model and
+mode to compare them; --repeat matters, small models vary from run to run.
+Nothing is logged to the usage file and no camera is used.
 
 --no-search: only look() is offered (as with [image_search] off); messages
 that ask to identify something then expect look().
@@ -22,9 +25,9 @@ import sys
 import time
 from dataclasses import dataclass
 
-from obsilord.config import load_settings
-from obsilord.llm.base import Message
-from obsilord.llm.openai_compat import NO_TOOL, LocalLLMError, OpenAICompatServer
+from obsilord.config import TOOL_MODES, load_settings
+from obsilord.llm.base import Message, ToolSpec
+from obsilord.llm.openai_compat import NO_TOOL, LocalClient, LocalLLMError, OpenAICompatServer
 from obsilord.look import LOOK_TOOL, SEARCH_IMAGE_TOOL
 
 LOOK = LOOK_TOOL.name
@@ -82,37 +85,56 @@ class Result:
     got: str  # a tool name, NO_TOOL, or "unusable"
     arg: str
     ms: float
+    # Native mode: the call came back written as text, not as a tool call.
+    as_text: bool = False
 
 
-async def _run(model: str, search: bool, repeat: int) -> int:
+async def check(
+    client: LocalClient,
+    mode: str,
+    tools: list[ToolSpec],
+    cases: tuple[Case, ...],
+    repeat: int,
+) -> list[Result]:
+    """Runs every case repeat times in mode ("native" or "router"). Raises
+    LocalLLMError when a request itself fails (server down, unknown model, no
+    json_schema support); an unparsable router answer counts as "unusable"."""
+    search = any(t.name == SEARCH for t in tools)
+    results: list[Result] = []
+    for _ in range(repeat):
+        for case in cases:
+            expected = LOOK if case.expected == SEARCH and not search else case.expected
+            history = [*case.history, Message("user", case.text)]
+            t0 = time.perf_counter()
+            as_text = False
+            if mode == "native":
+                route, _, as_text = await client.native_route(history, tools)
+            else:
+                route, _ = await client.route(history, tools)
+            ms = (time.perf_counter() - t0) * 1000
+            got, arg = route if route is not None else ("unusable", "")
+            results.append(Result(case, expected, got, arg, ms, as_text))
+    return results
+
+
+async def _run(model: str, search: bool, repeat: int, mode: str) -> int:
     settings = load_settings()
     server = OpenAICompatServer(settings.llm_local)
     tools = [LOOK_TOOL, SEARCH_IMAGE_TOOL] if search else [LOOK_TOOL]
     try:
         try:
             resolved = model or await server.default_model()
+            if mode == "auto":
+                mode = await server.tool_mode(resolved)
+            # Native mode sends the app's system prompt, as the app does; the
+            # router request never uses it.
+            client = server.client(resolved, tool_mode=mode)
+            print(f"tool check: {resolved} at {settings.llm_local.base_url}, mode {mode}, "
+                  f"tools {', '.join(t.name for t in tools)}, {len(CASES)} messages x {repeat}")
+            results = await check(client, mode, tools, CASES, repeat)
         except LocalLLMError as exc:
             print(f"error: {exc}")
             return 2
-        client = server.client(resolved, system_prompt="")
-        print(f"router check: {resolved} at {settings.llm_local.base_url}, "
-              f"tools {', '.join(t.name for t in tools)}, {len(CASES)} messages x {repeat}")
-        results: list[Result] = []
-        for _ in range(repeat):
-            for case in CASES:
-                expected = LOOK if case.expected == SEARCH and not search else case.expected
-                history = [*case.history, Message("user", case.text)]
-                t0 = time.perf_counter()
-                try:
-                    route, _ = await client.route(history, tools)
-                except LocalLLMError as exc:
-                    # The request itself failed (server down, unknown model, no
-                    # json_schema support); an unparsable answer is None instead.
-                    print(f"error: {exc}")
-                    return 2
-                ms = (time.perf_counter() - t0) * 1000
-                got, arg = route if route is not None else ("unusable", "")
-                results.append(Result(case, expected, got, arg, ms))
     finally:
         await server.aclose()
     _report(results)
@@ -136,9 +158,10 @@ def _report(results: list[Result]) -> None:
     times = sorted(r.ms for r in results)
     p90 = times[min(len(times) - 1, int(len(times) * 0.9))]
     ok = len(results) - len(misses)
+    as_text = sum(r.as_text for r in results)
     print(f"\naccuracy {ok}/{len(results)} ({100 * ok / len(results):.0f}%), "
-          f"unusable answers {unusable}")
-    print(f"router latency: median {statistics.median(times):.0f} ms, p90 {p90:.0f} ms")
+          f"unusable answers {unusable}, calls written as text {as_text}")
+    print(f"latency: median {statistics.median(times):.0f} ms, p90 {p90:.0f} ms")
     if unusable:
         print("Unusable answers: the model may spend its tokens thinking before the JSON, "
               "or the server may not support response_format json_schema. A model without "
@@ -154,10 +177,13 @@ def main(argv: list[str] | None = None) -> int:
                         "or the first model the server lists)")
     parser.add_argument("--no-search", action="store_true", help="offer look() only")
     parser.add_argument("--repeat", type=int, default=1, help="run the set N times (1 to 10)")
+    parser.add_argument("--mode", choices=TOOL_MODES, default="auto",
+                        help="native: tools declared; router: the routing request; "
+                        "auto: as the app picks it for the model")
     args = parser.parse_args(argv)
     if not 1 <= args.repeat <= 10:
         parser.error("--repeat must be 1 to 10")
-    return asyncio.run(_run(args.model.strip(), not args.no_search, args.repeat))
+    return asyncio.run(_run(args.model.strip(), not args.no_search, args.repeat, args.mode))
 
 
 if __name__ == "__main__":

@@ -24,12 +24,14 @@ def switch_notice(
     vision_on: bool,
     search_on: bool,
     today_tokens: int,
+    tool_mode: str,
 ) -> dict[str, Any]:
     """The notice for a switch to provider ("gemini" or "local").
 
     model: the local model id ("" for the server's first model); ignored for
     Gemini. vision_on / search_on: whether look() and search_image() are
     declared. today_tokens: tokens counted toward the daily cap so far.
+    tool_mode: "native" or "router", how the local model gets its tools.
     """
     if provider == GEMINI:
         return {
@@ -51,12 +53,19 @@ def switch_notice(
     ]
     if vision_on:
         tools = "look() or search_image()" if search_on else "look()"
-        lines.append(
-            f"Camera: a short routing step decides before each reply whether to use "
-            f"{tools}. The model never calls tools itself, so it can miss a request "
-            "or look when not asked. If it misses, ask plainly, for example "
-            '"look at me".'
-        )
+        if tool_mode == "native":
+            lines.append(
+                f"Camera: the model decides itself when to use {tools}, like Gemini, "
+                "but a small model can miss a request or look when not asked. If it "
+                'misses, ask plainly, for example "look at me".'
+            )
+        else:
+            lines.append(
+                f"Camera: this model has no tool support, so a short routing step "
+                f"decides before each reply whether to use {tools}. It can miss a "
+                "request or look when not asked. If it misses, ask plainly, for "
+                'example "look at me".'
+            )
         lines.append(
             "The GPU is shared with Qwenny, which needs about 2 to 3 GB for each "
             "look. With a large chat model loaded, look() can fail or fall back to "
