@@ -305,9 +305,11 @@ function showError(message) {
 }
 
 function showSubtitle(text) {
+  // Follow the tail unless the user has scrolled up to read; a new exchange
+  // (empty text) starts at the bottom again.
+  const atBottom = subtitle.scrollHeight - subtitle.scrollTop - subtitle.clientHeight < 8;
   subtitle.textContent = text;
-  // Keep the tail visible when the reply is longer than the visible lines.
-  subtitle.scrollTop = subtitle.scrollHeight;
+  if (atBottom || !text) subtitle.scrollTop = subtitle.scrollHeight;
 }
 
 // Clears the previous exchange at the start of a new one.

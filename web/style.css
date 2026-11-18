@@ -262,17 +262,28 @@ body[data-status="thinking"] .scan-line {
   font-weight: 700;
 }
 
-/* At most four lines visible; ws.js scrolls to the bottom so the tail shows. */
+/* At most four lines visible, the rest scrolls. ws.js follows the tail while
+   the box is scrolled to the bottom. */
 #subtitle {
   margin: 0;
+  padding-right: 6px;
   color: var(--cyan);
   font-size: 15px;
   font-weight: 700;
   line-height: 1.4;
   max-height: 5.6em;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+  scrollbar-width: thin;
+  scrollbar-color: var(--cyan) transparent;
+}
+
+#subtitle:focus-visible {
+  outline: 1px dashed var(--cyan);
+  outline-offset: 2px;
 }
 
 /* Input row: prompt-style field, primary Send, secondary push-to-talk. */
