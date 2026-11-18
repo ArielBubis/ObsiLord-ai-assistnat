@@ -26,6 +26,7 @@ from obsilord.llm.openai_compat import (
     ToolTextFilter,
     Usage,
     _error_text,
+    _format_request,
     parse_route,
     parse_text_tool_call,
     parse_usage,
@@ -131,6 +132,20 @@ def test_think_blocks_are_removed_also_when_tags_are_split() -> None:
 def test_unclosed_think_is_dropped_and_stray_close_tag_removed() -> None:
     assert _filtered("Hi <think>never ends") == "Hi "
     assert _filtered("reply</think> more") == "reply more"
+
+
+def _ending(*chunks: str) -> str:
+    f = ThinkFilter(end_at_stray_close=True)
+    return "".join(f.feed(c) for c in chunks) + f.flush()
+
+
+def test_end_at_stray_close_keeps_the_first_answer_only() -> None:
+    assert _ending("One.\n</think>\n\nTwo.") == "One.\n"
+    assert _ending("One.", "</th", "ink>", "Two.", "<think>x</think>Three.") == "One."
+    # A tag before any text, or a whole think block, is handled as before.
+    assert _ending("</think>\n\nAnswer.") == "\n\nAnswer."
+    assert _ending("  \n</think>Answer.") == "  \nAnswer."
+    assert _ending("<think>reason</think>Answer.") == "Answer."
 
 
 def test_text_that_only_looks_like_a_tag_goes_through() -> None:
@@ -579,6 +594,46 @@ def test_every_chat_request_asks_for_no_thinking_by_default() -> None:
     events(router_script, ASK)
     bodies = native_script.bodies() + router_script.bodies()
     assert [b.get("reasoning_effort") for b in bodies] == ["none", "none", "none"]
+    # No server-side stop at </think>: it would cut a <think>...</think>
+    # reply from a model that thinks anyway down to nothing.
+    assert all("stop" not in b for b in bodies)
+
+
+def _reply_text(script: Script, effort: str) -> tuple[str, list[ToolCall]]:
+    async def go() -> list[Any]:
+        srv = server(script, reasoning_effort=effort)
+        try:
+            return await _collect(srv.client("m", system_prompt="S", tool_mode="native").stream_reply(ASK, TOOLS))
+        finally:
+            await srv.aclose()
+
+    got = asyncio.run(go())
+    return "".join(e.text for e in got if isinstance(e, TextDelta)), _calls(got)
+
+
+def test_without_thinking_a_stray_close_after_text_ends_the_spoken_reply() -> None:
+    # Seen live 2026-11-18: an answer, a stray </think>, the answer again.
+    doubled = Script(sse(delta("Answer one.\n"), delta("</thi"), delta("nk>\n\nAnswer"), delta(" two."), usage_chunk()))
+    text, _ = _reply_text(doubled, "none")
+    assert text.strip() == "Answer one."
+    # A call after the tag still counts; only the text is dropped.
+    called = Script(sse(delta("Let me look."), delta("</think>Looking."), tc_delta(0, "c1", "look", '{"question": "what?"}'), usage_chunk()))
+    text, calls = _reply_text(called, "none")
+    assert text == "Let me look." and [c.name for c in calls] == ["look"]
+
+
+def test_after_a_refused_reasoning_effort_text_after_a_stray_close_goes_through() -> None:
+    # The retry has no reasoning_effort, so thinking may be on: no cut.
+    refusal = httpx.Response(400, json={"error": {"message": '"m" does not support thinking'}})
+    script = Script(refusal, sse(delta("reasoning</think>"), delta("The answer."), usage_chunk()))
+    text, _ = _reply_text(script, "none")
+    assert text == "reasoningThe answer."
+
+
+def test_with_thinking_on_text_after_a_stray_close_goes_through() -> None:
+    # The template may open the think block itself: the reply is after the tag.
+    text, _ = _reply_text(Script(sse(delta("reasoning</think>"), delta("The answer."), usage_chunk())), "low")
+    assert text == "reasoningThe answer."
 
 
 def test_warm_up_and_an_empty_setting_send_no_reasoning_effort() -> None:
@@ -1150,3 +1205,27 @@ def test_warm_up_asks_for_one_token() -> None:
     assert seconds >= 0 and usage == Usage(9, 1, 0)
     (body,) = script.bodies()
     assert body["max_tokens"] == 1 and body["model"] == "qwen3-14b" and body["stream"] is False
+
+
+def test_prompt_log_shows_the_tool_calls_of_a_message() -> None:
+    # A call message has no content; without its calls the log shows only "None".
+    payload = {
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "what about 2026-11-05?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "c1", "type": "function",
+                     "function": {"name": "recall", "arguments": "{\"date\": \"2026-11-05\"}"}},
+                ],
+            },
+        ],
+    }
+    text = _format_request(3, "reply", payload)
+    assert text.splitlines()[1:] == [
+        "[user] what about 2026-11-05?",
+        "[assistant] None",
+        "[tool calls] recall {\"date\": \"2026-11-05\"}",
+    ]

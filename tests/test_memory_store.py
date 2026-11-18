@@ -202,6 +202,28 @@ def test_search_until_bounds_the_window(tmp_path: Path) -> None:
     assert [h.user for h in words] == ["what is this figure?"]
 
 
+def test_search_skips_the_turns_already_inline(tmp_path: Path) -> None:
+    # skip=(conversation, n): that conversation's last n turns are in the
+    # prompt already, so recall must not return them (they echo the miss).
+    async def go() -> tuple[list[Any], list[Any], list[Any]]:
+        store = await _store(tmp_path / "m.sqlite3")
+        old = await store.new_conversation("web", now=T0 - DAY)
+        await store.add_turn(old, turn("my cat is Pita", "Nice name.", T0 - DAY))
+        cur = await store.new_conversation("web", now=T0)
+        for i in range(3):
+            await store.add_turn(cur, turn(f"cat question {i}", "No record of a cat.", T0 + i))
+        words = await store.search("cat", 5, skip=(cur, 2))
+        listing = await store.search("", 5, skip=(cur, 2))
+        other = await store.search("cat", 5, skip=("f" * 32, 2))
+        await store.close()
+        return words, listing, other
+
+    words, listing, other = run(go())
+    assert sorted(h.user for h in words) == ["cat question 0", "my cat is Pita"]
+    assert [h.user for h in listing] == ["cat question 0", "my cat is Pita"]
+    assert len(other) == 4
+
+
 def test_search_one_hit_per_turn(tmp_path: Path) -> None:
     async def go() -> list[Any]:
         store = await _store(tmp_path / "m.sqlite3")

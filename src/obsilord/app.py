@@ -628,8 +628,12 @@ def create_app(
             recall = RecallTool(store, settings.memory.recall_limit, settings.memory.recall_max_chars)
 
         def recall_tool() -> Tool | None:
-            # Built per turn: its description carries today's date.
-            return recall.tool() if recall is not None else None
+            # Built per turn: its description carries today's date, and the
+            # turns of this conversation already in history are skipped.
+            if recall is None:
+                return None
+            skip = (conv_id, settings.llm.history_turns) if conv_id is not None else None
+            return recall.tool(skip=skip)
 
         async def send(msg: dict[str, Any] | bytes) -> None:
             if isinstance(msg, dict) and msg.get("type") == "snapshot" and not snapshots_on:

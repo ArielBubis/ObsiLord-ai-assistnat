@@ -35,11 +35,18 @@ class FakeSource:
         self.window_hits = window_hits
         self.fail = fail
         self.calls: list[tuple[str, int, Any, Any]] = []
+        self.skips: list[Any] = []
 
     async def search(
-        self, query: str, limit: int, since: float | None = None, until: float | None = None
+        self,
+        query: str,
+        limit: int,
+        since: float | None = None,
+        until: float | None = None,
+        skip: tuple[str, int] | None = None,
     ) -> list[Hit]:
         self.calls.append((query, limit, since, until))
+        self.skips.append(skip)
         if self.fail:
             raise OSError("disk")
         if self.window_hits is not None and not query:
@@ -64,6 +71,14 @@ def test_spec_of_a_turn_carries_todays_date() -> None:
     assert spec.name == "recall"
     assert "Today is 2026-11-18 (Wednesday)." in spec.description
     assert _tool(FakeSource()).tool().spec.description == spec.description
+
+
+def test_tool_of_a_turn_skips_the_inline_turns() -> None:
+    source = FakeSource(hits=[], window_hits=[])
+    tool = _tool(source).tool(skip=("c" * 32, 10))
+    asyncio.run(tool.run({"query": "cat", "date": "2026-11-05"}))  # words, then the window
+    asyncio.run(_tool(source).tool().run({"query": "cat"}))
+    assert source.skips == [("c" * 32, 10), ("c" * 32, 10), None]
 
 
 def test_output_lists_hits_with_dates() -> None:
@@ -109,6 +124,8 @@ def test_date_in_text() -> None:
     today = Date(2026, 11, 18)
     assert date_in_text("what did we talk about in 5th of november?", today) == Date(2026, 11, 5)
     assert date_in_text("November 5", today) == Date(2026, 11, 5)
+    assert date_in_text("what did we talke about on november the 5th?", today) == Date(2026, 11, 5)
+    assert date_in_text("the 5th of november", today) == Date(2026, 11, 5)
     assert date_in_text("on nov 5th, 2025", today) == Date(2025, 11, 5)
     assert date_in_text("5 Dec", today) == Date(2025, 12, 5)  # not yet this year
     assert date_in_text("2026-10-01 dentist", today) == Date(2026, 10, 1)

@@ -206,16 +206,28 @@ class ThinkFilter:
     split across chunks. A stray </think> is dropped. Text before a stray
     </think> (reasoning without an opening tag) cannot be told apart from the
     reply and goes through; LM Studio's option to separate reasoning_content
-    avoids that."""
+    avoids that.
+
+    end_at_stray_close (thinking off): the chat template has closed the think
+    block already, yet a model sometimes thinks in the reply, closes it with a
+    stray </think> and answers a second time (seen live 2026-11-18). The text
+    before the tag has been spoken by then, so a stray </think> after text
+    ends the output and everything after it is dropped. A tag before any
+    text, or a whole <think> block, is handled as without it."""
 
     OPEN = "<think>"
     CLOSE = "</think>"
 
-    def __init__(self) -> None:
+    def __init__(self, end_at_stray_close: bool = False) -> None:
         self._buf = ""
         self._inside = False
+        self._end_at_stray = end_at_stray_close
+        self._said = False  # text other than whitespace has gone out
+        self.ended = False
 
     def feed(self, text: str) -> str:
+        if self.ended:
+            return ""
         self._buf += text
         out: list[str] = []
         while True:
@@ -237,16 +249,22 @@ class ThinkFilter:
                 i, tag = min(found)
                 out.append(self._buf[:i])
                 self._buf = self._buf[i + len(tag):]
+                if tag == self.CLOSE and self._end_at_stray and (self._said or "".join(out).strip()):
+                    self.ended = True
+                    self._buf = ""
+                    break
                 self._inside = tag == self.OPEN
                 continue
             keep = max(_partial_suffix(self._buf, self.OPEN), _partial_suffix(self._buf, self.CLOSE))
             out.append(self._buf[: len(self._buf) - keep])
             self._buf = self._buf[len(self._buf) - keep:]
             break
-        return "".join(out)
+        result = "".join(out)
+        self._said = self._said or bool(result.strip())
+        return result
 
     def flush(self) -> str:
-        rest = "" if self._inside else self._buf
+        rest = "" if self._inside or self.ended else self._buf
         self._buf = ""
         return rest
 
@@ -701,6 +719,10 @@ def _format_request(n: int, kind: str, payload: dict[str, Any]) -> str:
     lines = [f"local #{n} {kind} request: {json.dumps(settings, ensure_ascii=False)}"]
     for m in payload.get("messages", []):
         lines.append(f"[{m.get('role')}] {m.get('content')}")
+        calls = m.get("tool_calls")
+        if isinstance(calls, list) and calls:
+            named = [c.get("function", {}) for c in calls if isinstance(c, dict)]
+            lines.append("[tool calls] " + "; ".join(f"{f.get('name')} {f.get('arguments')}" for f in named))
     return "\n".join(lines)
 
 
@@ -746,6 +768,11 @@ class OpenAICompatServer:
         if not effort or model in self._no_reasoning:
             return {}
         return {"reasoning_effort": effort}
+
+    def thinking_off(self, model: str) -> bool:
+        """Whether requests for model ask for no thinking (reasoning_effort
+        "none", and the server has not refused that field)."""
+        return self.reasoning_fields(model).get("reasoning_effort") == "none"
 
     def drop_reasoning(self, payload: dict[str, Any], status: int, body: bytes) -> dict[str, Any] | None:
         """The payload without reasoning_effort when the server refused that
@@ -1155,6 +1182,10 @@ class LocalClient:
                     if native and _TOOLS_UNSUPPORTED.search(reason):
                         raise LocalToolsUnsupported(reason + MSG_ROUTER_HINT)
                     raise LocalLLMError(reason)
+                # Thinking off: a stray </think> after the answer starts a
+                # second copy. Known only now: the server may have refused
+                # reasoning_effort, and the retry then may think.
+                think = ThinkFilter(end_at_stray_close=self._server.thinking_off(payload.get("model", "")))
                 async for line in response.aiter_lines():
                     line = line.strip()
                     if not line.startswith("data:"):

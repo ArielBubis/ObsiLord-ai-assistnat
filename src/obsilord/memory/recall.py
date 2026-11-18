@@ -121,7 +121,9 @@ _MONTHS = {
 _MONTH = "|".join(sorted(_MONTHS, key=len, reverse=True))
 _ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 _DAY_MONTH = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({_MONTH})\b\.?(?:,?\s+(\d{{4}})\b)?", re.I)
-_MONTH_DAY = re.compile(rf"\b({_MONTH})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b(?:,?\s+(\d{{4}})\b)?", re.I)
+_MONTH_DAY = re.compile(
+    rf"\b({_MONTH})\.?\s+(?:the\s+)?(\d{{1,2}})(?:st|nd|rd|th)?\b(?:,?\s+(\d{{4}})\b)?", re.I
+)
 
 
 def _dated(year: int | None, month: int, day: int, today: Date) -> Date | None:
@@ -183,11 +185,17 @@ class RecallTool:
         self._max_chars = max_chars
         self._clock = clock
 
-    def tool(self) -> Tool:
-        """The tool for one turn (today's date in its description)."""
-        return Tool(recall_spec(self._clock()), self.run)
+    def tool(self, skip: tuple[str, int] | None = None) -> Tool:
+        """The tool for one turn (today's date in its description). skip:
+        (conversation id, n), its last n turns are in the prompt already and
+        are left out of the results, or they echo the model's own misses."""
 
-    async def run(self, args: dict[str, Any]) -> dict[str, Any]:
+        async def run(args: dict[str, Any]) -> dict[str, Any]:
+            return await self.run(args, skip=skip)
+
+        return Tool(recall_spec(self._clock()), run)
+
+    async def run(self, args: dict[str, Any], skip: tuple[str, int] | None = None) -> dict[str, Any]:
         query = args.get("query")
         query = query.strip() if isinstance(query, str) else ""
         now = self._clock()
@@ -213,12 +221,12 @@ class RecallTool:
         words = fts_query(query) is not None
         missed = ""
         try:
-            hits = await self._source.search(query, self._max_results, since=since, until=until)
+            hits = await self._source.search(query, self._max_results, since=since, until=until, skip=skip)
             if not hits and words and window:
                 # The words found nothing in the window: list the window.
                 missed = f"Nothing matched '{_flat(query)}'. "
                 words = False
-                hits = await self._source.search("", self._max_results, since=since, until=until)
+                hits = await self._source.search("", self._max_results, since=since, until=until, skip=skip)
         except Exception as exc:  # noqa: BLE001
             log.warning("recall: search failed: %s", type(exc).__name__)
             return {"error": MSG_RECALL_FAILED}

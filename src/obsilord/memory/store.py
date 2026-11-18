@@ -274,31 +274,52 @@ class SqliteStore:
     # Search
 
     async def search(
-        self, query: str, limit: int, since: float | None = None, until: float | None = None
+        self,
+        query: str,
+        limit: int,
+        since: float | None = None,
+        until: float | None = None,
+        skip: tuple[str, int] | None = None,
     ) -> list[Hit]:
         """Matching turns, best match first (newer first on ties). With no
         usable words in query: the newest turns. since and until (unix
-        seconds, since inclusive, until exclusive) bound both."""
-        return await self._call(self._search, fts_query(query), limit, since, until)
+        seconds, since inclusive, until exclusive) bound both. skip
+        (conversation id, n) leaves out that conversation's last n turns."""
+        return await self._call(self._search, fts_query(query), limit, since, until, skip)
 
-    def _search(self, match: str | None, limit: int, since: float | None, until: float | None) -> list[Hit]:
+    def _search(
+        self,
+        match: str | None,
+        limit: int,
+        since: float | None,
+        until: float | None,
+        skip: tuple[str, int] | None,
+    ) -> list[Hit]:
         con = self._db()
         floor = since if since is not None else float("-inf")
         ceiling = until if until is not None else float("inf")
+        skip_id, skip_n = skip if skip is not None else ("", 0)
+        # The skipped turns: those after the conversation's turns minus n.
+        skipped = (
+            "NOT (m.conversation_id = ? AND m.turn > "
+            "COALESCE((SELECT turns - ? FROM conversations WHERE id = ?), 0))"
+        )
+        skip_args = (skip_id, max(skip_n, 0), skip_id)
         if match is None:
             keys = con.execute(
-                "SELECT conversation_id, turn FROM messages WHERE role = 'user' AND ts >= ? AND ts < ? "
-                "ORDER BY ts DESC, id DESC LIMIT ?",
-                (floor, ceiling, limit),
+                "SELECT m.conversation_id, m.turn FROM messages m "
+                f"WHERE m.role = 'user' AND m.ts >= ? AND m.ts < ? AND {skipped} "
+                "ORDER BY m.ts DESC, m.id DESC LIMIT ?",
+                (floor, ceiling, *skip_args, limit),
             ).fetchall()
         else:
             keys = con.execute(
                 "SELECT m.conversation_id, m.turn FROM messages_fts f "
                 "JOIN messages m ON m.id = f.rowid "
-                "WHERE messages_fts MATCH ? AND m.ts >= ? AND m.ts < ? "
+                f"WHERE messages_fts MATCH ? AND m.ts >= ? AND m.ts < ? AND {skipped} "
                 "GROUP BY m.conversation_id, m.turn "
                 "ORDER BY MIN(f.rank), MAX(m.ts) DESC LIMIT ?",
-                (match, floor, ceiling, limit),
+                (match, floor, ceiling, *skip_args, limit),
             ).fetchall()
         return [self._hit(cid, turn) for cid, turn in keys]
 

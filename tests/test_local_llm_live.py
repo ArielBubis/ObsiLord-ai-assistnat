@@ -101,7 +101,7 @@ def test_recall_by_date_live(mode: str, tmp_path: Path) -> None:
     day = next(c for c in demo_checks(now) if c["kind"] == "recall-date")["question"].split("on the ")[1]
     ask = [Message("user", f"what did we talk about in {day}")]
 
-    async def go() -> tuple[list[ToolCall], str]:
+    async def go() -> tuple[list[ToolCall], str, str]:
         store = SqliteStore(tmp_path / "demo.sqlite3")
         await store.open()
         await seed_demo(store, now)
@@ -117,13 +117,13 @@ def test_recall_by_date_live(mode: str, tmp_path: Path) -> None:
             follow = [
                 e async for e in client.stream_reply(ask, tools, tool_results=results, allow_tool_calls=False)
             ] if results else []
-            return calls, _text(follow)
+            return calls, _text(first), _text(follow)
         finally:
             await server.aclose()
             await store.close()
 
-    calls, answer = asyncio.run(go())
-    print(f"\n{mode}: calls {calls}\nanswer: {answer!r}")
+    calls, said, answer = asyncio.run(go())
+    print(f"\n{mode}: calls {calls}\nfirst: {said!r}\nanswer: {answer!r}")
     assert [c.name for c in calls] == ["recall"]
     assert "pita" in answer.lower() or "cat" in answer.lower(), answer
 
@@ -162,4 +162,4 @@ def test_recall_of_demo_history_live(mode: str, tmp_path: Path) -> None:
     assert [c.name for c in calls] == ["recall"]
     # Replies are spoken, so the time may be written out ("four thirty").
     spoken = answer.lower().replace("-", " ")
-    assert any(t in spoken for t in ("16:30", "4:30", "four thirty", "half past four")), answer
+    assert any(t in spoken for t in ("16:30", "4:30", "four thirty", "sixteen thirty", "half past four")), answer
