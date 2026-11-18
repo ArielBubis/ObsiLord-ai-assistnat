@@ -118,7 +118,7 @@ LOOK_TOOL = ToolSpec(
 LOOK_PHOTO_TOOL = ToolSpec(
     name=LOOK_TOOL.name,
     description=(
-        "Take one photo with the user's webcam, Pass what you want to find out about the view, if the request came with any question or ask for more info, oblige if you can"
+        "Take one photo with the user's webcam. Pass what you want to find out about the view, if the request came with any question or ask for more info, oblige if you can"
     ),
     parameters=LOOK_TOOL.parameters,
 )

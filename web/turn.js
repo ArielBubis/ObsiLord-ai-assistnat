@@ -9,8 +9,8 @@ export const WATCHDOG_MESSAGE = "No reply from server.";
 // Whether a turn is still in progress after a server message.
 // faceState is the face state before the message is applied.
 // - state idle ends the turn; other states keep it going.
-// - error ends the turn only when the face is already idle (for example no
-//   API key, sent before any state change). Errors raised mid-turn are always
+// - error ends the turn only when the face is already idle (for example busy,
+//   sent before any state change). Errors raised mid-turn are always
 //   followed by state idle, which ends the turn then.
 export function busyAfterMessage(busy, msg, faceState) {
   if (!busy || !msg || typeof msg !== "object") return busy;
@@ -91,7 +91,7 @@ export function pressAction({ connected, busy, pendingIdle, recording, orphan = 
 // "pending" (no answer to audio_start yet), or "accepted" (listening came).
 //   "accept"  listening: frames may flow
 //   "refuse"  any error, or any other state, before listening (voice
-//             disabled, busy, no API key): stop capturing and release the
+//             disabled, busy): stop capturing and release the
 //             mic, drop the frames, no audio_end, back to idle locally
 //   "end"     error after listening (too long, protocol slip): stop
 //             capturing and send audio_end so the server can finish

@@ -16,7 +16,6 @@ import obsilord.stt.faster_whisper as fw
 from fakes import FakeLLM, FakeSTT, FakeTTS, text_only
 from obsilord.app import (
     MSG_BUSY,
-    MSG_NO_KEY,
     MSG_NO_VOICE,
     MSG_NOT_RECORDING,
     MSG_UNEXPECTED_AUDIO,
@@ -55,13 +54,6 @@ def _client(
     usage = UsageTracker(tmp_path / "usage.jsonl", settings.llm.daily_token_cap)
     llm = llm if llm is not None else FakeLLM(["Paris."])
     return TestClient(create_app(settings, llm=llm, usage=usage, tts=tts, stt=stt))
-
-
-def _no_key_client(tmp_path: Path, stt: FakeSTT) -> TestClient:
-    settings = _settings(tmp_path)
-    app = create_app(settings, llm=FakeLLM(["x"]), stt=stt)
-    app.state.llm = None
-    return TestClient(app)
 
 
 def _collect(ws: Any) -> list[dict[str, Any] | bytes]:
@@ -127,15 +119,6 @@ def test_audio_start_when_voice_disabled(tmp_path: Path) -> None:
         ws.send_json({"type": "audio_end"})
         assert ws.receive_json() == {"type": "error", "message": MSG_NOT_RECORDING}
         _assert_quiet(ws)
-
-
-def test_audio_start_without_api_key(tmp_path: Path) -> None:
-    stt = FakeSTT()
-    with _no_key_client(tmp_path, stt).websocket_connect("/ws") as ws:
-        ws.send_json({"type": "audio_start"})
-        assert ws.receive_json() == {"type": "error", "message": MSG_NO_KEY}
-        _assert_quiet(ws)
-    assert stt.calls == []
 
 
 def test_audio_start_while_turn_running_is_busy(tmp_path: Path) -> None:

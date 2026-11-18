@@ -20,7 +20,6 @@ from obsilord.app import (
     MSG_BAD_MODEL,
     MSG_BAD_PROVIDER,
     MSG_GEMINI_OFF,
-    MSG_NO_KEY,
     MSG_SWITCH_BUSY,
     create_app,
 )
@@ -118,6 +117,12 @@ def test_config_lists_both_providers_and_the_local_models(tmp_path: Path) -> Non
     assert [m["id"] for m in local["models"]] == ["qwen3-14b", "gemma-12b", "qwen3-vl-8b"]
     assert local["models"][0]["loaded"] is True
     assert "key" not in json.dumps(data).lower().replace("api_key", "")
+
+
+def test_config_default_provider_is_local_without_a_gemini_key(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, Script(httpx.Response(200, json=LMSTUDIO_MODELS)))
+    assert rig.settings.llm.provider == "gemini"
+    assert rig.client.get("/config/llm").json()["default_provider"] == "local"
 
 
 def test_config_llm_lists_tool_support(tmp_path: Path) -> None:
@@ -261,11 +266,15 @@ def test_no_switch_during_a_turn(tmp_path: Path) -> None:
     assert rig.script.requests == []
 
 
-def test_without_a_gemini_key_local_still_works(tmp_path: Path) -> None:
-    rig = Rig(tmp_path, Script(WARM, sse(delta("Local."), usage_chunk())))
+def test_without_a_gemini_key_pages_start_on_local(tmp_path: Path) -> None:
+    # [llm] provider is "gemini" (text_only) but there is no key: the page
+    # starts on the local model instead of failing every turn.
+    rig = Rig(tmp_path, Script(MODELS, sse(delta("Local first."), usage_chunk()),
+                               WARM, sse(delta("Local."), usage_chunk())))
+    assert rig.settings.llm.provider == "gemini"
     with rig.client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "text", "text": "hi"})
-        assert ws.receive_json() == {"type": "error", "message": MSG_NO_KEY}
+        assert _final_reply(_turn(ws)) == "Local first."
         ws.send_json({"type": "llm", "provider": "gemini"})
         assert ws.receive_json() == {"type": "error", "message": MSG_GEMINI_OFF}
         ws.send_json({"type": "llm", "provider": "gemini", "announce": True})  # ignored quietly
@@ -436,10 +445,11 @@ def _notice(tmp_path: Path, provider: str, **kw: Any) -> dict[str, Any]:
 def test_local_notice_native_says_the_model_decides(tmp_path: Path) -> None:
     text = "\n".join(_notice(tmp_path, "local", tool_mode="native", search_on=True)["lines"])
     assert (
-        "Camera: the model decides itself when to use look() or search_image(), like Gemini, "
-        "but a small model can miss a request or look when not asked. If it misses, ask "
+        "Camera: the model decides itself when to use look() or search_image(), but a small "
+        "model can miss a request or look when not asked. If it misses, ask "
         'plainly, for example "look at me".'
     ) in text
+    assert "like Gemini" not in text
     assert "routing step" not in text
 
 
@@ -452,7 +462,7 @@ def test_local_notice_lists_what_is_lost_and_what_works_worse(tmp_path: Path) ->
     text = "\n".join(_notice(tmp_path, "local")["lines"])
     assert "routing step" in text and "look()" in text and "search_image" not in text
     assert "GPU is shared with Qwenny" in text
-    assert "weaker general knowledge" in text
+    assert "depends on the model you load" in text and "Gemini" not in text
     assert "does not count toward the daily cap" in text
 
 
@@ -476,6 +486,7 @@ def test_gemini_notice_has_the_cap(tmp_path: Path) -> None:
     notice = _notice(tmp_path, "gemini")
     text = "\n".join(notice["lines"])
     assert "(1234 used today)" in text and "sent to Google" in text
+    assert "recall() runs with the local model only" in text
     assert notice["title"].startswith("Chat runs on Gemini")
 
 

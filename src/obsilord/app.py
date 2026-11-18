@@ -8,8 +8,7 @@ and the connection stays open.
 
 Per connection the socket is idle, recording, or running a turn:
 - audio_start: rejected with an error (no state message) if voice input is
-  disabled, no API key is configured, or a turn is running or a recording is
-  open. Otherwise the buffer is cleared and state listening is sent.
+  disabled, or a turn is running or a recording is open. Otherwise the buffer is cleared and state listening is sent.
 - Binary frame while recording: appended, up to stt.max_utterance_s; the rest
   is dropped and one "Recording too long" error is sent per recording.
   Binary frame otherwise: one "Unexpected audio frame." error per connection,
@@ -24,8 +23,9 @@ Per connection the socket is idle, recording, or running a turn:
 Mic audio stays in memory only: never written to disk or logged.
 
 The LLM client, STT client, TTS client, and UsageTracker are created once in
-create_app (app startup) and can be injected for tests. If no API key is
-configured the app still starts and turns return an error. If [tts] model is
+create_app (app startup) and can be injected for tests. Without a Gemini
+key the app still starts, pages start on the local model, and switching to
+Gemini is refused. If [tts] model is
 empty, TTS is disabled and replies are text only; if [stt] model is empty,
 voice input is disabled. A configured voice or STT model that fails to load
 (missing file, unknown voice, failed download) stops startup with an error.
@@ -123,7 +123,6 @@ log = logging.getLogger(__name__)
 MAX_TEXT_CHARS = 2000
 
 MSG_INVALID_JSON = "invalid JSON"
-MSG_NO_KEY = "No API key configured. Pick Local in Settings to use a local model."
 MSG_SWITCH_BUSY = "Wait for the current reply before switching the model."
 MSG_BAD_PROVIDER = "Unknown provider."
 MSG_BAD_MODEL = "Invalid model name."
@@ -445,9 +444,12 @@ def create_app(
         photos = PhotoStore(photos_dir_path(settings))
     photo_store = photos
     origins = allowed_origins(settings)
+    # Pages start on Gemini only when it is configured and has a key; the
+    # local model otherwise, so no page starts on a provider that cannot answer.
+    start_provider = GEMINI if settings.llm.provider == GEMINI and llm is not None else LOCAL
     log.info(
         "chat LLM: pages start on %s (Gemini %s, local server %s)",
-        settings.llm.provider,
+        start_provider,
         "available" if llm is not None else "off, no key",
         settings.llm_local.base_url,
     )
@@ -592,7 +594,7 @@ def create_app(
         except LocalLLMError as exc:
             error = str(exc)
         return {
-            "default_provider": settings.llm.provider,
+            "default_provider": start_provider,
             "gemini": {"available": app.state.llm is not None, "model": settings.llm.model},
             "local": {
                 "base_url": settings.llm_local.base_url,
@@ -670,7 +672,7 @@ def create_app(
         history: list[Message] = []
         # The chat LLM of this connection (Settings panel). local_client is
         # rebuilt when the page picks another local model.
-        provider = settings.llm.provider
+        provider = start_provider
         local_client: LLMClient = app.state.local.client(settings.llm_local.model)
         background: set[asyncio.Task[None]] = set()  # model warm-ups
         turn: asyncio.Task[Any] | None = None
@@ -768,8 +770,9 @@ def create_app(
         def turn_running() -> bool:
             return turn is not None and not turn.done()
 
-        def current_llm() -> LLMClient | None:
-            return local_client if provider == LOCAL else app.state.llm
+        def current_llm() -> LLMClient:
+            gemini = app.state.llm
+            return gemini if provider == GEMINI and gemini is not None else local_client
 
         def current_max_output_tokens() -> int:
             # Used by the pipeline for the usage estimate of a failed request.
@@ -799,6 +802,7 @@ def create_app(
                     await send({"type": "error", "message": MSG_SWITCH_BUSY})
                 return
             if wanted == GEMINI:
+                # The only way onto GEMINI after connect: never without a client.
                 if app.state.llm is None:
                     if not announce:
                         await send({"type": "error", "message": MSG_GEMINI_OFF})
@@ -1062,9 +1066,6 @@ def create_app(
                 await send({"type": "error", "message": MSG_BUSY})
                 return
             llm = current_llm()
-            if llm is None:
-                await send({"type": "error", "message": MSG_NO_KEY})
-                return
             await load_photos()
             start_turn(
                 run_text_turn(
@@ -1095,9 +1096,6 @@ def create_app(
                 return
             if recording is not None or turn_running():
                 await send({"type": "error", "message": MSG_BUSY})
-                return
-            if current_llm() is None:
-                await send({"type": "error", "message": MSG_NO_KEY})
                 return
             recording = bytearray()
             too_long_sent = False
@@ -1186,10 +1184,6 @@ def create_app(
                 await send({"type": "state", "state": "idle"})
                 return
             llm = current_llm()
-            if llm is None:  # switched to Gemini without a key mid-recording
-                await send({"type": "error", "message": MSG_NO_KEY})
-                await send({"type": "state", "state": "idle"})
-                return
             await load_photos()
             start_turn(
                 run_voice_turn(

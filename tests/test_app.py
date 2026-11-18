@@ -15,7 +15,6 @@ from obsilord.app import (
     MAX_TEXT_CHARS,
     MSG_BUSY,
     MSG_EMPTY,
-    MSG_NO_KEY,
     MSG_NO_VOICE,
     MSG_NOT_RECORDING,
     MSG_TOO_LONG,
@@ -149,13 +148,6 @@ def test_ws_non_object_json_is_unknown(client: TestClient) -> None:
     with client.websocket_connect("/ws") as ws:
         ws.send_text("[1, 2]")
         assert ws.receive_json() == {"type": "error", "message": MSG_UNKNOWN}
-
-
-def test_ws_no_api_key(tmp_path: Path) -> None:
-    client = _make(tmp_path, None)
-    with client.websocket_connect("/ws") as ws:
-        ws.send_json({"type": "text", "text": "hi"})
-        assert ws.receive_json() == {"type": "error", "message": MSG_NO_KEY}
 
 
 def test_ws_invalid_json_returns_error_and_stays_open(client: TestClient) -> None:

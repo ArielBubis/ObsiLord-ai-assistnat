@@ -42,21 +42,22 @@ def switch_notice(
                 f"Tokens count toward the daily cap of {settings.llm.daily_token_cap} "
                 f"({today_tokens} used today).",
                 "On the free tier Google may use what is sent to improve its products.",
+                "Earlier conversations are not searched: recall() runs with the local model only.",
             ],
         }
     name = model or "the first model the server lists"
     lines = [
         f"Chat runs on {name} at {settings.llm_local.base_url}. "
         "The conversation stays on this PC.",
-        "Answers depend on the model: expect weaker general knowledge, no recent "
-        "facts, and a less steady personality than Gemini.",
+        "How well it answers and picks tools depends on the model you load: "
+        "smaller models know less and miss more tool calls.",
     ]
     if vision_on:
         tools = "look() or search_image()" if search_on else "look()"
         if tool_mode == "native":
             lines.append(
-                f"Camera: the model decides itself when to use {tools}, like Gemini, "
-                "but a small model can miss a request or look when not asked. If it "
+                f"Camera: the model decides itself when to use {tools}, but a small "
+                "model can miss a request or look when not asked. If it "
                 'misses, ask plainly, for example "look at me".'
             )
         else:

@@ -14,10 +14,6 @@
       <fieldset class="settings-group">
         <legend>Chat model</legend>
         <label class="settings-choice">
-          <input id="llm-gemini" type="radio" name="llm-provider" value="gemini">
-          <span>Gemini <span id="llm-gemini-note" class="settings-dim"></span></span>
-        </label>
-        <label class="settings-choice">
           <input id="llm-local" type="radio" name="llm-provider" value="local">
           <span>Local</span>
         </label>
@@ -27,6 +23,10 @@
         </div>
         <p id="llm-server" class="settings-dim"></p>
         <p id="llm-status" class="settings-dim" aria-live="polite"></p>
+        <label class="settings-choice">
+          <input id="llm-gemini" type="radio" name="llm-provider" value="gemini">
+          <span>Gemini <span id="llm-gemini-note" class="settings-dim"></span></span>
+        </label>
       </fieldset>
       <fieldset class="settings-group">
         <legend>Photos</legend>

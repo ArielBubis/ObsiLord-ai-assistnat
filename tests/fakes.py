@@ -25,9 +25,12 @@ from obsilord.llm.base import (
 
 def text_only(settings: Settings) -> Settings:
     """Settings with TTS, STT, and look() disabled, so create_app loads no
-    voice, no STT model, and no vision files."""
+    voice, no STT model, and no vision files. Pages start on the "gemini"
+    provider, so turns go to the fake passed as create_app(llm=...), never to a
+    local server."""
     return dataclasses.replace(
         settings,
+        llm=dataclasses.replace(settings.llm, provider="gemini"),
         tts=dataclasses.replace(settings.tts, model=""),
         stt=dataclasses.replace(settings.stt, model=""),
         vision=dataclasses.replace(settings.vision, model=""),

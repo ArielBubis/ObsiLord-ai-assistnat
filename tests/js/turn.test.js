@@ -109,7 +109,6 @@ test("before the server answers audio_start: listening accepts, an error or othe
   assert.equal(recordingAction("pending", state("listening")), "accept");
   assert.equal(recordingAction("pending", err("Voice input is not available.")), "refuse");
   assert.equal(recordingAction("pending", err("Busy, wait for the current reply.")), "refuse");
-  assert.equal(recordingAction("pending", err("No API key configured.")), "refuse");
   // Any error before listening is a refusal, whatever its text.
   assert.equal(recordingAction("pending", err("Something new.")), "refuse");
   assert.equal(recordingAction("pending", { type: "error" }), "refuse");

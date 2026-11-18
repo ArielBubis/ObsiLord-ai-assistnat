@@ -1,9 +1,9 @@
 """Typed settings loaded from config.toml (tomllib) and secrets from .env.
 
 config.toml holds non-secret settings. If it is missing, config.example.toml is
-used. Keys whose dataclass field has a default (keys added after Phase 0) may
-be left out of config.toml; the default is used and one INFO line lists the
-defaulted keys. Fields without a default are required. Unknown keys are
+used. Keys whose dataclass field has a default may be left out of
+config.toml; the default is used and one INFO line lists the defaulted keys.
+Fields without a default are required. Unknown sections and unknown keys are
 rejected, and provided values are type checked. Secrets come from .env in the repo root, and real environment variables
 override values found in .env.
 """
@@ -49,17 +49,18 @@ REASONING_EFFORTS = ("", "none", "minimal", "low", "medium", "high", "xhigh")
 @dataclass(frozen=True, kw_only=True)
 class LLMSettings:
     # One of LLM_PROVIDERS: the provider a new page connection starts with. The
-    # page's Settings panel can switch each connection between the two.
-    provider: str
+    # page's Settings panel can switch each connection between the two. Local
+    # is the main one; Gemini is the opt-in alternative.
+    provider: str = "local"
     # The Gemini model (also used by [image_search] provider "gemini").
     model: str
     max_output_tokens: int
-    thinking_level: str = "minimal"  # added in Phase 2
+    thinking_level: str = "minimal"
     # Sampling temperature for Gemini replies, 0..2. 1.0 is the Gemini 3 default.
     temperature: float = 1.0
     history_turns: int
     daily_token_cap: int
-    turn_timeout_s: float = 60.0  # added in Phase 2
+    turn_timeout_s: float = 60.0
 
 
 STT_PROVIDERS = ("faster-whisper",)
@@ -82,13 +83,13 @@ class STTSettings:
     # Spoken language code ("en"). Empty lets the model detect it per utterance.
     language: str
     # Decoding beam width, STT_BEAM_SIZE_MIN..MAX. 1 (greedy) is fastest.
-    beam_size: int = 1  # added in Phase 4
+    beam_size: int = 1
     # Longest utterance kept, in seconds; audio past it is dropped.
-    max_utterance_s: float = 30.0  # added in Phase 4
+    max_utterance_s: float = 30.0
     # Shorter utterances are rejected without running STT.
-    min_utterance_ms: int = 300  # added in Phase 4
+    min_utterance_ms: int = 300
     # Model download and cache directory, relative to the repo root (or absolute).
-    download_root: str = "models"  # added in Phase 4
+    download_root: str = "models"
 
     @property
     def enabled(self) -> bool:
@@ -125,10 +126,10 @@ class TTSSettings:
     speed: float = 1.15
     # Pitch factor, PITCH_MIN..PITCH_MAX. Applied server side by synthesizing
     # at speed / pitch and announcing native_rate * pitch.
-    pitch: float = 1.0  # added in Phase 3
+    pitch: float = 1.0
     # Browser playback EQ (served at /config/audio, applied by Web Audio
     # shelving filters). Frequencies EQ_HZ_MIN..EQ_HZ_MAX, gains within
-    # plus or minus EQ_DB_LIMIT dB; 0 dB disables a shelf. Added in Phase 3.
+    # plus or minus EQ_DB_LIMIT dB; 0 dB disables a shelf.
     low_shelf_hz: float = 250.0
     low_shelf_db: float = -6.0
     high_shelf_hz: float = 3500.0
@@ -159,11 +160,11 @@ class CameraSettings:
     # OpenCV capture backend, one of CAMERA_APIS: "dshow" (DirectShow),
     # "msmf" (Media Foundation, which hung on open on the dev machine), or
     # "any" (OpenCV picks).
-    api: str = "dshow"  # added in Phase 5
+    api: str = "dshow"
     # Limit for opening the camera and grabbing one frame, in seconds.
-    timeout_s: float = 20.0  # added in Phase 5
-    # Photos setting default, one of PHOTO_MODES (see obsilord.photos). Added
-    # in Phase 5f; the page's choice wins.
+    timeout_s: float = 20.0
+    # Photos setting default, one of PHOTO_MODES (see obsilord.photos); the
+    # page's choice wins.
     photos: str = "off"
     photos_keep: int = 2
     # Relative to the repo root unless absolute. Written only in "disk" mode.
@@ -175,7 +176,7 @@ VISION_BACKENDS = ("cuda", "cpu")
 
 @dataclass(frozen=True, kw_only=True)
 class VisionSettings:
-    """[vision], added in Phase 5. The whole section is optional.
+    """[vision]. The whole section is optional.
 
     Local vision model for look(): llama.cpp's llama-server, started for each
     look on 127.0.0.1 and stopped after. Paths are relative to the repo root
@@ -218,17 +219,12 @@ class FaceSettings:
     logical_height: int
     mouth_thresholds: tuple[float, ...]
     # One of FACE_SKINS: "dither" (3D face, WebGL) or "code" (8-bit face).
-    skin: str = "dither"  # added in Phase 8
+    skin: str = "dither"
     # Character file (.face.glb, .glb or .vrm), relative to the repo root (or
     # absolute). Checked by app startup. Empty means the bundled character.
-    character: str = ""  # added in Phase 8
-    # Show only the face, subtitles, chat row and error line (Phase 5h).
+    character: str = ""
+    # Show only the face, subtitles, chat row and error line.
     demo: bool = False
-
-
-@dataclass(frozen=True)
-class AudioSettings:
-    push_to_talk_key: str
 
 
 IMAGE_SEARCH_PROVIDERS = ("gemini", "google_vision")
@@ -342,7 +338,6 @@ class Settings:
     tts: TTSSettings
     camera: CameraSettings
     face: FaceSettings
-    audio: AudioSettings
     vision: VisionSettings = field(default_factory=VisionSettings)
     image_search: ImageSearchSettings = field(default_factory=ImageSearchSettings)
     llm_local: LocalLLMSettings = field(default_factory=LocalLLMSettings)
@@ -749,6 +744,13 @@ def default_config_path() -> Path:
     return REPO_ROOT / "config.example.toml"
 
 
+# Every top-level table config.toml may have.
+SECTIONS = (
+    "server", "llm", "stt", "tts", "camera", "face", "vision", "image_search",
+    "llm_local", "memory", "debug",
+)
+
+
 def load_settings(
     path: Path | None = None,
     env_path: Path | None = None,
@@ -759,6 +761,9 @@ def load_settings(
     with path.open("rb") as fh:
         data = tomllib.load(fh)
 
+    unknown = sorted(set(data) - set(SECTIONS))
+    if unknown:
+        raise ValueError(f"config: unknown sections: {unknown}")
     defaulted: list[str] = []
     settings = Settings(
         server=_build(ServerSettings, "server", data, defaulted),
@@ -767,7 +772,6 @@ def load_settings(
         tts=_build(TTSSettings, "tts", data, defaulted),
         camera=_build(CameraSettings, "camera", data, defaulted),
         face=_build(FaceSettings, "face", data, defaulted),
-        audio=_build(AudioSettings, "audio", data, defaulted),
         vision=_build(VisionSettings, "vision", data, defaulted, optional=True),
         image_search=_build(
             ImageSearchSettings, "image_search", data, defaulted, optional=True

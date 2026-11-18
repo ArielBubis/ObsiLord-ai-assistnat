@@ -55,7 +55,8 @@ export function choiceMessage(choice, announce) {
 }
 
 // What the panel starts with: the remembered choice, unless it asks for
-// Gemini without a key; otherwise the server's default.
+// Gemini without a key; otherwise the server's default. Local unless the
+// server names Gemini and Gemini has a key.
 export function initialChoice(stored, config) {
   const geminiOk = Boolean(config && config.gemini && config.gemini.available);
   const localDefault = (config && config.local && config.local.default_model) || "";
@@ -63,7 +64,7 @@ export function initialChoice(stored, config) {
   if (stored && stored.provider === "gemini" && !geminiOk) {
     return { provider: "local", model: localDefault };
   }
-  const provider = config && config.default_provider === "local" ? "local" : geminiOk ? "gemini" : "local";
+  const provider = config && config.default_provider === "gemini" && geminiOk ? "gemini" : "local";
   return { provider, model: localDefault };
 }
 

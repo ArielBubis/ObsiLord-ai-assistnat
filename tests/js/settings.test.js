@@ -74,6 +74,12 @@ test("initialChoice without a stored choice follows the server default", () => {
   const localFirst = { ...CONFIG, default_provider: "local", local: { ...CONFIG.local, default_model: "gemma-12b" } };
   assert.deepEqual(initialChoice(null, localFirst), { provider: "local", model: "gemma-12b" });
   assert.deepEqual(initialChoice(null, { gemini: { available: false }, local: {} }), { provider: "local", model: "" });
+  // Local is the main provider: Gemini only when the server names it.
+  assert.deepEqual(initialChoice(null, { gemini: { available: true }, local: {} }), { provider: "local", model: "" });
+  assert.deepEqual(
+    initialChoice(null, { default_provider: "gemini", gemini: { available: false }, local: {} }),
+    { provider: "local", model: "" },
+  );
   assert.deepEqual(initialChoice(null, null), { provider: "local", model: "" });
 });
 

@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -33,7 +34,7 @@ def test_loads_example_config_with_types(tmp_path: Path) -> None:
     assert isinstance(s, Settings)
     assert s.server.host == "127.0.0.1"
     assert s.server.port == 8765
-    assert s.llm.provider == "gemini"
+    assert s.llm.provider == "local"
     assert isinstance(s.llm.daily_token_cap, int)
     assert s.llm.turn_timeout_s == 60.0 and type(s.llm.turn_timeout_s) is float
     assert s.stt.compute_type == "int8"
@@ -41,7 +42,6 @@ def test_loads_example_config_with_types(tmp_path: Path) -> None:
     assert s.camera.max_per_hour == 30
     assert s.face.logical_width == 64 and s.face.logical_height == 48
     assert s.face.mouth_thresholds == (0.05, 0.15, 0.30)
-    assert s.audio.push_to_talk_key == "Space"
     assert s.secrets.gemini_api_key is None
 
 
@@ -53,17 +53,33 @@ def test_rejects_non_loopback_host(tmp_path: Path) -> None:
 
 def test_rejects_unknown_key(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
-    path.write_text(
-        EXAMPLE.read_text(encoding="utf-8") + "\n[extra]\n", encoding="utf-8"
-    )
-    # Unknown top-level sections are ignored; unknown keys inside a section are not.
-    load_settings(path, env_path=tmp_path / "missing.env", environ={})
     bad = EXAMPLE.read_text(encoding="utf-8").replace(
         "port = 8765", "port = 8765\nbogus = 1"
     )
     path.write_text(bad, encoding="utf-8")
     with pytest.raises(ValueError, match="bogus"):
         load_settings(path, env_path=tmp_path / "missing.env", environ={})
+
+
+@pytest.mark.parametrize("section", ["extra", "audio"])
+def test_rejects_unknown_section(tmp_path: Path, section: str) -> None:
+    # [audio] (push_to_talk_key) was removed in T0: an old config.toml fails
+    # clearly instead of keeping a key nothing reads.
+    path = tmp_path / "config.toml"
+    path.write_text(
+        EXAMPLE.read_text(encoding="utf-8") + f'\n[{section}]\nkey = "x"\n', encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match=rf"unknown sections: \['{section}'\]"):
+        load_settings(path, env_path=tmp_path / "missing.env", environ={})
+
+
+def test_llm_provider_defaults_to_local(tmp_path: Path) -> None:
+    text = EXAMPLE.read_text(encoding="utf-8")
+    assert re.search(r'^provider = "local"$', text, re.M)
+    path = tmp_path / "config.toml"
+    path.write_text(re.sub(r'^provider = "local"\n', "", text, count=1, flags=re.M), encoding="utf-8")
+    s = load_settings(path, env_path=tmp_path / "missing.env", environ={})
+    assert s.llm.provider == "local"
 
 
 def test_parse_dotenv_comments_and_quotes() -> None:
@@ -791,7 +807,7 @@ def test_prompt_log_emit_never_raises_and_skips_work_when_off(
 
 def test_llm_local_from_example(tmp_path: Path) -> None:
     s = _load(EXAMPLE, tmp_path)
-    assert s.llm.provider == "gemini"
+    assert s.llm.provider == "local"
     assert s.llm_local == LocalLLMSettings()
     assert s.llm_local.base_url == "http://127.0.0.1:1234/v1"
     assert s.llm_local.tool_mode == "auto"
@@ -822,8 +838,8 @@ def test_llm_local_section_is_optional(tmp_path: Path) -> None:
     ("old", "new", "message"),
     [
         (
-            'provider = "gemini"\n# Looked up',
-            'provider = "openai"\n# Looked up',
+            'provider = "local"\n',
+            'provider = "openai"\n',
             "llm.provider must be one of",
         ),
         (
@@ -851,14 +867,14 @@ def test_llm_local_rejects_bad_values(tmp_path: Path, old: str, new: str, messag
         _load(path, tmp_path)
 
 
-def test_llm_local_accepts_a_lan_server_and_provider_local(tmp_path: Path) -> None:
+def test_llm_local_accepts_a_lan_server_and_provider_gemini(tmp_path: Path) -> None:
     path = _write_replaced(
         tmp_path, 'base_url = "http://127.0.0.1:1234/v1"', 'base_url = "http://192.168.1.20:11434/v1"'
     )
-    text = path.read_text(encoding="utf-8").replace('provider = "gemini"', 'provider = "local"', 1)
+    text = path.read_text(encoding="utf-8").replace('provider = "local"', 'provider = "gemini"', 1)
     path.write_text(text, encoding="utf-8")
     s = _load(path, tmp_path)
-    assert s.llm.provider == "local" and s.llm_local.base_url == "http://192.168.1.20:11434/v1"
+    assert s.llm.provider == "gemini" and s.llm_local.base_url == "http://192.168.1.20:11434/v1"
 
 
 # --- [memory] and [debug] demo_memory ---------------------------------------
