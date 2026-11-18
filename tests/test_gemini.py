@@ -34,6 +34,19 @@ def test_bad_thinking_level_raises(tmp_path: Path) -> None:
         GeminiClient(llm, "dummy-key-for-test")
 
 
+@pytest.mark.parametrize("temperature", [-0.1, 2.1])
+def test_bad_temperature_raises(tmp_path: Path, temperature: float) -> None:
+    llm = replace(_llm(tmp_path), temperature=temperature)
+    with pytest.raises(ValueError, match="llm.temperature"):
+        GeminiClient(llm, "dummy-key-for-test")
+
+
+def test_temperature_is_sent(tmp_path: Path) -> None:
+    llm = replace(_llm(tmp_path), temperature=1.4)
+    client = GeminiClient(llm, "dummy-key-for-test", system_prompt="x")
+    assert client._config.temperature == 1.4
+
+
 def test_empty_model_raises(tmp_path: Path) -> None:
     llm = replace(_llm(tmp_path), model="")
     with pytest.raises(ValueError, match="llm.model"):

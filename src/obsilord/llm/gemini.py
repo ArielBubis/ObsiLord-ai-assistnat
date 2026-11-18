@@ -253,6 +253,8 @@ class GeminiClient:
             raise ValueError(
                 f"config: llm.thinking_level must be one of {sorted(_THINKING_LEVELS)} or empty"
             )
+        if not 0 <= llm.temperature <= 2:
+            raise ValueError(f"config: llm.temperature must be in 0..2, got {llm.temperature:g}")
         self.model = llm.model
         prompt = system_prompt if system_prompt is not None else load_system_prompt()
         # Sent with every request; used for the usage estimate on failed streams.
@@ -263,6 +265,7 @@ class GeminiClient:
         self._config = types.GenerateContentConfig(
             system_instruction=prompt,
             max_output_tokens=llm.max_output_tokens,
+            temperature=llm.temperature,
             thinking_config=thinking,
             # AFC would let the SDK run tools and make extra API calls that
             # bypass UsageTracker. Tool calls must come back as ToolCall events.

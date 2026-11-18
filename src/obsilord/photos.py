@@ -96,6 +96,53 @@ class PhotoStore:
         except OSError:
             return None
 
+    async def delete_conversation(self, conversation_id: str) -> int:
+        """Remove a conversation's folder. Returns the files removed."""
+        if not _CONVERSATION.fullmatch(conversation_id):
+            return 0
+        return await asyncio.to_thread(self._delete_folder, self.root / conversation_id)
+
+    @staticmethod
+    def _delete_folder(folder: Path) -> int:
+        if not folder.is_dir():
+            return 0
+        removed = 0
+        for path in folder.iterdir():
+            try:
+                if path.is_file() and _NAME.fullmatch(path.name):
+                    path.unlink()
+                    removed += 1
+            except OSError as exc:
+                log.warning("photos: could not remove a photo (%s)", type(exc).__name__)
+        try:
+            folder.rmdir()  # only succeeds when empty
+        except OSError:
+            pass
+        return removed
+
+    async def delete_files(self, conversation_id: str, names: list[str]) -> int:
+        """Remove the named photos of a conversation (names that are not
+        ours are skipped). Returns the files removed."""
+        if not _CONVERSATION.fullmatch(conversation_id):
+            return 0
+        good = {n for n in names if _NAME.fullmatch(n)}
+        return await asyncio.to_thread(self._delete_names, self.root / conversation_id, good)
+
+    @staticmethod
+    def _delete_names(folder: Path, names: set[str]) -> int:
+        removed = 0
+        for name in names:
+            try:
+                (folder / name).unlink()
+                removed += 1
+            except OSError:
+                pass  # already gone
+        try:
+            folder.rmdir()  # only succeeds when empty
+        except OSError:
+            pass
+        return removed
+
     async def prune(self, retention_days: int) -> int:
         """Delete photos older than retention_days (0 keeps everything) and
         the folders left empty. Returns the number of files removed."""

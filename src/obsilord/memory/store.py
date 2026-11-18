@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from obsilord.llm.base import Message, ToolNote
-from obsilord.memory.base import ConversationInfo, Hit, TurnRecord
+from obsilord.memory.base import ConversationInfo, Hit, StoredMessage, StoredTurn, TurnRecord
 
 T = TypeVar("T")
 
@@ -254,6 +254,137 @@ class SqliteStore:
                 "UPDATE conversations SET turns = ?, title = ?, last_at = MAX(last_at, ?) WHERE id = ?",
                 (n, title, r.ts, cid),
             )
+
+    # Editing
+
+    async def turns(self, conversation_id: str) -> list[StoredTurn]:
+        """Every turn of a conversation, oldest first ([] when unknown)."""
+        return await self._call(self._turns, conversation_id)
+
+    def _turns(self, cid: str) -> list[StoredTurn]:
+        rows = self._db().execute(
+            "SELECT id, turn, ts, role, text, tool_name, tool_arg FROM messages "
+            "WHERE conversation_id = ? ORDER BY turn, id",
+            (cid,),
+        ).fetchall()
+        out: list[StoredTurn] = []
+        for mid, n, ts, role, text, tool_name, tool_arg in rows:
+            message = StoredMessage(mid, role, text, tool_name or "", tool_arg or "")
+            if out and out[-1].turn == n:
+                out[-1] = StoredTurn(n, out[-1].ts, (*out[-1].messages, message))
+            else:
+                out.append(StoredTurn(n, ts, (message,)))
+        return out
+
+    async def message_conversation(self, message_id: int) -> str | None:
+        return await self._call(self._message_conversation, message_id)
+
+    def _message_conversation(self, message_id: int) -> str | None:
+        row = self._db().execute("SELECT conversation_id FROM messages WHERE id = ?", (message_id,)).fetchone()
+        return row[0] if row else None
+
+    @staticmethod
+    def _first_user_text(con: sqlite3.Connection, cid: str) -> str | None:
+        row = con.execute(
+            "SELECT text FROM messages WHERE conversation_id = ? AND turn = 1 AND role = 'user' "
+            "ORDER BY id LIMIT 1",
+            (cid,),
+        ).fetchone()
+        return row[0] if row else None
+
+    @classmethod
+    def _retitle(cls, con: sqlite3.Connection, cid: str, old_first: str | None) -> None:
+        """Recompute the title from turn 1's user text, only when it was the
+        automatic one (equal to the title of the old turn 1)."""
+        row = con.execute("SELECT title FROM conversations WHERE id = ?", (cid,)).fetchone()
+        if row is None or old_first is None or row[0] != _title(old_first):
+            return
+        new_first = cls._first_user_text(con, cid)
+        if new_first is not None:
+            con.execute("UPDATE conversations SET title = ? WHERE id = ?", (_title(new_first), cid))
+
+    async def edit_message(self, message_id: int, text: str) -> str | None:
+        """Replace a message's text. Returns its conversation id, None when
+        there is no such message."""
+        return await self._call(self._edit_message, message_id, text)
+
+    def _edit_message(self, message_id: int, text: str) -> str | None:
+        with self._db() as con:
+            row = con.execute(
+                "SELECT conversation_id, turn, role FROM messages WHERE id = ?", (message_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            cid, n, role = row
+            old_first = self._first_user_text(con, cid) if n == 1 and role == "user" else None
+            con.execute("UPDATE messages SET text = ? WHERE id = ?", (text, message_id))
+            if old_first is not None:
+                self._retitle(con, cid, old_first)
+        return cid
+
+    async def turn_photos(self, conversation_id: str, turn: int) -> list[str]:
+        """File names of the photos saved with one turn's tool notes."""
+        return await self._call(self._turn_photos, conversation_id, turn)
+
+    def _turn_photos(self, cid: str, turn: int) -> list[str]:
+        rows = self._db().execute(
+            "SELECT meta FROM messages WHERE conversation_id = ? AND turn = ? AND role = 'tool' "
+            "AND meta IS NOT NULL ORDER BY id",
+            (cid, turn),
+        ).fetchall()
+        names: list[str] = []
+        for (meta,) in rows:
+            try:
+                name = json.loads(meta).get("photo")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(name, str) and name:
+                names.append(name)
+        return names
+
+    async def delete_turn(self, conversation_id: str, turn: int) -> bool:
+        """Delete one turn and renumber the later ones. Deleting the last
+        remaining turn deletes the conversation."""
+        return await self._call(self._delete_turn, conversation_id, turn)
+
+    def _delete_turn(self, cid: str, turn: int) -> bool:
+        with self._db() as con:
+            old_first = self._first_user_text(con, cid) if turn == 1 else None
+            cur = con.execute("DELETE FROM messages WHERE conversation_id = ? AND turn = ?", (cid, turn))
+            if cur.rowcount == 0:
+                return False
+            con.execute(
+                "UPDATE messages SET turn = turn - 1 WHERE conversation_id = ? AND turn > ?", (cid, turn)
+            )
+            con.execute("UPDATE conversations SET turns = turns - 1 WHERE id = ?", (cid,))
+            left = con.execute("SELECT turns FROM conversations WHERE id = ?", (cid,)).fetchone()
+            if left is not None and left[0] <= 0:
+                con.execute("DELETE FROM conversations WHERE id = ?", (cid,))
+            elif old_first is not None:
+                self._retitle(con, cid, old_first)
+        return True
+
+    async def delete_conversation(self, conversation_id: str) -> bool:
+        return await self._call(self._delete_conversation, conversation_id)
+
+    def _delete_conversation(self, cid: str) -> bool:
+        with self._db() as con:
+            con.execute("DELETE FROM messages WHERE conversation_id = ?", (cid,))
+            cur = con.execute("DELETE FROM conversations WHERE id = ?", (cid,))
+        return cur.rowcount > 0
+
+    async def rename(self, conversation_id: str, title: str) -> bool:
+        """Set the title (stripped, cut to TITLE_MAX_CHARS). False when the
+        title is blank or the conversation is unknown."""
+        title = title.strip()[:TITLE_MAX_CHARS].strip()
+        if not title:
+            return False
+        return await self._call(self._rename, conversation_id, title)
+
+    def _rename(self, cid: str, title: str) -> bool:
+        with self._db() as con:
+            cur = con.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, cid))
+        return cur.rowcount > 0
 
     async def last_turns(self, conversation_id: str, n: int) -> list[Message]:
         """The last n turns as history: user and assistant messages, the

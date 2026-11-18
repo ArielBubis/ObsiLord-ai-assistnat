@@ -35,10 +35,13 @@ MSG_RECALL_FAILED = "The conversation store could not be searched."
 CUT = "(more results cut)"
 
 _DESCRIPTION = (
-    "Search earlier conversations with the user, kept on this computer. Use it only "
-    "when the user refers to something from an earlier conversation or asks what you "
-    "talked about before (for example yesterday, last week, or on a date). Do not use it "
-    "for the recent messages of this conversation, which you already have. For a "
+    "Search earlier conversations with the user, kept on this computer. Use it when "
+    "the user refers to something from an earlier conversation or asks what you "
+    "talked about before (for example yesterday, last week, or on a date). You may "
+    "also use it on your own, now and then, when something the user said in an "
+    "earlier conversation would help you make a point, tease them, or call back to "
+    "it. Do not use it for the recent messages of this conversation, which you "
+    "already have. For a "
     "question about a day, pass date and leave query empty. Returns the matching turns "
     "with their dates."
 )

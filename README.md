@@ -23,6 +23,7 @@ Most assistants live in the cloud, listen all the time, and forget you between s
 - **Looks when it matters.** `look()` takes one photo. A local chat model that sees images gets the photo itself; for Gemini and text-only models, Qwenny, a small local vision model (Qwen3-VL-2B on llama.cpp), describes it. Settings, Photos chooses whether photos are dropped after the reply, kept for follow-ups ("what color was it?"), or saved to disk.
 - **Identifies things (opt-in).** For things a description can't name, like an album cover or a product, the local model cuts the object out of the photo and only that cut-out goes to an online lookup. Off by default, with hourly and monthly caps.
 - **Conversation memory.** Recent turns go with every request, a reload within 30 minutes picks up where you left off (older conversations can be continued from Settings), and with a local model the assistant can search older conversations ("what did we talk about yesterday?").
+- **Editable memory.** In Settings you can edit, rename, delete or add turns in stored conversations.
 - **Cost guards built in.** Usage logging, a daily token cap, and look() limits exist before any model call does.
 
 ## How it works

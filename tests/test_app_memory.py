@@ -13,6 +13,8 @@ from fastapi.testclient import TestClient
 from fakes import FakeLLM, text_only
 from obsilord.app import (
     MSG_CONVERSATION_BUSY,
+    MSG_MEMORY_BAD,
+    MSG_MEMORY_MISSING,
     MSG_MEMORY_OFF,
     MSG_UNKNOWN_CONVERSATION,
     _memory_from_settings,
@@ -252,3 +254,213 @@ def test_demo_store_uses_the_demo_file_only(tmp_path: Path) -> None:
 
 def test_memory_disabled_in_settings_builds_no_store(tmp_path: Path) -> None:
     assert _memory_from_settings(_settings(tmp_path, enabled=False)) is None
+
+
+# Memory editor: GET /conversations/{id} and the "memory" WebSocket message.
+
+
+def _saved_id(msgs: list[dict[str, Any]]) -> str:
+    return str(next(m["id"] for m in msgs if m["type"] == "conversation" and m["reason"] == "saved"))
+
+
+def _memory(ws: Any, **fields: Any) -> dict[str, Any]:
+    ws.send_json({"type": "memory", **fields})
+    return ws.receive_json()  # type: ignore[no-any-return]
+
+
+def _stored_turns(client: TestClient, cid: str) -> list[dict[str, Any]]:
+    return client.get(f"/conversations/{cid}").json()["turns"]  # type: ignore[no-any-return]
+
+
+def test_conversation_turns_endpoint(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        cid = _saved_id(_turn(ws, "first"))
+        _turn(ws, "second")
+    body = client.get(f"/conversations/{cid}").json()
+    assert body["enabled"] is True and body["id"] == cid and body["title"] == "first"
+    assert [t["turn"] for t in body["turns"]] == [1, 2]
+    first = body["turns"][0]
+    assert isinstance(first["ts"], float)
+    assert [(m["role"], m["text"]) for m in first["messages"]] == [("user", "first"), ("assistant", "Hi.")]
+    assert set(first["messages"][0]) == {"id", "role", "text", "tool_name", "tool_arg"}
+    assert client.get("/conversations/nope").status_code == 404
+    assert client.get("/conversations/" + "0" * 32).status_code == 404
+
+
+def test_memory_edit_of_the_open_conversation_updates_history(tmp_path: Path) -> None:
+    client, llm = _client(tmp_path)
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        cid = _saved_id(_turn(ws, "my cat is Rex"))
+        user_id = _stored_turns(client, cid)[0]["messages"][0]["id"]
+        ws.send_json({"type": "memory", "action": "edit", "message": user_id, "text": "my cat is Pita"})
+        assert ws.receive_json() == {"type": "memory", "action": "edit", "conversation": cid}
+        assert ws.receive_json()["reason"] == "edited"
+        _turn(ws, "what is my cat called?")
+    sent = " ".join(m.text for m in llm.calls[-1])
+    assert "my cat is Pita" in sent and "Rex" not in sent
+
+
+def test_memory_edit_of_the_open_conversation_is_refused_mid_turn(tmp_path: Path) -> None:
+    gate = threading.Event()
+    client, _ = _client(tmp_path, llm=FakeLLM(["a", "b", "c"], gate=gate))
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        gate.set()
+        cid = _saved_id(_turn(ws, "one"))
+        mid = _stored_turns(client, cid)[0]["messages"][0]["id"]
+        # A second stored conversation, not the open one.
+        ws.send_json({"type": "conversation", "id": None})
+        ws.receive_json()
+        other_id = _saved_id(_turn(ws, "elsewhere"))
+        other_mid = _stored_turns(client, other_id)[0]["messages"][0]["id"]
+        ws.send_json({"type": "conversation", "id": cid})
+        ws.receive_json()
+        gate.clear()
+        ws.send_json({"type": "text", "text": "hi"})
+        assert ws.receive_json() == {"type": "state", "state": "thinking"}
+        ws.send_json({"type": "memory", "action": "edit", "message": mid, "text": "changed"})
+        while (msg := ws.receive_json())["type"] != "error":
+            pass
+        assert msg == {"type": "error", "message": MSG_CONVERSATION_BUSY}
+        ws.send_json({"type": "memory", "action": "edit", "message": other_mid, "text": "changed"})
+        while (msg := ws.receive_json())["type"] != "memory":
+            pass
+        assert msg == {"type": "memory", "action": "edit", "conversation": other_id}
+        gate.set()
+        while ws.receive_json() != IDLE:
+            pass
+    assert _stored_turns(client, cid)[0]["messages"][0]["text"] == "one"
+    assert _stored_turns(client, other_id)[0]["messages"][0]["text"] == "changed"
+
+
+def test_deleting_the_open_conversation_starts_a_new_one(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        cid = _saved_id(_turn(ws, "one"))
+        ws.send_json({"type": "memory", "action": "delete_conversation", "conversation": cid})
+        assert ws.receive_json() == {"type": "memory", "action": "delete_conversation", "conversation": cid}
+        new = ws.receive_json()
+        assert new["reason"] == "new" and new["id"] is None
+        new_id = _saved_id(_turn(ws, "two"))
+    assert new_id != cid
+    assert client.get(f"/conversations/{cid}").status_code == 404
+
+
+def test_add_turn_and_rename(tmp_path: Path) -> None:
+    client, llm = _client(tmp_path)
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        cid = _saved_id(_turn(ws, "one"))
+        ws.send_json(
+            {"type": "memory", "action": "add_turn", "conversation": cid, "user": "I like tea", "reply": "Noted."}
+        )
+        assert ws.receive_json() == {"type": "memory", "action": "add_turn", "conversation": cid}
+        assert ws.receive_json()["reason"] == "edited"
+        ws.send_json({"type": "memory", "action": "rename", "conversation": cid, "title": "Tea talk"})
+        assert ws.receive_json() == {"type": "memory", "action": "rename", "conversation": cid}
+        assert ws.receive_json()["title"] == "Tea talk"
+        _turn(ws, "again")
+    body = client.get(f"/conversations/{cid}").json()
+    assert body["title"] == "Tea talk"
+    assert [m["text"] for m in body["turns"][1]["messages"]] == ["I like tea", "Noted."]
+    assert Message("user", "I like tea") in llm.calls[-1]
+    assert _rows(tmp_path, "select provider, model from messages where text = 'Noted.'") == [("edited", "")]
+
+
+def test_bad_memory_payloads_are_refused(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        cid = _saved_id(_turn(ws, "keep me"))
+        mid = _stored_turns(client, cid)[0]["messages"][0]["id"]
+        bad: list[dict[str, Any]] = [
+            {"action": "explode"},
+            {"action": "edit", "message": str(mid), "text": "x"},
+            {"action": "edit", "message": True, "text": "x"},
+            {"action": "edit", "message": mid, "text": "   "},
+            {"action": "edit", "message": 2**70, "text": "x"},
+            {"action": "delete_turn", "conversation": cid, "turn": 2**70},
+            {"action": "delete_turn", "conversation": cid, "turn": 0},
+            {"action": "delete_turn", "conversation": cid, "turn": -1},
+            {"action": "edit", "message": mid, "text": "x" * 4001},
+            {"action": "delete_turn", "conversation": cid, "turn": True},
+            {"action": "delete_turn", "conversation": "../etc", "turn": 1},
+            {"action": "rename", "conversation": cid, "title": " "},
+            {"action": "add_turn", "conversation": cid, "user": "", "reply": "r"},
+            {"action": "add_turn", "conversation": cid, "user": "u", "reply": "r" * 4001},
+        ]
+        for fields in bad:
+            assert _memory(ws, **fields) == {"type": "error", "message": MSG_MEMORY_BAD}, fields
+        missing = _memory(ws, action="edit", message=99999, text="x")
+        assert missing == {"type": "error", "message": MSG_MEMORY_MISSING}
+        assert _memory(ws, action="delete_turn", conversation="0" * 32, turn=1) == {
+            "type": "error", "message": MSG_MEMORY_MISSING,
+        }
+        ws.send_json({"type": "conversation", "id": None})
+        assert ws.receive_json()["reason"] == "new"
+    turns = _stored_turns(client, cid)
+    assert [m["text"] for m in turns[0]["messages"]] == ["keep me", "Hi."] and len(turns) == 1
+
+
+def test_memory_messages_with_memory_off(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    usage = UsageTracker(tmp_path / "usage.jsonl", settings.llm.daily_token_cap)
+    client = TestClient(create_app(settings, llm=FakeLLM(["Hi."]), usage=usage))
+    assert client.get("/conversations/" + "0" * 32).json() == {
+        "enabled": False, "id": "", "title": "", "turns": [],
+    }
+    with client.websocket_connect("/ws") as ws:
+        for fields in ({"action": "rename", "conversation": "0" * 32, "title": "t"}, {"action": "bogus"}):
+            assert _memory(ws, **fields) == {"type": "error", "message": MSG_MEMORY_OFF}
+
+
+def test_deleted_open_conversation_is_replaced_on_the_next_turn(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        cid = _saved_id(_turn(ws, "one"))
+        # Another tab deletes it.
+        with client.websocket_connect("/ws") as other:
+            other.receive_json()
+            other.send_json({"type": "memory", "action": "delete_conversation", "conversation": cid})
+            assert other.receive_json()["type"] == "memory"
+        msgs = _turn(ws, "two")
+        saved = [m for m in msgs if m["type"] == "conversation"]
+        assert len(saved) == 1 and saved[0]["reason"] == "saved"
+        assert saved[0]["id"] != cid and saved[0]["turns"] == 1
+    assert client.get(f"/conversations/{saved[0]['id']}").json()["turns"][0]["messages"][0]["text"] == "two"
+
+
+def test_add_turn_keeps_the_conversation_order(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path, settings=_settings(tmp_path, resume_minutes=0))
+    ids = []
+    for text in ("older chat", "newer chat"):
+        with client.websocket_connect("/ws") as ws:
+            ws.receive_json()
+            ids.append(_saved_id(_turn(ws, text)))
+            time.sleep(0.01)
+    before = client.get("/conversations").json()["conversations"]
+    assert [c["id"] for c in before] == [ids[1], ids[0]]
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "memory", "action": "add_turn", "conversation": ids[0], "user": "u", "reply": "r"})
+        assert ws.receive_json()["type"] == "memory"
+    after = client.get("/conversations").json()["conversations"]
+    assert [c["id"] for c in after] == [ids[1], ids[0]]
+    assert after[1]["last_at"] == before[1]["last_at"] and after[1]["turns"] == 2
+
+
+def test_deleting_the_last_turn_of_the_open_conversation_starts_a_new_one(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        cid = _saved_id(_turn(ws, "only"))
+        ws.send_json({"type": "memory", "action": "delete_turn", "conversation": cid, "turn": 1})
+        assert ws.receive_json() == {"type": "memory", "action": "delete_turn", "conversation": cid}
+        new = ws.receive_json()
+        assert new["reason"] == "new" and new["id"] is None
+    assert client.get(f"/conversations/{cid}").status_code == 404

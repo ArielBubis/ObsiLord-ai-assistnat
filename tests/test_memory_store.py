@@ -356,3 +356,160 @@ def test_add_turn_to_an_unknown_conversation_raises(tmp_path: Path) -> None:
 
     with pytest.raises(KeyError):
         run(go())
+
+
+# Edit API
+
+
+def _texts(turns: list, role: str) -> list[str]:
+    return [m.text for t in turns for m in t.messages if m.role == role]
+
+
+def test_turns_lists_every_message_in_order(tmp_path: Path) -> None:
+    async def go() -> None:
+        store = await _store(tmp_path / "t.sqlite3")
+        cid = await store.new_conversation("voice", now=T0)
+        note = ToolNote("lookup", "weather", "sunny")
+        await store.add_turn(cid, turn("hi", "hello", T0, (note,)))
+        await store.add_turn(cid, turn("bye", "later", T0 + 1))
+        got = await store.turns(cid)
+        assert [t.turn for t in got] == [1, 2]
+        assert [m.role for m in got[0].messages] == ["user", "tool", "assistant"]
+        tool = got[0].messages[1]
+        assert (tool.tool_name, tool.tool_arg, tool.text) == ("lookup", "weather", "sunny")
+        assert got[0].messages[0].tool_name == "" and got[0].ts == T0
+        assert await store.turns("missing") == []
+        await store.close()
+
+    run(go())
+
+
+def test_edit_message_updates_text_and_search(tmp_path: Path) -> None:
+    async def go() -> None:
+        store = await _store(tmp_path / "t.sqlite3")
+        cid = await store.new_conversation("voice", now=T0)
+        await store.add_turn(cid, turn("favourite colour", "blue", T0))
+        reply = (await store.turns(cid))[0].messages[1]
+        assert await store.edit_message(reply.id, "green") == cid
+        assert [h.reply for h in await store.search("green", 5)] == ["green"]
+        assert await store.search("blue", 5) == []
+        assert await store.edit_message(999999, "x") is None
+        await store.close()
+
+    run(go())
+
+
+def test_delete_turn_renumbers_and_add_turn_continues(tmp_path: Path) -> None:
+    async def go() -> None:
+        store = await _store(tmp_path / "t.sqlite3")
+        cid = await store.new_conversation("voice", now=T0)
+        for i, word in enumerate(["a", "b", "c"]):
+            await store.add_turn(cid, turn(word, word.upper(), T0 + i))
+        assert await store.delete_turn(cid, 2) is True
+        got = await store.turns(cid)
+        assert [t.turn for t in got] == [1, 2]
+        assert _texts(got, "user") == ["a", "c"]
+        info = await store.info(cid)
+        assert info is not None and info.turns == 2
+        await store.add_turn(cid, turn("d", "D", T0 + 5))
+        assert [t.turn for t in await store.turns(cid)] == [1, 2, 3]
+        history = await store.last_turns(cid, 2)
+        assert [m.text for m in history if m.role == "user"] == ["c", "d"]
+        assert await store.delete_turn(cid, 9) is False
+        await store.close()
+
+    run(go())
+
+
+def test_deleting_the_last_turn_deletes_the_conversation(tmp_path: Path) -> None:
+    async def go() -> None:
+        store = await _store(tmp_path / "t.sqlite3")
+        cid = await store.new_conversation("voice", now=T0)
+        await store.add_turn(cid, turn("only", "one", T0))
+        assert await store.delete_turn(cid, 1) is True
+        assert await store.exists(cid) is False
+        await store.close()
+
+    run(go())
+
+
+def test_delete_conversation_removes_messages_and_index(tmp_path: Path) -> None:
+    async def go() -> None:
+        store = await _store(tmp_path / "t.sqlite3")
+        cid = await store.new_conversation("voice", now=T0)
+        await store.add_turn(cid, turn("shakshuka tonight", "with feta", T0))
+        assert await store.delete_conversation(cid) is True
+        assert await store.exists(cid) is False
+        assert await store.search("shakshuka feta", 5) == []
+        assert await store.delete_conversation(cid) is False
+        await store.close()
+
+    run(go())
+
+
+def test_title_follows_the_first_turn(tmp_path: Path) -> None:
+    async def go() -> None:
+        store = await _store(tmp_path / "t.sqlite3")
+        cid = await store.new_conversation("voice", now=T0)
+        for i, word in enumerate(["dentist on friday", "pizza later", "tea"]):
+            await store.add_turn(cid, turn(word, "ok", T0 + i))
+        assert await store.delete_turn(cid, 1) is True
+        info = await store.info(cid)
+        assert info is not None and info.title == "pizza later"
+        first = (await store.turns(cid))[0].messages[0]
+        await store.edit_message(first.id, "pasta later")
+        info = await store.info(cid)
+        assert info is not None and info.title == "pasta later"
+        assert await store.rename(cid, "Food") is True
+        await store.delete_turn(cid, 1)
+        info = await store.info(cid)
+        assert info is not None and info.title == "Food"
+        await store.close()
+
+    run(go())
+
+
+def test_message_conversation(tmp_path: Path) -> None:
+    async def go() -> None:
+        store = await _store(tmp_path / "t.sqlite3")
+        cid = await store.new_conversation("voice", now=T0)
+        await store.add_turn(cid, turn("hi", "hello", T0))
+        message = (await store.turns(cid))[0].messages[0]
+        assert await store.message_conversation(message.id) == cid
+        assert await store.message_conversation(999999) is None
+        await store.close()
+
+    run(go())
+
+
+def test_rename_strips_and_caps(tmp_path: Path) -> None:
+    from obsilord.memory.store import TITLE_MAX_CHARS
+
+    async def go() -> None:
+        store = await _store(tmp_path / "t.sqlite3")
+        cid = await store.new_conversation("voice", now=T0)
+        await store.add_turn(cid, turn("hi", "hello", T0))
+        assert await store.rename(cid, "  x  ") is True
+        info = await store.info(cid)
+        assert info is not None and info.title == "x"
+        await store.rename(cid, "y" * 200)
+        info = await store.info(cid)
+        assert info is not None and info.title == "y" * TITLE_MAX_CHARS
+        assert await store.rename(cid, "   ") is False
+        assert await store.rename("missing", "x") is False
+        await store.close()
+
+    run(go())
+
+
+def test_turn_photos_names_the_photos_of_one_turn(tmp_path: Path) -> None:
+    async def go() -> None:
+        store = await _store(tmp_path / "t.sqlite3")
+        cid = await store.new_conversation("voice", now=T0)
+        await store.add_turn(cid, TurnRecord("a", "A", (ToolNote("look", "q", "r", photo="p1.jpg"),), "x", "m", T0))
+        await store.add_turn(cid, turn("b", "B", T0 + 1))
+        assert await store.turn_photos(cid, 1) == ["p1.jpg"]
+        assert await store.turn_photos(cid, 2) == []
+        assert await store.turn_photos(cid, 9) == []
+
+    asyncio.run(go())

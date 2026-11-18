@@ -59,7 +59,14 @@ last history_turns turns loaded) when its last turn is at most
 resume_minutes old, otherwise a new one starts (its row is written with the
 first turn). {"type": "conversation", "id": "<id>" | null} continues another
 conversation or starts a new one (refused while a turn or recording runs).
-GET /conversations lists them for the Settings panel. recall() is declared
+GET /conversations lists them for the Settings panel; GET /conversations/{id}
+returns one with its turns and messages (read only). The memory editor sends
+{"type": "memory", "action": "edit" | "delete_turn" | "delete_conversation" |
+"rename" | "add_turn", ...} (fields: message, text, conversation, turn,
+title, user, reply; text capped at MAX_EDIT_CHARS); the reply is {"type":
+"memory", "action", "conversation"}, plus a conversation message (reason
+"edited", or "new" when the open one was deleted) when the open conversation
+changed. Refused while a turn runs in the open conversation. recall() is declared
 for the local model only. The store is opened on first use; if it cannot be
 opened, memory is off for the session and everything else works. With
 [debug] demo_memory the store is a separate demo file, deleted and seeded
@@ -127,6 +134,10 @@ MSG_NOT_RECORDING = "No recording in progress."
 MSG_CONVERSATION_BUSY = "Wait for the current reply before switching the conversation."
 MSG_MEMORY_OFF = "Conversation memory is off."
 MSG_UNKNOWN_CONVERSATION = "Unknown conversation."
+MAX_SQL_INT = 2**63 - 1  # SQLite integers are 64-bit signed
+MSG_MEMORY_BAD = "That memory change was not understood."
+MSG_MEMORY_MISSING = "That conversation or message no longer exists."
+MAX_EDIT_CHARS = 4000
 MSG_BAD_PHOTOS = "Unknown Photos setting."
 
 CHANNEL = "web"
@@ -363,13 +374,14 @@ def turn_tools(provider: str, recall: T | None) -> list[T]:
     return [recall] if provider == LOCAL and recall is not None else []
 
 
-CONVERSATION_REASONS = ("start", "resume", "switch", "new", "saved")
+CONVERSATION_REASONS = ("start", "resume", "switch", "new", "saved", "edited")
 
 
 def conversation_message(info: ConversationInfo | None, reason: str) -> dict[str, Any]:
     """Which conversation the connection is in. reason: start (connected,
     nothing recent to continue), resume (continued on connect), switch (the
-    page picked one), new (the page started one), saved (a turn was stored)."""
+    page picked one), new (the page started one), saved (a turn was stored),
+    edited (the memory editor changed the open conversation)."""
     assert reason in CONVERSATION_REASONS
     msg: dict[str, Any] = {"type": "conversation", "id": None, "title": "", "turns": 0, "last_at": None}
     if info is not None:
@@ -592,6 +604,34 @@ def create_app(
             "conversations": [
                 {"id": i.id, "title": i.title, "started_at": i.started_at, "last_at": i.last_at, "turns": i.turns}
                 for i in infos
+            ],
+        }
+
+    @app.get("/conversations/{cid}", include_in_schema=False)
+    async def conversation_turns(cid: str) -> dict[str, Any]:
+        # One conversation's turns and messages for the memory editor (read only;
+        # changes go over /ws). Local page only, like the list above.
+        store = await get_memory()
+        if store is None:
+            return {"enabled": False, "id": "", "title": "", "turns": []}
+        info = await store.info(cid) if _CONVERSATION_ID.fullmatch(cid) else None
+        if info is None:
+            raise HTTPException(status_code=404)
+        turns = await store.turns(cid)
+        return {
+            "enabled": True,
+            "id": info.id,
+            "title": info.title,
+            "turns": [
+                {
+                    "turn": t.turn,
+                    "ts": t.ts,
+                    "messages": [
+                        {"id": m.id, "role": m.role, "text": m.text, "tool_name": m.tool_name, "tool_arg": m.tool_arg}
+                        for m in t.messages
+                    ],
+                }
+                for t in turns
             ],
         }
 
@@ -827,7 +867,12 @@ def create_app(
                 if conv_id is None:
                     conv_id = await store.new_conversation(CHANNEL)
                 record = TurnRecord(user, reply, notes_to_store(notes), turn_provider, llm.model, time.time())
-                await store.add_turn(conv_id, record)
+                try:
+                    await store.add_turn(conv_id, record)
+                except KeyError:
+                    # Deleted meanwhile (another page): keep the turn in a new one.
+                    conv_id = await store.new_conversation(CHANNEL)
+                    await store.add_turn(conv_id, record)
                 # The page keeps the id (a reconnect returns to it) and the count.
                 info = await store.info(conv_id)
                 try:
@@ -836,6 +881,138 @@ def create_app(
                     log.debug("conversation saved message: %s", type(exc).__name__)
 
             return on_turn
+
+        async def start_new() -> None:
+            nonlocal conv_id
+            conv_id = None
+            history.clear()
+            log.info("conversation: new")
+            await send(conversation_message(None, "new"))
+
+        async def handle_memory(payload: dict[str, Any]) -> None:
+            async with recording_lock:
+                await _handle_memory_locked(payload)
+
+        async def drop_photos(action: str, cid: str, names: list[str]) -> None:
+            """Remove the saved photos of what the editor deleted."""
+            try:
+                if action == "delete_conversation" or (
+                    action == "delete_turn" and store is not None and await store.info(cid) is None
+                ):
+                    removed = await photo_store.delete_conversation(cid)
+                elif action == "delete_turn":
+                    removed = await photo_store.delete_files(cid, names)
+                else:
+                    return
+                log.debug("memory: removed %d photos", removed)
+            except Exception as exc:  # noqa: BLE001 - the change is stored; photos are cleaned up later
+                log.warning("photos: could not remove photos (%s)", type(exc).__name__)
+
+        async def _handle_memory_locked(payload: dict[str, Any]) -> None:
+            """The memory editor's changes (edit, delete, rename, add a turn).
+            Never logs message text, only the action."""
+            if store is None:
+                await send({"type": "error", "message": MSG_MEMORY_OFF})
+                return
+            action = payload.get("action")
+            bad = {"type": "error", "message": MSG_MEMORY_BAD}
+            missing = {"type": "error", "message": MSG_MEMORY_MISSING}
+
+            def text_field(name: str) -> str | None:
+                v = payload.get(name)
+                if not isinstance(v, str) or len(v) > MAX_EDIT_CHARS or not v.strip():
+                    return None
+                return v
+
+            def int_field(name: str) -> int | None:
+                v = payload.get(name)
+                if not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= MAX_SQL_INT:
+                    return None
+                return v
+
+            def conv_field() -> str | None:
+                v = payload.get("conversation")
+                return v if isinstance(v, str) and _CONVERSATION_ID.fullmatch(v) else None
+
+            message_id: int | None = None
+            turn_no: int | None = None
+            cid: str | None = None
+            text: str | None = None
+            title: str | None = None
+            user: str | None = None
+            reply: str | None = None
+            if action == "edit":
+                message_id, text = int_field("message"), text_field("text")
+                if message_id is None or text is None:
+                    await send(bad)
+                    return
+                cid = await store.message_conversation(message_id)
+            elif action == "delete_turn":
+                cid, turn_no = conv_field(), int_field("turn")
+                if cid is None or turn_no is None:
+                    await send(bad)
+                    return
+            elif action == "delete_conversation":
+                cid = conv_field()
+                if cid is None:
+                    await send(bad)
+                    return
+            elif action == "rename":
+                cid, title = conv_field(), text_field("title")
+                if cid is None or title is None:
+                    await send(bad)
+                    return
+            elif action == "add_turn":
+                cid, user, reply = conv_field(), text_field("user"), text_field("reply")
+                if cid is None or user is None or reply is None:
+                    await send(bad)
+                    return
+            else:
+                await send(bad)
+                return
+            if cid is None or await store.info(cid) is None:
+                await send(missing)
+                return
+            is_open = cid == conv_id
+            if is_open and (recording is not None or turn_running()):
+                await send({"type": "error", "message": MSG_CONVERSATION_BUSY})
+                return
+            ok = True
+            gone_photos: list[str] = []
+            if action == "delete_turn":
+                assert turn_no is not None
+                gone_photos = await store.turn_photos(cid, turn_no)
+            if action == "edit":
+                assert message_id is not None and text is not None
+                ok = await store.edit_message(message_id, text) is not None
+            elif action == "delete_turn":
+                assert turn_no is not None
+                ok = await store.delete_turn(cid, turn_no)
+            elif action == "delete_conversation":
+                ok = await store.delete_conversation(cid)
+            elif action == "rename":
+                assert title is not None
+                ok = await store.rename(cid, title)
+            else:
+                assert user is not None and reply is not None
+                # Keep the conversation's place in the list (and resume).
+                existing = await store.info(cid)
+                stamp = existing.last_at if existing is not None else time.time()
+                await store.add_turn(cid, TurnRecord(user, reply, (), "edited", "", stamp))
+            if not ok:
+                await send(bad if action == "rename" else missing)
+                return
+            await drop_photos(action, cid, gone_photos)
+            log.info("memory: %s", action)
+            await send({"type": "memory", "action": action, "conversation": cid})
+            if not is_open:
+                return
+            info = await store.info(cid)
+            if info is None:
+                await start_new()
+                return
+            history[:] = await store.last_turns(cid, settings.llm.history_turns)
+            await send(conversation_message(info, "edited"))
 
         async def handle_conversation(payload: dict[str, Any]) -> None:
             async with recording_lock:
@@ -851,10 +1028,7 @@ def create_app(
                 return
             wanted = payload.get("id")
             if wanted is None:
-                conv_id = None
-                history.clear()
-                log.info("conversation: new")
-                await send(conversation_message(None, "new"))
+                await start_new()
                 return
             info = None
             if isinstance(wanted, str) and _CONVERSATION_ID.fullmatch(wanted):
@@ -1090,6 +1264,8 @@ def create_app(
                     await handle_llm(payload)
                 elif kind == "conversation":
                     await handle_conversation(payload)
+                elif kind == "memory":
+                    await handle_memory(payload)
                 elif kind == "audio_start":
                     await handle_audio_start()
                 elif kind == "audio_end":

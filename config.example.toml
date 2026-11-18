@@ -19,6 +19,11 @@ max_output_tokens = 200
 # Gemini 3.x thinking level: "minimal", "low", "medium", "high", or "" for the
 # model default. Lower is faster and cheaper. Thinking tokens count toward the cap.
 thinking_level = "minimal"
+# Sampling temperature, 0..2. Gemini 3 default is 1.0 and Google recommends
+# keeping it there (ai.google.dev Gemini 3 guide, checked 2026-11-18): lower can
+# loop. Higher is looser and more surprising; past about 1.5 replies can turn
+# to word salad. Unverified: Gemini 3.6+ ignores this setting.
+temperature = 1.0
 history_turns = 10
 daily_token_cap = 200000   # placeholder, tune after Phase 2
 turn_timeout_s = 60       # server-side limit for one whole reply

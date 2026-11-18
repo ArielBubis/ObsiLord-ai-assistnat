@@ -55,6 +55,8 @@ class LLMSettings:
     model: str
     max_output_tokens: int
     thinking_level: str = "minimal"  # added in Phase 2
+    # Sampling temperature for Gemini replies, 0..2. 1.0 is the Gemini 3 default.
+    temperature: float = 1.0
     history_turns: int
     daily_token_cap: int
     turn_timeout_s: float = 60.0  # added in Phase 2

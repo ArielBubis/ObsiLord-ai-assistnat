@@ -572,6 +572,85 @@ body[data-status="thinking"] .scan-line {
   opacity: 0.6;
 }
 
+#conv-list li {
+  display: flex;
+  gap: 4px;
+}
+
+#conv-list li button:first-child {
+  flex: 1;
+}
+
+#conv-list li .conv-edit,
+#conv-editor button {
+  flex: none;
+  width: auto;
+  padding: 2px 8px;
+  background: var(--void);
+  color: var(--cyan);
+  border: 2px solid var(--cyan);
+  font: 700 10px var(--font-mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#conv-list li .conv-edit:hover,
+#conv-editor button:hover:not(:disabled) {
+  background: var(--cyan);
+  color: var(--border-black);
+}
+
+#conv-list li .conv-edit:focus-visible,
+#conv-editor button:focus-visible,
+#conv-editor input:focus-visible,
+#conv-editor textarea:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+#conv-editor button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+#conv-editor {
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  margin-top: 8px;
+  overflow-y: auto;
+}
+
+#conv-editor[hidden] {
+  display: none;
+}
+
+#conv-editor .mem-head,
+#conv-editor .mem-turn,
+#conv-editor .mem-add {
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--cyan);
+}
+
+#conv-editor .mem-field {
+  display: grid;
+  gap: 2px;
+  font: 400 11px var(--font-mono);
+}
+
+#conv-editor input,
+#conv-editor textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--void);
+  color: var(--text);
+  border: 1px solid var(--cyan);
+  font: 400 11px var(--font-mono);
+}
+
 #conv-note:empty {
   display: none;
 }

@@ -109,9 +109,11 @@ ROUTER_RULES = (
     '"what am I holding", "how do I look", "read this label", "what is behind '
     'me", or a follow-up such as "and now?" right after a look. search_image '
     "only when the user asks to identify one specific thing. recall, when "
-    "offered, only when the user asks about an earlier conversation that is "
-    "not in the conversation so far. arg is the question, the target or the "
-    "keywords in a few words."
+    "offered, when the user asks about an earlier conversation that is not in "
+    "the conversation so far, or when the user mentions a specific person, "
+    "pet, plan or appointment by name that may have come up in an earlier "
+    "conversation. arg is the question, the target or the keywords in a few "
+    "words."
 )
 LOCAL_MODE_NOTE = (
     "\n\nIn this mode you cannot call tools yourself. When the user's message "

@@ -35,6 +35,27 @@ class ConversationInfo:
 
 
 @dataclass(frozen=True)
+class StoredMessage:
+    """One stored row. role: "user", "tool" or "assistant"; the tool fields
+    are "" on other rows."""
+
+    id: int
+    role: str
+    text: str
+    tool_name: str
+    tool_arg: str
+
+
+@dataclass(frozen=True)
+class StoredTurn:
+    """One turn's messages in insert order (user, tools, assistant)."""
+
+    turn: int
+    ts: float
+    messages: tuple[StoredMessage, ...]
+
+
+@dataclass(frozen=True)
 class Hit:
     """One matching turn: the user text, the reply and its tool results
     (each "name: result")."""
@@ -78,3 +99,15 @@ class MemoryStore(SearchSource, Protocol):
     async def info(self, conversation_id: str) -> ConversationInfo | None: ...
 
     async def list_conversations(self, limit: int) -> list[ConversationInfo]: ...
+
+    async def turns(self, conversation_id: str) -> list[StoredTurn]: ...
+
+    async def edit_message(self, message_id: int, text: str) -> str | None: ...
+
+    async def delete_turn(self, conversation_id: str, turn: int) -> bool: ...
+
+    async def delete_conversation(self, conversation_id: str) -> bool: ...
+
+    async def rename(self, conversation_id: str, title: str) -> bool: ...
+
+    async def message_conversation(self, message_id: int) -> str | None: ...

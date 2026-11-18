@@ -152,3 +152,30 @@ def test_images_are_not_part_of_note_equality_or_repr() -> None:
     b = ToolNote("look", "q", "r", photo="p.jpg")
     assert a == b
     assert "xxxx" not in repr(a)
+
+
+def test_delete_conversation_removes_the_folder_only(tmp_path: Path) -> None:
+    async def go() -> None:
+        store = PhotoStore(tmp_path)
+        cid, other = "a" * 32, "b" * 32
+        await store.save(cid, b"1")
+        await store.save(other, b"2")
+        assert await store.delete_conversation(cid) == 1
+        assert not (tmp_path / cid).exists() and (tmp_path / other).exists()
+        assert await store.delete_conversation(cid) == 0
+        assert await store.delete_conversation("../x") == 0
+
+    asyncio.run(go())
+
+
+def test_delete_files_refuses_names_it_did_not_make(tmp_path: Path) -> None:
+    async def go() -> None:
+        store = PhotoStore(tmp_path)
+        cid = "a" * 32
+        name = await store.save(cid, b"1")
+        (tmp_path / "keep.jpg").write_bytes(b"x")
+        assert await store.delete_files(cid, ["../keep.jpg", "nope.jpg"]) == 0
+        assert (tmp_path / "keep.jpg").exists()
+        assert await store.delete_files(cid, [name, name]) == 1
+
+    asyncio.run(go())

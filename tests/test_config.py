@@ -339,6 +339,16 @@ def _old_config(tmp_path: Path) -> Path:
     return path
 
 
+def test_llm_temperature_defaults_to_one(tmp_path: Path) -> None:
+    # Checked on its own: [llm_local] has a temperature key too.
+    text = _drop_keys(EXAMPLE.read_text(encoding="utf-8"), "llm", ["temperature"])
+    path = tmp_path / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    s = load_settings(path, env_path=tmp_path / "missing.env", environ={})
+    assert s.llm.temperature == 1.0
+    assert s.llm_local.temperature == 0.7
+
+
 def test_old_config_loads_with_defaults(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

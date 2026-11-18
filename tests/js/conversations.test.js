@@ -85,3 +85,11 @@ test("checksView groups by label in order and caps text", () => {
   assert.deepEqual(checksView(null), []);
   assert.ok(MSG_NO_DEMO.includes("demo_memory = true"));
 });
+
+test("conversationNote treats edited like switch", () => {
+  assert.equal(
+    conversationNote({ type: "conversation", reason: "edited", last_at: T, turns: 2 }),
+    conversationNote({ type: "conversation", reason: "switch", last_at: T, turns: 2 }),
+  );
+  assert.ok(conversationNote({ type: "conversation", reason: "edited", last_at: T, turns: 2 }).startsWith("Continuing"));
+});

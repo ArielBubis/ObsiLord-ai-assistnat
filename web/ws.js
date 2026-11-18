@@ -38,6 +38,7 @@ import { initSnapshots } from "./snapshots.js";
 import { initPhotos } from "./photos.js";
 import { initSettings } from "./settings.js";
 import { initConversations } from "./conversations.js";
+import { initMemoryEditor } from "./memory_editor.js";
 import {
   busyAfterMessage, stateAction, drainTimeoutMs, textDrivesMouth, closesOpenSentence,
   pressAction, recordingAction, controlsDisabled, orphanAction,
@@ -140,6 +141,19 @@ const conversations = initConversations(
   },
   async () => {
     const resp = await fetch("/conversations", { cache: "no-store" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.json();
+  },
+  (id) => memoryEditor.open(id),
+);
+const memoryEditor = initMemoryEditor(
+  document.getElementById("conv-editor"),
+  (text) => {
+    if (isOpen()) ws.send(text);
+  },
+  async (id) => {
+    const resp = await fetch(`/conversations/${encodeURIComponent(id)}`, { cache: "no-store" });
+    if (resp.status === 404) return null;
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return resp.json();
   },
@@ -635,6 +649,7 @@ function handleMessage(event) {
       break;
     case "error":
       showError(msg.message);
+      memoryEditor.onError();
       break;
     case "snapshot":
       snapshots.show(msg);
@@ -650,6 +665,10 @@ function handleMessage(event) {
       break;
     case "conversation":
       conversations.onMessage(msg);
+      break;
+    case "memory":
+      conversations.refresh();
+      memoryEditor.onMessage(msg);
       break;
     default:
       break;

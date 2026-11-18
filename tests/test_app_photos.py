@@ -191,3 +191,53 @@ def test_startup_removes_photos_past_the_retention(tmp_path: Path) -> None:
     with TestClient(_app(tmp_path, SeeingToolLLM([]), settings)):
         pass
     assert not old.exists()
+
+
+def _two_look_turns(tmp_path: Path) -> tuple[TestClient, str]:
+    client = TestClient(_app(tmp_path, SeeingToolLLM(_look_rounds(2))))
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        _set(ws, "disk")
+        _turn(ws, "first look")
+        msgs = _turn(ws, "second look")
+    cid = next(m["id"] for m in msgs if m["type"] == "conversation")
+    assert len(_saved(tmp_path)) == 2
+    return client, str(cid)
+
+
+def _memory(client: TestClient, **fields: Any) -> dict[str, Any]:
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "memory", **fields})
+        return ws.receive_json()  # type: ignore[no-any-return]
+
+
+def test_deleting_a_conversation_removes_its_photos(tmp_path: Path) -> None:
+    client, cid = _two_look_turns(tmp_path)
+    assert _memory(client, action="delete_conversation", conversation=cid)["type"] == "memory"
+    assert _saved(tmp_path) == [] and not (tmp_path / "photos" / cid).exists()
+
+
+def test_deleting_a_turn_removes_only_its_photos(tmp_path: Path) -> None:
+    client, cid = _two_look_turns(tmp_path)
+    first, second = _saved(tmp_path)
+    con = sqlite3.connect(tmp_path / "m.sqlite3")
+    try:
+        metas = con.execute("select turn, meta from messages where role = 'tool' order by turn").fetchall()
+    finally:
+        con.close()
+    names = {t: json.loads(m)["photo"] for t, m in metas}
+    assert _memory(client, action="delete_turn", conversation=cid, turn=1)["type"] == "memory"
+    assert [p.name for p in _saved(tmp_path)] == [names[2]]
+
+
+def test_deleting_the_last_turn_removes_the_conversation_folder(tmp_path: Path) -> None:
+    client = TestClient(_app(tmp_path, SeeingToolLLM(_look_rounds(1))))
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        _set(ws, "disk")
+        msgs = _turn(ws)
+    cid = str(next(m["id"] for m in msgs if m["type"] == "conversation"))
+    assert len(_saved(tmp_path)) == 1
+    assert _memory(client, action="delete_turn", conversation=cid, turn=1)["type"] == "memory"
+    assert not (tmp_path / "photos" / cid).exists()

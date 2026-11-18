@@ -101,6 +101,9 @@ CASES: tuple[Case, ...] = (
     Case("I told you my cat's name a while ago. What is it?", RECALL),
     Case("Did we ever talk about skiing?", RECALL),
     Case("What did we talk about on the 5th of November?", RECALL),
+    Case("Pita knocked over my plant again.", RECALL),
+    Case("I am so tired today.", NO_TOOL),
+    Case("I just made coffee.", NO_TOOL),
 )
 
 

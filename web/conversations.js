@@ -46,6 +46,7 @@ export function conversationNote(msg) {
   switch (msg.reason) {
     case "resume":
     case "switch":
+    case "edited":
       return `Continuing the conversation from ${formatWhen(msg.last_at)} (${turnsText(msg.turns)}).`;
     case "new":
     case "start":
@@ -71,8 +72,9 @@ export function reconnectMessage(state) {
 
 // el: { block, list, newBtn, note }. send(text) sends if the socket is open.
 // fetchList() resolves to the /conversations JSON.
-// Returns { onMessage, announce, setDisabled }.
-export function initConversations(el, send, fetchList) {
+// onEdit(id), when given, adds an Edit button to each entry.
+// Returns { onMessage, announce, setDisabled, refresh }.
+export function initConversations(el, send, fetchList, onEdit) {
   const state = { known: false, id: null };
   let body = null;
   let disabled = false;
@@ -94,6 +96,14 @@ export function initConversations(el, send, fetchList) {
           if (!disabled) send(conversationMessage(item.id));
         });
         li.appendChild(btn);
+        if (typeof onEdit === "function") {
+          const edit = document.createElement("button");
+          edit.type = "button";
+          edit.className = "conv-edit";
+          edit.textContent = "Edit";
+          edit.addEventListener("click", () => onEdit(item.id));
+          li.appendChild(edit);
+        }
         return li;
       }),
     );
@@ -131,6 +141,9 @@ export function initConversations(el, send, fetchList) {
     announce() {
       const msg = reconnectMessage(state);
       if (msg !== null) send(msg);
+    },
+    refresh() {
+      load();
     },
     setDisabled(value) {
       disabled = Boolean(value);
