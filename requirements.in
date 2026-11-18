@@ -9,7 +9,9 @@ faster-whisper==1.2.1
 # Imported directly by stt/ (PCM16 to float32). Same version already locked
 # in requirements.txt as a dependency of ctranslate2 and onnxruntime.
 numpy==2.5.3
-piper-tts==1.8.0
+# Kokoro TTS (PyPI, MIT, looked up 2026-11-18). Brings phonemizer (GPL-3.0)
+# and espeakng-loader (bundles espeak-ng). Needs numpy>=2.0.2, onnxruntime>=1.20.1.
+kokoro-onnx==0.6.1
 opencv-python==5.0.0.93
 # Imported directly by llm/openai_compat.py (local LLM server). Same version
 # already locked in requirements.txt as a dependency of google-genai; checked

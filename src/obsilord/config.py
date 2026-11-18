@@ -100,7 +100,11 @@ class STTSettings:
         return self.language.strip() or None
 
 
-TTS_PROVIDERS = ("piper",)
+TTS_PROVIDERS = ("kokoro",)
+# Kokoro synthesizes at speed / pitch; kokoro-onnx 0.6.1 create() refuses
+# speeds outside this range.
+KOKORO_SPEED_MIN = 0.5
+KOKORO_SPEED_MAX = 2.0
 PITCH_MIN = 0.8
 PITCH_MAX = 1.25
 EQ_HZ_MIN = 20.0
@@ -111,16 +115,16 @@ EQ_DB_LIMIT = 24.0
 @dataclass(frozen=True, kw_only=True)
 class TTSSettings:
     provider: str
-    # Path to the voice model, relative to the repo root (or absolute).
-    # Empty means TTS is disabled and replies are text only.
-    voice: str
-    # Speaker name for multi-speaker voices, resolved at load time against the
-    # voice's speaker_id_map. Empty means the voice's default speaker.
-    speaker: str = ""  # added in Phase 3
-    # Phoneme length scale: < 1 speaks faster, > 1 slower. Must be > 0.
-    length_scale: float = 1.0  # added in Phase 3
+    # Path to the Kokoro model, relative to the repo root (or absolute); the
+    # voices file sits next to it. Empty means TTS is disabled (text only).
+    model: str
+    # Kokoro voice name, checked at load time against the voices file.
+    voice: str = "bm_lewis"
+    # Speaking rate: 1.0 normal, > 1 faster. speed / pitch must stay in
+    # KOKORO_SPEED_MIN..KOKORO_SPEED_MAX.
+    speed: float = 1.15
     # Pitch factor, PITCH_MIN..PITCH_MAX. Applied server side by synthesizing
-    # with length_scale * pitch and announcing native_rate * pitch.
+    # at speed / pitch and announcing native_rate * pitch.
     pitch: float = 1.0  # added in Phase 3
     # Browser playback EQ (served at /config/audio, applied by Web Audio
     # shelving filters). Frequencies EQ_HZ_MIN..EQ_HZ_MAX, gains within
@@ -132,7 +136,7 @@ class TTSSettings:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.voice.strip())
+        return bool(self.model.strip())
 
 
 CAMERA_APIS = ("dshow", "msmf", "any")
@@ -474,10 +478,17 @@ def _build(
 
 
 def _check_tts_voice_controls(tts: TTSSettings) -> None:
-    """Pitch in [PITCH_MIN, PITCH_MAX], EQ frequencies and gains in range."""
+    """Pitch in [PITCH_MIN, PITCH_MAX], speed / pitch in the Kokoro range, EQ
+    frequencies and gains in range."""
     if not PITCH_MIN <= tts.pitch <= PITCH_MAX:
         raise ValueError(
             f"config: tts.pitch must be in {PITCH_MIN:g}..{PITCH_MAX:g}, got {tts.pitch:g}"
+        )
+    effective = tts.speed / tts.pitch
+    if not KOKORO_SPEED_MIN <= effective <= KOKORO_SPEED_MAX:
+        raise ValueError(
+            "config: tts.speed / tts.pitch must be in "
+            f"{KOKORO_SPEED_MIN:g}..{KOKORO_SPEED_MAX:g}, got {effective:.3g}"
         )
     for name in ("low_shelf_hz", "high_shelf_hz"):
         value = getattr(tts, name)
@@ -775,10 +786,6 @@ def load_settings(
             f"config: llm.turn_timeout_s must be > 0 and < {CLIENT_WATCHDOG_S:g} "
             "(the browser watchdog WATCHDOG_MS in web/turn.js), "
             f"got {settings.llm.turn_timeout_s:g}"
-        )
-    if not settings.tts.length_scale > 0:
-        raise ValueError(
-            f"config: tts.length_scale must be > 0, got {settings.tts.length_scale:g}"
         )
     if settings.tts.enabled and settings.tts.provider not in TTS_PROVIDERS:
         raise ValueError(

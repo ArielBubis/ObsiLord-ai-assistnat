@@ -6,6 +6,7 @@ import threading
 import time
 from typing import Any
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -229,17 +230,16 @@ def test_empty_voice_loads_no_tts(tmp_path: Path) -> None:
     assert app.state.tts is None
 
 
-def test_bad_speaker_stops_startup(tmp_path: Path) -> None:
-    model = tmp_path / "voice.onnx"
+def test_bad_voice_stops_startup(tmp_path: Path) -> None:
+    model = tmp_path / "kokoro-v1.0.onnx"
     model.write_bytes(b"junk")
-    (tmp_path / "voice.onnx.json").write_text(
-        json.dumps({"speaker_id_map": {"obadiah": 2}}), encoding="utf-8"
-    )
+    with (tmp_path / "voices-v1.0.bin").open("wb") as f:
+        np.savez(f, bm_lewis=np.zeros((2, 256), dtype=np.float32))
     base = _settings(tmp_path)
     settings = dataclasses.replace(
-        base, tts=dataclasses.replace(base.tts, voice=str(model), speaker="nobody")
+        base, tts=dataclasses.replace(base.tts, model=str(model), voice="nobody")
     )
-    with pytest.raises(ValueError, match="valid names: obadiah"):
+    with pytest.raises(ValueError, match="English voices: bm_lewis"):
         create_app(settings, llm=FakeLLM(["x"]))
 
 

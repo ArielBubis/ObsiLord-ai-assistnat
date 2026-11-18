@@ -1,8 +1,8 @@
-"""Real faster-whisper on speech synthesized by the real Piper voice. Local CPU,
+"""Real faster-whisper on speech synthesized by the real Kokoro voice. Local CPU,
 no API cost, no microphone.
 
 Skipped by default; run with: pytest -m hardware -s tests/test_stt_live.py
-Needs the Piper voice in voices/ (gitignored). The first run downloads the STT
+Needs the Kokoro model in voices/kokoro/ (gitignored). The first run downloads the STT
 model from config.example.toml ([stt] model, "small" is about 486 MB) into
 models/ (gitignored). Audio stays in memory; nothing is written to disk.
 """
@@ -17,7 +17,7 @@ import pytest
 from obsilord.config import REPO_ROOT, load_settings
 from obsilord.stt.base import SAMPLE_RATE
 from obsilord.stt.faster_whisper import FasterWhisperSTT, model_is_cached, resolve_model
-from obsilord.tts.piper import PiperTTS
+from obsilord.tts.kokoro import KokoroTTS
 
 pytestmark = pytest.mark.hardware
 
@@ -34,32 +34,28 @@ def resample_pcm16(pcm16: bytes, rate_in: int, rate_out: int) -> bytes:
 
 
 def synthesize_question_16k(text: str = QUESTION) -> bytes:
-    """Speak text with the configured Piper voice, resampled to 16 kHz PCM16."""
+    """Speak text with the configured Kokoro voice, resampled to 16 kHz PCM16."""
     settings = load_settings(
         REPO_ROOT / "config.example.toml", env_path=REPO_ROOT / "no-such.env", environ={}
     )
-    tts = PiperTTS.load(
-        REPO_ROOT / settings.tts.voice,
-        settings.tts.speaker,
-        settings.tts.length_scale,
-        settings.tts.pitch,
-    )
+    cfg = settings.tts
+    tts = KokoroTTS.load(REPO_ROOT / cfg.model, cfg.voice, cfg.speed, cfg.pitch)
 
     async def collect() -> bytes:
         return b"".join([frame async for frame in tts.synthesize(text)])
 
     pcm = asyncio.run(collect())
-    # The PCM is meant to be played at the announced rate (see tts/piper.py).
+    # The PCM is meant to be played at the announced rate (see tts/kokoro.py).
     return resample_pcm16(pcm, tts.sample_rate, SAMPLE_RATE)
 
 
 def test_resample_length_and_range() -> None:
-    pcm = (np.sin(np.arange(22050) / 10) * 20000).astype("<i2").tobytes()
-    out = resample_pcm16(pcm, 22050, 16000)
+    pcm = (np.sin(np.arange(24000) / 10) * 20000).astype("<i2").tobytes()
+    out = resample_pcm16(pcm, 24000, 16000)
     assert len(out) == 16000 * 2
 
 
-def test_real_stt_transcribes_piper_speech(tmp_path: Path) -> None:
+def test_real_stt_transcribes_kokoro_speech(tmp_path: Path) -> None:
     settings = load_settings(
         REPO_ROOT / "config.example.toml", env_path=tmp_path / "missing.env", environ={}
     )

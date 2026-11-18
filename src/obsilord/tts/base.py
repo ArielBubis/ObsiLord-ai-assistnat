@@ -28,7 +28,7 @@ class TTSClient(Protocol):
 def frame_bytes(sample_rate: int, frame_ms: int = FRAME_MS) -> int:
     """Bytes in one frame of frame_ms at sample_rate (always a whole sample count).
 
-    22050 Hz and 100 ms give 2205 samples, 4410 bytes.
+    24000 Hz and 100 ms give 2400 samples, 4800 bytes.
     """
     samples = max(1, sample_rate * frame_ms // 1000)
     return samples * BYTES_PER_SAMPLE

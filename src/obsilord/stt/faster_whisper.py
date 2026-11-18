@@ -28,7 +28,7 @@ memory; nothing is written to disk and no transcript text is logged.
 When the model is already in download_root it is loaded with
 local_files_only=True, so a normal start makes no network request. A local
 model directory given as a relative path is resolved against the repo root
-(resolve_model), like download_root and tts.voice.
+(resolve_model), like download_root and tts.model.
 """
 
 from __future__ import annotations

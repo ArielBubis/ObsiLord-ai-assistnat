@@ -37,7 +37,7 @@ def test_loads_example_config_with_types(tmp_path: Path) -> None:
     assert isinstance(s.llm.daily_token_cap, int)
     assert s.llm.turn_timeout_s == 60.0 and type(s.llm.turn_timeout_s) is float
     assert s.stt.compute_type == "int8"
-    assert s.tts.provider == "piper"
+    assert s.tts.provider == "kokoro"
     assert s.camera.max_per_hour == 30
     assert s.face.logical_width == 64 and s.face.logical_height == 48
     assert s.face.mouth_thresholds == (0.05, 0.15, 0.30)
@@ -176,45 +176,57 @@ def test_accepts_turn_timeout_just_under_watchdog(tmp_path: Path) -> None:
 
 def test_tts_settings_from_example(tmp_path: Path) -> None:
     s = load_settings(EXAMPLE, env_path=tmp_path / "missing.env", environ={})
-    assert s.tts.provider == "piper"
-    assert s.tts.voice == "voices/en_GB-semaine-medium.onnx"
-    assert s.tts.speaker == "obadiah"
-    assert s.tts.length_scale == 1.0 and type(s.tts.length_scale) is float
+    assert s.tts.provider == "kokoro"
+    assert s.tts.model == "voices/kokoro/kokoro-v1.0.onnx"
+    assert s.tts.voice == "bm_lewis"
+    assert s.tts.speed == 1.15 and type(s.tts.speed) is float
     assert s.tts.enabled
 
 
-@pytest.mark.parametrize("value", ["0", "0.0", "-1.5"])
-def test_rejects_non_positive_length_scale(tmp_path: Path, value: str) -> None:
-    path = _write_replaced(tmp_path, "length_scale = 1.0", f"length_scale = {value}")
-    with pytest.raises(ValueError, match=r"tts\.length_scale must be > 0"):
+@pytest.mark.parametrize("value", ["2.5", "0.4", "0", "-1.5"])
+def test_rejects_speed_out_of_range(tmp_path: Path, value: str) -> None:
+    path = _write_replaced(tmp_path, "speed = 1.15", f"speed = {value}")
+    with pytest.raises(ValueError, match=r"tts\.speed / tts\.pitch must be in 0\.5\.\.2"):
         load_settings(path, env_path=tmp_path / "missing.env", environ={})
 
 
-def test_rejects_non_numeric_length_scale(tmp_path: Path) -> None:
-    path = _write_replaced(tmp_path, "length_scale = 1.0", 'length_scale = "fast"')
-    with pytest.raises(ValueError, match=r"tts\.length_scale expected float, got str"):
+def test_speed_range_counts_pitch(tmp_path: Path) -> None:
+    # speed 2.2 alone is out of range; with pitch 1.2 Kokoro runs at 1.83, which is allowed.
+    path = _write_replaced(tmp_path, "speed = 1.15", "speed = 2.2")
+    with pytest.raises(ValueError, match=r"tts\.speed / tts\.pitch"):
+        load_settings(path, env_path=tmp_path / "missing.env", environ={})
+    text = path.read_text(encoding="utf-8").replace("pitch = 1.0", "pitch = 1.2")
+    path.write_text(text, encoding="utf-8")
+    s = load_settings(path, env_path=tmp_path / "missing.env", environ={})
+    assert (s.tts.speed, s.tts.pitch) == (2.2, 1.2)
+
+
+def test_rejects_non_numeric_speed(tmp_path: Path) -> None:
+    path = _write_replaced(tmp_path, "speed = 1.15", 'speed = "fast"')
+    with pytest.raises(ValueError, match=r"tts\.speed expected float, got str"):
         load_settings(path, env_path=tmp_path / "missing.env", environ={})
 
 
-def test_empty_voice_disables_tts(tmp_path: Path) -> None:
+def test_empty_model_disables_tts(tmp_path: Path) -> None:
     path = _write_replaced(
-        tmp_path, 'voice = "voices/en_GB-semaine-medium.onnx"', 'voice = ""'
+        tmp_path, 'model = "voices/kokoro/kokoro-v1.0.onnx"', 'model = ""'
     )
     s = load_settings(path, env_path=tmp_path / "missing.env", environ={})
-    assert s.tts.voice == ""
+    assert s.tts.model == ""
     assert not s.tts.enabled
 
 
 def test_rejects_unknown_tts_provider(tmp_path: Path) -> None:
-    path = _write_replaced(tmp_path, 'provider = "piper"', 'provider = "other"')
-    with pytest.raises(ValueError, match=r"tts\.provider must be one of \['piper'\]"):
+    path = _write_replaced(tmp_path, 'provider = "kokoro"', 'provider = "piper"')
+    with pytest.raises(ValueError, match=r"tts\.provider must be one of \['kokoro'\]"):
         load_settings(path, env_path=tmp_path / "missing.env", environ={})
 
 
-def test_missing_tts_speaker_uses_voice_default(tmp_path: Path) -> None:
-    path = _write_replaced(tmp_path, 'speaker = "obadiah"', "")
-    s = load_settings(path, env_path=tmp_path / "missing.env", environ={})
-    assert s.tts.speaker == ""
+def test_rejects_old_piper_tts_keys(tmp_path: Path) -> None:
+    # A config.toml from before TTS phase 1 names the old keys.
+    path = _write_replaced(tmp_path, 'voice = "bm_lewis"', 'speaker = "obadiah"\nlength_scale = 1.0')
+    with pytest.raises(ValueError, match=r"unknown keys in \[tts\]: \['length_scale', 'speaker'\]"):
+        load_settings(path, env_path=tmp_path / "missing.env", environ={})
 
 
 @pytest.mark.parametrize(
@@ -303,8 +315,8 @@ OPTIONAL_KEYS = {
     "llm": ["thinking_level", "turn_timeout_s"],
     "stt": ["beam_size", "max_utterance_s", "min_utterance_ms", "download_root"],
     "tts": [
-        "speaker",
-        "length_scale",
+        "voice",
+        "speed",
         "pitch",
         "low_shelf_hz",
         "low_shelf_db",
@@ -360,8 +372,8 @@ def test_old_config_loads_with_defaults(
         s = load_settings(path, env_path=tmp_path / "missing.env", environ={})
     assert s.llm.thinking_level == "minimal"
     assert s.llm.turn_timeout_s == 60.0
-    assert s.tts.speaker == ""
-    assert s.tts.length_scale == 1.0
+    assert s.tts.voice == "bm_lewis"
+    assert s.tts.speed == 1.15
     assert s.tts.pitch == 1.0
     assert (s.tts.low_shelf_hz, s.tts.low_shelf_db) == (250.0, -6.0)
     assert (s.tts.high_shelf_hz, s.tts.high_shelf_db) == (3500.0, 0.0)
@@ -423,7 +435,7 @@ def test_unknown_key_rejected_in_old_config(tmp_path: Path) -> None:
         ("server", "port"),
         ("llm", "model"),
         ("llm", "daily_token_cap"),
-        ("tts", "voice"),
+        ("tts", "model"),
         ("tts", "provider"),
         ("face", "mouth_thresholds"),
     ],

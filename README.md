@@ -35,7 +35,7 @@ Most assistants live in the cloud, listen all the time, and forget you between s
                                         chat model       (Gemini or local)
                                         tools            look, search_image, recall
                                         vision           (Qwen3-VL-2B, llama.cpp)
-                                        text to speech   (Piper)
+                                        text to speech   (Kokoro)
                                         memory           (SQLite + FTS5)
 ```
 
@@ -50,7 +50,7 @@ One turn: you speak, the backend transcribes it, the chat model answers or calls
 
 ## Built with
 
-Python 3.12, FastAPI, faster-whisper, Piper, llama.cpp, OpenCV, SQLite, plain JavaScript with three.js and WebGL shaders for the face, and the Gemini API or any OpenAI-compatible local server.
+Python 3.12, FastAPI, faster-whisper, Kokoro (kokoro-onnx), llama.cpp, OpenCV, SQLite, plain JavaScript with three.js and WebGL shaders for the face, and the Gemini API or any OpenAI-compatible local server.
 
 ## Running it
 

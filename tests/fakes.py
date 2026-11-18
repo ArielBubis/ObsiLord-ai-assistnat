@@ -28,7 +28,7 @@ def text_only(settings: Settings) -> Settings:
     voice, no STT model, and no vision files."""
     return dataclasses.replace(
         settings,
-        tts=dataclasses.replace(settings.tts, voice=""),
+        tts=dataclasses.replace(settings.tts, model=""),
         stt=dataclasses.replace(settings.stt, model=""),
         vision=dataclasses.replace(settings.vision, model=""),
     )

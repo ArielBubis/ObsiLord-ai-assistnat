@@ -86,25 +86,30 @@ min_utterance_ms = 300
 download_root = "models"
 
 [tts]
-# Piper via piper-tts 1.8.0 (PyPI, looked up 2026-10-06). License GPL-3.0-or-later
-# (OHF-Voice/piper1-gpl). Runs locally on CPU, no API cost.
-provider = "piper"
-# Voice model path, relative to the repo root. Empty string disables TTS (text
-# only replies). Not in git (voices/ is gitignored). Downloaded 2026-10-06:
-# en_GB-semaine-medium.onnx and its .onnx.json from the rhasspy/piper-voices
-# repository on Hugging Face (en/en_GB/semaine/medium/).
-# 22050 Hz, 4 speakers. Dataset license: CC BY-NC-SA 4.0 (non-commercial use).
-voice = "voices/en_GB-semaine-medium.onnx"
-# Speaker name from the voice's speaker_id_map (.onnx.json). For semaine:
-# prudence, spike, obadiah, poppy. Empty uses the voice's default speaker.
-speaker = "obadiah"
-# Phoneme length: < 1.0 speaks faster, > 1.0 slower. Must be > 0.
-length_scale = 1.0
+# Kokoro-82M v1.0 via kokoro-onnx 0.6.1 (PyPI, MIT, looked up 2026-11-18).
+# Model license Apache 2.0. Runs locally on CPU, no API cost, 24000 Hz, about
+# 0.4 to 0.8 s per sentence on a 6-core CPU.
+provider = "kokoro"
+# Model path, relative to the repo root. Empty string disables TTS (text only
+# replies). Not in git (voices/ is gitignored). kokoro-v1.0.onnx (326 MB) and
+# voices-v1.0.bin (28 MB) go in the same folder, from the kokoro-onnx GitHub
+# release model-files-v1.1:
+#   https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/kokoro-v1.0.onnx
+#   https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/voices-v1.0.bin
+# Use the full model: the int8 one was 10x slower on CPU.
+model = "voices/kokoro/kokoro-v1.0.onnx"
+# English voices only: names starting with bm_, bf_ (British) or am_, af_
+# (American), for example bm_lewis, bm_george, bm_fable, bm_daniel, bf_emma,
+# am_michael, am_puck, af_heart.
+voice = "bm_lewis"
+# Speaking rate: 1.0 normal, above 1.0 faster. speed / pitch must stay in 0.5
+# to 2.0.
+speed = 1.15
 # Pitch factor: 1.0 is the voice as recorded, 1.06 is about one semitone
 # higher, 0.94 about one lower. Allowed 0.8 to 1.25; small steps (0.03 to 0.1)
-# sound natural. How it works: the server synthesizes more slowly
-# (length_scale * pitch) and tells the browser a higher sample rate (22050 *
-# pitch). Playing faster raises the pitch and brings the tempo back to normal.
+# sound natural. How it works: the server synthesizes more slowly (speed /
+# pitch) and tells the browser a higher sample rate (24000 * pitch). Playing
+# faster raises the pitch and brings the tempo back to speed.
 pitch = 1.0
 # Playback EQ, applied in the browser to the speech only (read from
 # /config/audio). A shelf boosts (+dB) or cuts (-dB) everything below

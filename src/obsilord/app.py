@@ -25,10 +25,10 @@ Mic audio stays in memory only: never written to disk or logged.
 
 The LLM client, STT client, TTS client, and UsageTracker are created once in
 create_app (app startup) and can be injected for tests. If no API key is
-configured the app still starts and turns return an error. If [tts] voice is
+configured the app still starts and turns return an error. If [tts] model is
 empty, TTS is disabled and replies are text only; if [stt] model is empty,
 voice input is disabled. A configured voice or STT model that fails to load
-(missing file, unknown speaker, failed download) stops startup with an error.
+(missing file, unknown voice, failed download) stops startup with an error.
 A configured [face] character file is checked first (face_character.py:
 missing, not binary glTF 2.0, compressed, or linking external files), and a
 failed check also stops startup with an error. GET /face/character.glb serves
@@ -214,17 +214,13 @@ ALLOWED_HOSTS = ["127.0.0.1", "localhost", "testserver"]
 def _default_tts(settings: Settings) -> TTSClient | None:
     """Load and warm up the configured voice, or None if TTS is disabled."""
     if not settings.tts.enabled:
-        log.info("tts: disabled ([tts] voice is empty), replies are text only")
+        log.info("tts: disabled ([tts] model is empty), replies are text only")
         return None
     # Imported here so the provider package is only loaded when used.
-    from obsilord.tts.piper import PiperTTS
+    from obsilord.tts.kokoro import KokoroTTS
 
-    tts = PiperTTS.load(
-        settings.repo_root / settings.tts.voice,
-        settings.tts.speaker,
-        settings.tts.length_scale,
-        settings.tts.pitch,
-    )
+    cfg = settings.tts
+    tts = KokoroTTS.load(settings.repo_root / cfg.model, cfg.voice, cfg.speed, cfg.pitch)
     tts.warm_up()
     return tts
 
@@ -406,7 +402,7 @@ def create_app(
     LLM server; memory the conversation store (None builds it from [memory]);
     photos the folder for Photos "disk" (None: [camera] photos_dir).
 
-    tts=None loads the voice from settings (nothing is loaded when [tts] voice
+    tts=None loads the voice from settings (nothing is loaded when [tts] model
     is empty). stt=None loads the STT model from settings (nothing is loaded
     when [stt] model is empty). looker=None builds look() from settings (off
     when [vision] model is empty). local=None builds the server object from
