@@ -9,10 +9,33 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal, Protocol, Union
 
 
+NOTE_MAX_CHARS = 400
+
+
+@dataclass(frozen=True)
+class ToolNote:
+    """A tool call of an earlier turn and its result, kept in history.
+
+    arg: the call's first string argument (the question, target or query).
+    result: the output, or the error when ok is False. One line, capped.
+    """
+
+    name: str
+    arg: str
+    result: str
+    ok: bool = True
+
+
 @dataclass(frozen=True)
 class Message:
     role: Literal["user", "assistant"]
     text: str
+    # Tool calls made before this reply (assistant messages only).
+    tools: tuple[ToolNote, ...] = ()
+
+
+def _flat(value: Any, limit: int) -> str:
+    return " ".join(str(value).split())[:limit]
 
 
 @dataclass(frozen=True)
@@ -52,6 +75,15 @@ class ToolResult:
 
     call: ToolCall
     response: dict[str, Any]
+
+
+def note_from_result(result: ToolResult, limit: int = NOTE_MAX_CHARS) -> ToolNote:
+    """The result as a ToolNote for history: one line each, capped at limit."""
+    arg = next((v for v in result.call.args.values() if isinstance(v, str)), "")
+    if "output" in result.response:
+        return ToolNote(result.call.name, _flat(arg, limit), _flat(result.response["output"], limit))
+    error = result.response.get("error", "no answer")
+    return ToolNote(result.call.name, _flat(arg, limit), _flat(error, limit), ok=False)
 
 
 @dataclass(frozen=True)

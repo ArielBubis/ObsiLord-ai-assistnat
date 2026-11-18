@@ -6,6 +6,11 @@ __pycache__/
 config.toml
 logs/
 *.jsonl
+# Conversation memory (local SQLite, text only).
+/data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 models/
 voices/
 captures/

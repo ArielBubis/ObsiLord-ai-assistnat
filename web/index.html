@@ -63,6 +63,14 @@
         <p id="llm-server" class="settings-dim"></p>
         <p id="llm-status" class="settings-dim" aria-live="polite"></p>
       </fieldset>
+      <fieldset id="conv-group" class="settings-group" hidden>
+        <legend>Conversations</legend>
+        <div class="settings-row">
+          <button id="conv-new" type="button">New conversation</button>
+        </div>
+        <p id="conv-note" class="settings-dim" aria-live="polite"></p>
+        <ul id="conv-list"></ul>
+      </fieldset>
     </details>
     <section id="snapshots">
       <label class="snap-switch">
@@ -98,6 +106,11 @@
           <span id="debug-treble-value"></span>
         </label>
         <p id="debug-eq-config"></p>
+      </div>
+      <div id="debug-memory">
+        <p class="memory-head">Memory tests</p>
+        <p id="debug-memory-note"></p>
+        <div id="debug-memory-list"></div>
       </div>
     </section>
   </main>

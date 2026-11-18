@@ -276,6 +276,28 @@ class LocalLLMSettings:
     reasoning_effort: str = "none"
 
 
+RECALL_LIMIT_MAX = 50
+RECALL_MIN_CHARS = 200
+DEMO_DB_PATH = "data/memory-demo.sqlite3"
+
+
+@dataclass(frozen=True, kw_only=True)
+class MemorySettings:
+    """[memory], optional. The local conversation store and recall()."""
+
+    enabled: bool = True
+    # Relative to the repo root unless absolute.
+    db_path: str = "data/memory.sqlite3"
+    recall: bool = True
+    recall_limit: int = 5
+    recall_max_chars: int = 1500
+    # A reload continues the last conversation within this many minutes.
+    resume_minutes: int = 30
+    # 0 keeps everything.
+    retention_days: int = 0
+    list_limit: int = 50
+
+
 @dataclass(frozen=True, kw_only=True)
 class DebugSettings:
     """[debug], optional."""
@@ -283,6 +305,9 @@ class DebugSettings:
     # Print every Gemini and llama-server request and reply to the console
     # (see obsilord.promptlog). Camera frames show as their size only.
     log_prompts: bool = False
+    # Made-up history in DEMO_DB_PATH, reseeded at every start, instead of
+    # the real store (see obsilord.memory.demo).
+    demo_memory: bool = False
 
 
 @dataclass(frozen=True)
@@ -303,6 +328,7 @@ class Settings:
     vision: VisionSettings = field(default_factory=VisionSettings)
     image_search: ImageSearchSettings = field(default_factory=ImageSearchSettings)
     llm_local: LocalLLMSettings = field(default_factory=LocalLLMSettings)
+    memory: MemorySettings = field(default_factory=MemorySettings)
     debug: DebugSettings = field(default_factory=DebugSettings)
     secrets: Secrets = field(default_factory=Secrets, repr=False)
     repo_root: Path = REPO_ROOT
@@ -641,6 +667,39 @@ def _check_llm_local(llm: LLMSettings, local: LocalLLMSettings) -> None:
         )
 
 
+def _check_memory(memory: MemorySettings) -> None:
+    if not memory.db_path.strip():
+        raise ValueError("config: memory.db_path must not be empty")
+    if Path(memory.db_path) == Path(DEMO_DB_PATH):
+        raise ValueError(
+            f"config: memory.db_path must not be {DEMO_DB_PATH} (the demo file is deleted at "
+            "every start with [debug] demo_memory)"
+        )
+    if not 1 <= memory.recall_limit <= RECALL_LIMIT_MAX:
+        raise ValueError(
+            f"config: memory.recall_limit must be in 1..{RECALL_LIMIT_MAX}, "
+            f"got {memory.recall_limit}"
+        )
+    if memory.recall_max_chars < RECALL_MIN_CHARS:
+        raise ValueError(
+            f"config: memory.recall_max_chars must be >= {RECALL_MIN_CHARS}, "
+            f"got {memory.recall_max_chars}"
+        )
+    for name in ("resume_minutes", "retention_days"):
+        if getattr(memory, name) < 0:
+            raise ValueError(f"config: memory.{name} must be >= 0, got {getattr(memory, name)}")
+    if memory.list_limit < 1:
+        raise ValueError(f"config: memory.list_limit must be >= 1, got {memory.list_limit}")
+
+
+def memory_db_path(settings: Settings) -> Path:
+    """The store file: the demo file with [debug] demo_memory, otherwise
+    [memory] db_path (relative paths against the repo root)."""
+    raw = DEMO_DB_PATH if settings.debug.demo_memory else settings.memory.db_path
+    path = Path(raw)
+    return path if path.is_absolute() else settings.repo_root / path
+
+
 def default_config_path() -> Path:
     """config.toml in the repo root, falling back to config.example.toml."""
     path = REPO_ROOT / "config.toml"
@@ -673,6 +732,7 @@ def load_settings(
             ImageSearchSettings, "image_search", data, defaulted, optional=True
         ),
         llm_local=_build(LocalLLMSettings, "llm_local", data, defaulted, optional=True),
+        memory=_build(MemorySettings, "memory", data, defaulted, optional=True),
         debug=_build(DebugSettings, "debug", data, defaulted, optional=True),
         secrets=load_secrets(env_path, environ),
     )
@@ -705,6 +765,7 @@ def load_settings(
     _check_vision(settings.vision)
     _check_image_search(settings.image_search, settings.vision)
     _check_llm_local(settings.llm, settings.llm_local)
+    _check_memory(settings.memory)
     if defaulted:
         log.info(
             "config: %s not set in %s, using defaults (copy them from "

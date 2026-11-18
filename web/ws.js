@@ -24,6 +24,8 @@
 //
 // Settings: the chat model (Gemini or local) is picked in the Settings panel
 // (settings.js), announced after every connect, and locked while a turn runs.
+// The Conversations list in the same panel (conversations.js) continues a
+// stored conversation or starts a new one, also locked while a turn runs.
 
 import {
   setState, getState, mouthText, mouthEnd, mouthReset, setAudioLevelSource, setAudioMouth,
@@ -34,6 +36,7 @@ import { createMic, micErrorMessage } from "./audio_in.js";
 import { loadAudioSettings, MAX_UTTERANCE_DEFAULT_S } from "./config.js";
 import { initSnapshots } from "./snapshots.js";
 import { initSettings } from "./settings.js";
+import { initConversations } from "./conversations.js";
 import {
   busyAfterMessage, stateAction, drainTimeoutMs, textDrivesMouth, closesOpenSentence,
   pressAction, recordingAction, controlsDisabled, orphanAction,
@@ -103,6 +106,23 @@ const settings = initSettings(
   },
   async () => {
     const resp = await fetch("/config/llm", { cache: "no-store" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.json();
+  },
+);
+
+const conversations = initConversations(
+  {
+    block: document.getElementById("conv-group"),
+    list: document.getElementById("conv-list"),
+    newBtn: document.getElementById("conv-new"),
+    note: document.getElementById("conv-note"),
+  },
+  (text) => {
+    if (isOpen()) ws.send(text);
+  },
+  async () => {
+    const resp = await fetch("/conversations", { cache: "no-store" });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return resp.json();
   },
@@ -246,6 +266,7 @@ function updateControls() {
   input.disabled = off;
   sendBtn.disabled = off;
   settings.setDisabled(off);
+  conversations.setDisabled(off);
   talkBtn.classList.toggle("recording", recordingLive());
   talkBtn.classList.toggle("opening", recordingHeld() && !recordingLive());
   updateHint();
@@ -605,6 +626,9 @@ function handleMessage(event) {
     case "llm_status":
       settings.showStatus(msg);
       break;
+    case "conversation":
+      conversations.onMessage(msg);
+      break;
     default:
       break;
   }
@@ -626,6 +650,7 @@ function connect() {
     sock.send(JSON.stringify({ type: "ping" }));
     snapshots.announce();
     settings.announce();
+    conversations.announce();
     updateHint();
   });
 

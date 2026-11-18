@@ -1,10 +1,11 @@
-"""Score a local model on picking the camera tools.
+"""Score a local model on picking the tools (camera and recall).
 
-    python -m obsilord.llm.routecheck [--model ID] [--no-search] [--repeat N]
-                                      [--mode auto|native|router]
+    python -m obsilord.llm.routecheck [--model ID] [--no-search] [--no-recall]
+                                      [--repeat N] [--mode auto|native|router]
 
 Sends a fixed set of labelled messages (some need look(), some
-search_image(), most need no tool, a few are follow-ups) against the
+search_image(), some recall(), most need no tool, a few are follow-ups, one
+answered by an earlier tool result in history) against the
 [llm_local] server in config.toml, the way the app would: in native mode one
 request with the tools declared and the app's system prompt, in router mode
 the routing request. Prints the misses, the accuracy per expected tool, how
@@ -12,8 +13,11 @@ many calls came back written as text, and the latency. Run it per model and
 mode to compare them; --repeat matters, small models vary from run to run.
 Nothing is logged to the usage file and no camera is used.
 
---no-search: only look() is offered (as with [image_search] off); messages
-that ask to identify something then expect look().
+--no-search: search_image() is not offered (as with [image_search] off);
+messages that ask to identify something then expect look().
+--no-recall: recall() is not offered (as in Gemini mode or with [memory]
+recall off); messages about earlier conversations then expect no tool. No
+store is searched either way: only the decision is scored.
 """
 
 from __future__ import annotations
@@ -26,15 +30,29 @@ import time
 from dataclasses import dataclass
 
 from obsilord.config import TOOL_MODES, load_settings
-from obsilord.llm.base import Message, ToolSpec
+from obsilord.llm.base import Message, ToolNote, ToolSpec
 from obsilord.llm.openai_compat import NO_TOOL, LocalClient, LocalLLMError, OpenAICompatServer
 from obsilord.look import LOOK_TOOL, SEARCH_IMAGE_TOOL
+from obsilord.memory.recall import RECALL_TOOL
 
 LOOK = LOOK_TOOL.name
 SEARCH = SEARCH_IMAGE_TOOL.name
+RECALL = RECALL_TOOL.name
 
 _MUG = (Message("user", "What am I holding?"), Message("assistant", "A red mug. Thrilling."))
 _CAT = (Message("user", "Look at my cat."), Message("assistant", "A fat grey cat, asleep on a chair."))
+_OWL = (
+    Message("user", "Look, what do you think of this?"),
+    Message(
+        "assistant",
+        "A lovely little owl. It suits the desk.",
+        tools=(ToolNote(LOOK, "What is the user showing?", "A small blue ceramic owl figurine on a wooden desk."),),
+    ),
+)
+_JOKE = (
+    Message("user", "Tell me a short joke."),
+    Message("assistant", "Why did the scarecrow win an award? He was outstanding in his field."),
+)
 
 
 @dataclass(frozen=True)
@@ -75,7 +93,23 @@ CASES: tuple[Case, ...] = (
     Case("What should I drink from it?", NO_TOOL, _MUG),
     Case("Why do cats sleep so much?", NO_TOOL, _CAT),
     Case("What did I just ask you?", NO_TOOL, _MUG),
+    Case("What color was it?", NO_TOOL, _OWL),
+    Case("What did you just say?", NO_TOOL, _JOKE),
+    Case("What did we talk about yesterday?", RECALL),
+    Case("Remember the figure I showed you last week? What was it?", RECALL),
+    Case("When did I say my dentist appointment was?", RECALL),
+    Case("I told you my cat's name a while ago. What is it?", RECALL),
+    Case("Did we ever talk about skiing?", RECALL),
 )
+
+
+def expected_for(case: Case, search: bool, recall: bool) -> str:
+    """The tool the case expects with the offered tools."""
+    if case.expected == SEARCH and not search:
+        return LOOK
+    if case.expected == RECALL and not recall:
+        return NO_TOOL
+    return case.expected
 
 
 @dataclass(frozen=True)
@@ -100,10 +134,11 @@ async def check(
     LocalLLMError when a request itself fails (server down, unknown model, no
     json_schema support); an unparsable router answer counts as "unusable"."""
     search = any(t.name == SEARCH for t in tools)
+    recall = any(t.name == RECALL for t in tools)
     results: list[Result] = []
     for _ in range(repeat):
         for case in cases:
-            expected = LOOK if case.expected == SEARCH and not search else case.expected
+            expected = expected_for(case, search, recall)
             history = [*case.history, Message("user", case.text)]
             t0 = time.perf_counter()
             as_text = False
@@ -117,10 +152,10 @@ async def check(
     return results
 
 
-async def _run(model: str, search: bool, repeat: int, mode: str) -> int:
+async def _run(model: str, search: bool, recall: bool, repeat: int, mode: str) -> int:
     settings = load_settings()
     server = OpenAICompatServer(settings.llm_local)
-    tools = [LOOK_TOOL, SEARCH_IMAGE_TOOL] if search else [LOOK_TOOL]
+    tools = [LOOK_TOOL, *([SEARCH_IMAGE_TOOL] if search else []), *([RECALL_TOOL] if recall else [])]
     try:
         try:
             resolved = model or await server.default_model()
@@ -149,7 +184,7 @@ def _report(results: list[Result]) -> None:
             context = " (follow-up)" if r.case.history else ""
             print(f"  expected {r.expected:<12} got {r.got:<12} {r.case.text!r}{context}")
     print("\nby expected tool:")
-    for name in (LOOK, SEARCH, NO_TOOL):
+    for name in (LOOK, SEARCH, RECALL, NO_TOOL):
         group = [r for r in results if r.expected == name]
         if group:
             ok = sum(r.got == r.expected for r in group)
@@ -171,11 +206,12 @@ def _report(results: list[Result]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m obsilord.llm.routecheck",
-        description="Score a local model as the camera tool router.",
+        description="Score a local model on picking the tools (camera and recall).",
     )
     parser.add_argument("--model", default="", help="model id (default: [llm_local] model, "
                         "or the first model the server lists)")
-    parser.add_argument("--no-search", action="store_true", help="offer look() only")
+    parser.add_argument("--no-search", action="store_true", help="do not offer search_image()")
+    parser.add_argument("--no-recall", action="store_true", help="do not offer recall()")
     parser.add_argument("--repeat", type=int, default=1, help="run the set N times (1 to 10)")
     parser.add_argument("--mode", choices=TOOL_MODES, default="auto",
                         help="native: tools declared; router: the routing request; "
@@ -183,7 +219,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not 1 <= args.repeat <= 10:
         parser.error("--repeat must be 1 to 10")
-    return asyncio.run(_run(args.model.strip(), not args.no_search, args.repeat, args.mode))
+    return asyncio.run(
+        _run(args.model.strip(), not args.no_search, not args.no_recall, args.repeat, args.mode)
+    )
 
 
 if __name__ == "__main__":

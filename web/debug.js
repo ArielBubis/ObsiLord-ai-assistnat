@@ -10,12 +10,32 @@
 // playback filters live, for tuning by ear. They start at the values from
 // /config/audio; copy the line shown into the [tts] section of config.toml
 // to keep them.
+// Memory tests (memory_checks.js): questions to check conversation memory
+// against the made-up history of [debug] demo_memory.
 
 import { STATES } from "./state.js";
 import {
   setState, setMouth, getMouth, getState, onStateChange, setIdleEnabled, clearMouthOverride,
 } from "./face.js";
 import { player, audioConfigReady } from "./ws.js";
+import { initMemoryChecks } from "./memory_checks.js";
+
+function initMemoryPanel(panel) {
+  const input = document.getElementById("chat-input");
+  initMemoryChecks(
+    { list: panel.querySelector("#debug-memory-list"), note: panel.querySelector("#debug-memory-note") },
+    async () => {
+      const resp = await fetch("/debug/memory-checks", { cache: "no-store" });
+      if (resp.status === 404) return null;
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      return resp.json();
+    },
+    (question) => {
+      input.value = question;
+      input.focus();
+    },
+  );
+}
 
 function formatDb(v) {
   return `${v > 0 ? "+" : ""}${v} dB`;
@@ -95,4 +115,5 @@ export function initDebug(panel) {
   sliderValue.textContent = String(getMouth());
   markActive(getState());
   initEqSliders(panel);
+  initMemoryPanel(panel);
 }

@@ -51,6 +51,21 @@ again after every reconnect) applies the choice quietly. GET /config/llm lists
 both providers and the local server's models. The local server address is only
 read from config.
 
+Memory ([memory], memory/): every finished turn is stored in a local SQLite
+file. On connect the page gets {"type": "conversation", "id", "title",
+"turns", "last_at", "resumed", "reason"} (see conversation_message; it is
+sent again after each stored turn, reason "saved"): the last web conversation is continued (its
+last history_turns turns loaded) when its last turn is at most
+resume_minutes old, otherwise a new one starts (its row is written with the
+first turn). {"type": "conversation", "id": "<id>" | null} continues another
+conversation or starts a new one (refused while a turn or recording runs).
+GET /conversations lists them for the Settings panel. recall() is declared
+for the local model only. The store is opened on first use; if it cannot be
+opened, memory is off for the session and everything else works. With
+[debug] demo_memory the store is a separate demo file, deleted and seeded
+with made-up history at startup, and GET /debug/memory-checks lists what to
+ask (404 otherwise).
+
 /ws accepts only this app's own page as Origin (or no Origin header), so
 another site open in the browser cannot drive the socket. Every route answers
 only to Host 127.0.0.1 or localhost (TrustedHostMiddleware), against DNS
@@ -62,9 +77,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Coroutine
+from typing import Any, AsyncIterator, Awaitable, Callable, Coroutine, TypeVar
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
@@ -72,13 +89,18 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from obsilord import promptlog
-from obsilord.config import Settings
+from obsilord.config import Settings, memory_db_path
 from obsilord.face_character import check_character
-from obsilord.llm.base import LLMClient, Message
+from obsilord.llm.base import LLMClient, Message, ToolNote
 from obsilord.llm.openai_compat import LocalLLMError, OpenAICompatServer
 from obsilord.llm_switch import GEMINI, LOCAL, clean_model, switch_notice
 from obsilord.look import SEARCH_IMAGE_TOOL, ImageSearch, LookTool
+from obsilord.memory.base import ConversationInfo, MemoryStore, TurnRecord
+from obsilord.memory.demo import demo_checks, reset_demo_db, seed_demo
+from obsilord.memory.recall import RecallTool, notes_to_store
+from obsilord.memory.store import SqliteStore
 from obsilord.pipeline import MSG_NOT_CAUGHT, run_text_turn, run_voice_turn
+from obsilord.tools import Tool
 from obsilord.stt.base import SAMPLE_RATE as STT_SAMPLE_RATE
 from obsilord.stt.base import STTClient, pcm16_bytes_for_ms
 from obsilord.tts.base import TTSClient
@@ -101,6 +123,14 @@ MSG_NO_VOICE = "Voice input is not available."
 MSG_UNKNOWN = "Unknown message type."
 MSG_UNEXPECTED_AUDIO = "Unexpected audio frame."
 MSG_NOT_RECORDING = "No recording in progress."
+MSG_CONVERSATION_BUSY = "Wait for the current reply before switching the conversation."
+MSG_MEMORY_OFF = "Conversation memory is off."
+MSG_UNKNOWN_CONVERSATION = "Unknown conversation."
+
+CHANNEL = "web"
+_CONVERSATION_ID = re.compile(r"[0-9a-f]{32}")
+
+T = TypeVar("T")
 
 # Extra time after max_utterance_s before the server closes a recording that
 # never got its audio_end.
@@ -307,6 +337,45 @@ def _default_looker(settings: Settings, usage: UsageTracker | None = None) -> Lo
     return looker
 
 
+def _memory_from_settings(settings: Settings) -> SqliteStore | None:
+    """The conversation store from [memory], not opened yet. With [debug]
+    demo_memory: the demo file, deleted here so it is seeded fresh."""
+    demo = settings.debug.demo_memory
+    if not settings.memory.enabled and not demo:
+        log.info("memory: off ([memory] enabled = false)")
+        return None
+    path = memory_db_path(settings)
+    if demo:
+        reset_demo_db(path)
+        log.warning("memory: demo memory on, made-up history in %s (the real store is not used)", path)
+    return SqliteStore(path)
+
+
+# Looked up at call time, so tests can turn the default store off.
+_default_memory = _memory_from_settings
+
+
+def turn_tools(provider: str, recall: T | None) -> list[T]:
+    """The tools besides the camera for a turn: recall for the local model
+    only, so earlier conversations never go to a cloud provider through it."""
+    return [recall] if provider == LOCAL and recall is not None else []
+
+
+CONVERSATION_REASONS = ("start", "resume", "switch", "new", "saved")
+
+
+def conversation_message(info: ConversationInfo | None, reason: str) -> dict[str, Any]:
+    """Which conversation the connection is in. reason: start (connected,
+    nothing recent to continue), resume (continued on connect), switch (the
+    page picked one), new (the page started one), saved (a turn was stored)."""
+    assert reason in CONVERSATION_REASONS
+    msg: dict[str, Any] = {"type": "conversation", "id": None, "title": "", "turns": 0, "last_at": None}
+    if info is not None:
+        msg.update(id=info.id, title=info.title, turns=info.turns, last_at=info.last_at)
+    msg.update(resumed=reason == "resume", reason=reason)
+    return msg
+
+
 def create_app(
     settings: Settings,
     llm: LLMClient | None = None,
@@ -315,9 +384,11 @@ def create_app(
     stt: STTClient | None = None,
     looker: LookTool | None = None,
     local: OpenAICompatServer | None = None,
+    memory: MemoryStore | None = None,
 ) -> FastAPI:
-    """Build the app. Pass llm, usage, tts, stt, looker, and local to inject
-    fakes (tests). llm is the Gemini client; local the local LLM server.
+    """Build the app. Pass llm, usage, tts, stt, looker, local, and memory to
+    inject fakes (tests). llm is the Gemini client; local the local LLM
+    server; memory the conversation store (None builds it from [memory]).
 
     tts=None loads the voice from settings (nothing is loaded when [tts] voice
     is empty). stt=None loads the STT model from settings (nothing is loaded
@@ -348,6 +419,8 @@ def create_app(
         looker = _default_looker(settings, usage)
     if local is None:
         local = OpenAICompatServer(settings.llm_local)
+    if memory is None:
+        memory = _default_memory(settings)
     origins = allowed_origins(settings)
     log.info(
         "chat LLM: pages start on %s (Gemini %s, local server %s)",
@@ -363,6 +436,37 @@ def create_app(
             aclose = getattr(client, "aclose", None)
             if aclose is not None:
                 await aclose()
+        if memory_state["ready"] is not None:
+            await memory_state["ready"].close()
+
+    # The store is opened (and pruned, or seeded in demo mode) on first use,
+    # under a lock. A failure turns memory off for the session.
+    memory_state: dict[str, Any] = {"ready": None, "failed": memory is None, "demo_at": None}
+    memory_lock = asyncio.Lock()
+
+    async def get_memory() -> MemoryStore | None:
+        if memory_state["ready"] is not None or memory_state["failed"]:
+            return memory_state["ready"]
+        async with memory_lock:
+            if memory_state["ready"] is not None or memory_state["failed"]:
+                return memory_state["ready"]
+            assert memory is not None
+            try:
+                await memory.open()
+                if settings.debug.demo_memory:
+                    now = time.time()
+                    await seed_demo(memory, now)
+                    memory_state["demo_at"] = now
+                else:
+                    pruned = await memory.prune(settings.memory.retention_days)
+                    if pruned:
+                        log.info("memory: deleted %d old conversations", pruned)
+            except Exception as exc:  # noqa: BLE001 - memory is optional
+                log.warning("memory: store could not be opened (%s), memory is off", type(exc).__name__)
+                memory_state["failed"] = True
+                return None
+            memory_state["ready"] = memory
+            return memory
 
     app = FastAPI(
         title="Obsi-Lord", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
@@ -455,6 +559,32 @@ def create_app(
             },
         }
 
+    @app.get("/conversations", include_in_schema=False)
+    async def conversations(limit: int = 0) -> dict[str, Any]:
+        # Titles and dates for the Settings list, newest first. Local page only
+        # (TrustedHost, 127.0.0.1); no message text besides the first line.
+        store = await get_memory()
+        if store is None:
+            return {"enabled": False, "conversations": []}
+        cap = settings.memory.list_limit
+        infos = await store.list_conversations(min(limit, cap) if limit > 0 else cap)
+        return {
+            "enabled": True,
+            "conversations": [
+                {"id": i.id, "title": i.title, "started_at": i.started_at, "last_at": i.last_at, "turns": i.turns}
+                for i in infos
+            ],
+        }
+
+    @app.get("/debug/memory-checks", include_in_schema=False)
+    async def memory_checks() -> dict[str, Any]:
+        if not settings.debug.demo_memory:
+            raise HTTPException(status_code=404)
+        await get_memory()
+        if memory_state["demo_at"] is None:
+            raise HTTPException(status_code=404)
+        return {"checks": demo_checks(memory_state["demo_at"])}
+
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
         origin = websocket.headers.get("origin")
@@ -489,6 +619,15 @@ def create_app(
         # Set by the page's Snapshots switch ({"type": "snapshots", "on": true}).
         # While off, no frame or crop is sent to the page.
         snapshots_on = False
+        # Conversation memory: the store (None when off), this connection's
+        # conversation (None until its first turn is stored), and recall().
+        store = await get_memory()
+        conv_id: str | None = None
+        recall_tool: Tool | None = None
+        if store is not None and settings.memory.recall:
+            recall_tool = RecallTool(
+                store, settings.memory.recall_limit, settings.memory.recall_max_chars
+            ).tool()
 
         async def send(msg: dict[str, Any] | bytes) -> None:
             if isinstance(msg, dict) and msg.get("type") == "snapshot" and not snapshots_on:
@@ -607,6 +746,59 @@ def create_app(
             turn = asyncio.create_task(coro)
             turn.add_done_callback(on_turn_done)
 
+        def store_turn(
+            turn_provider: str, llm: LLMClient
+        ) -> Callable[[str, str, tuple[ToolNote, ...]], Awaitable[None]] | None:
+            """The pipeline's on_turn: writes the finished turn, creating the
+            conversation row with the first one."""
+            if store is None:
+                return None
+
+            async def on_turn(user: str, reply: str, notes: tuple[ToolNote, ...]) -> None:
+                nonlocal conv_id
+                if conv_id is None:
+                    conv_id = await store.new_conversation(CHANNEL)
+                record = TurnRecord(user, reply, notes_to_store(notes), turn_provider, llm.model, time.time())
+                await store.add_turn(conv_id, record)
+                # The page keeps the id (a reconnect returns to it) and the count.
+                info = await store.info(conv_id)
+                try:
+                    await send(conversation_message(info, "saved"))
+                except Exception as exc:  # noqa: BLE001 - the turn is stored; the page is gone
+                    log.debug("conversation saved message: %s", type(exc).__name__)
+
+            return on_turn
+
+        async def handle_conversation(payload: dict[str, Any]) -> None:
+            async with recording_lock:
+                await _handle_conversation_locked(payload)
+
+        async def _handle_conversation_locked(payload: dict[str, Any]) -> None:
+            nonlocal conv_id
+            if store is None:
+                await send({"type": "error", "message": MSG_MEMORY_OFF})
+                return
+            if recording is not None or turn_running():
+                await send({"type": "error", "message": MSG_CONVERSATION_BUSY})
+                return
+            wanted = payload.get("id")
+            if wanted is None:
+                conv_id = None
+                history.clear()
+                log.info("conversation: new")
+                await send(conversation_message(None, "new"))
+                return
+            info = None
+            if isinstance(wanted, str) and _CONVERSATION_ID.fullmatch(wanted):
+                info = await store.info(wanted)
+            if info is None:
+                await send({"type": "error", "message": MSG_UNKNOWN_CONVERSATION})
+                return
+            conv_id = info.id
+            history[:] = await store.last_turns(info.id, settings.llm.history_turns)
+            log.info("conversation: continued one with %d turns", info.turns)
+            await send(conversation_message(info, "switch"))
+
         async def handle_text(payload: dict[str, Any]) -> None:
             async with recording_lock:
                 await _handle_text_locked(payload)
@@ -642,6 +834,8 @@ def create_app(
                     turn_timeout_s=settings.llm.turn_timeout_s,
                     tts=app.state.tts,
                     looker=app.state.looker,
+                    extra_tools=turn_tools(provider, recall_tool),
+                    on_turn=store_turn(provider, llm),
                 )
             )
 
@@ -766,10 +960,35 @@ def create_app(
                     turn_timeout_s=settings.llm.turn_timeout_s,
                     tts=app.state.tts,
                     looker=app.state.looker,
+                    extra_tools=turn_tools(provider, recall_tool),
+                    on_turn=store_turn(provider, llm),
                 )
             )
 
+        async def greet() -> None:
+            """Continue the last conversation if it is recent, and tell the page
+            which conversation this connection is in."""
+            nonlocal conv_id, store
+            if store is None:
+                return
+            info = None
+            try:
+                if settings.memory.resume_minutes > 0:
+                    cid = await store.latest(CHANNEL, settings.memory.resume_minutes * 60)
+                    info = await store.info(cid) if cid is not None else None
+                if info is not None:
+                    history[:] = await store.last_turns(info.id, settings.llm.history_turns)
+                    conv_id = info.id
+                    log.info("conversation: resumed one with %d turns", info.turns)
+            except Exception as exc:  # noqa: BLE001 - memory is optional
+                log.warning("memory: could not resume (%s), memory off for this page", type(exc).__name__)
+                store = None
+                history.clear()
+                return
+            await send(conversation_message(info, "resume" if info is not None else "start"))
+
         try:
+            await greet()
             while True:
                 message = await websocket.receive()
                 if message["type"] == "websocket.disconnect":
@@ -795,6 +1014,8 @@ def create_app(
                     snapshots_on = payload.get("on") is True
                 elif kind == "llm":
                     await handle_llm(payload)
+                elif kind == "conversation":
+                    await handle_conversation(payload)
                 elif kind == "audio_start":
                     await handle_audio_start()
                 elif kind == "audio_end":

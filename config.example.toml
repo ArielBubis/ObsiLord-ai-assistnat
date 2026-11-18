@@ -202,9 +202,34 @@ character = ""
 [audio]
 push_to_talk_key = "Space"
 
+[memory]
+# Optional section. Every finished turn (your text, the reply, and tool results
+# as text) is kept in one local SQLite file. Camera frames are never stored.
+# The file is gitignored and stays on this computer.
+enabled = true
+db_path = "data/memory.sqlite3"
+# recall(): the local model can search earlier conversations. Offered only to
+# the local model, never to Gemini.
+recall = true
+recall_limit = 5
+recall_max_chars = 1500
+# A page reload continues the last conversation if its last turn is at most
+# this many minutes old (0: always start fresh). Older ones can be continued
+# from Settings, Conversations.
+resume_minutes = 30
+# Delete conversations older than this many days at startup. 0 keeps all.
+retention_days = 0
+# Conversations shown in the Settings list.
+list_limit = 50
+
 [debug]
 # Optional section. true prints every Gemini and llama-server request and reply
 # to the console: system prompt, conversation, tool calls and results, vision
 # prompt and answer, token counts and timings. Camera frames show as their size
 # only. Leave false in normal use: it puts your conversation in the log.
 log_prompts = false
+# true loads made-up history for testing memory: a separate file
+# (data/memory-demo.sqlite3) is deleted and filled again at every start, and the
+# real memory file is not used. Open the page with ?debug=1 for the list of
+# questions to try.
+demo_memory = false

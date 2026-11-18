@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fakes import FakeLLM, FakeLooker, FakeToolLLM, FakeTTS
-from obsilord.llm.base import Done, Message, TextDelta, ToolCall, ToolResult, UsageUpdate
+from obsilord.llm.base import Done, Message, TextDelta, ToolCall, ToolNote, ToolResult, UsageUpdate
 from obsilord.look import LOOK_TOOL, MSG_ONE_LOOK
 from obsilord.pipeline import MSG_CAP, MSG_LLM_FAILED, MSG_TIMEOUT, run_text_turn
 from obsilord.usage import UsageTracker
@@ -103,9 +103,17 @@ def test_look_then_follow_up_text_only(tmp_path: Path) -> None:
     assert second.tool_results == [ToolResult(call, {"output": "A red mug."})]
     assert second.tool_results[0].call.raw == ["raw parts"]
     assert second.allow_tool_calls is False
-    # Both requests see the same history: the tool exchange is not stored in it.
+    # Both requests see the same history: the tool exchange of this turn is
+    # sent as tool_results, not in it. Afterwards the reply carries the note.
     assert first.history == second.history == [Message("user", "hello")]
-    assert history == [Message("user", "hello"), Message("assistant", "You are holding a red mug.")]
+    assert history == [
+        Message("user", "hello"),
+        Message(
+            "assistant",
+            "You are holding a red mug.",
+            tools=(ToolNote("look", "What am I holding?", "A red mug."),),
+        ),
+    ]
     # One usage line per request.
     assert [line["total"] for line in _log_lines(tmp_path)] == [12, 26]
     assert usage.today_total == 38

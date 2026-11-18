@@ -1,4 +1,5 @@
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -788,3 +789,56 @@ def test_llm_local_accepts_a_lan_server_and_provider_local(tmp_path: Path) -> No
     path.write_text(text, encoding="utf-8")
     s = _load(path, tmp_path)
     assert s.llm.provider == "local" and s.llm_local.base_url == "http://192.168.1.20:11434/v1"
+
+
+# --- [memory] and [debug] demo_memory ---------------------------------------
+
+
+def test_memory_defaults(tmp_path: Path) -> None:
+    s = load_settings(EXAMPLE, env_path=tmp_path / "missing.env", environ={})
+    m = s.memory
+    assert m.enabled and m.recall
+    assert m.db_path == "data/memory.sqlite3"
+    assert (m.recall_limit, m.recall_max_chars) == (5, 1500)
+    assert (m.resume_minutes, m.retention_days, m.list_limit) == (30, 0, 50)
+    assert s.debug.demo_memory is False
+
+
+def test_memory_section_is_optional(tmp_path: Path) -> None:
+    text = EXAMPLE.read_text(encoding="utf-8")
+    start = text.index("[memory]")
+    end = text.index("[", start + 1)
+    path = tmp_path / "config.toml"
+    path.write_text(text[:start] + text[end:], encoding="utf-8")
+    s = load_settings(path, env_path=tmp_path / "missing.env", environ={})
+    assert s.memory.enabled and s.memory.db_path == "data/memory.sqlite3"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "match"),
+    [
+        ("recall_limit = 5", "recall_limit = 0", "recall_limit"),
+        ("recall_limit = 5", "recall_limit = 51", "recall_limit"),
+        ("recall_max_chars = 1500", "recall_max_chars = 100", "recall_max_chars"),
+        ("resume_minutes = 30", "resume_minutes = -1", "resume_minutes"),
+        ("retention_days = 0", "retention_days = -5", "retention_days"),
+        ("list_limit = 50", "list_limit = 0", "list_limit"),
+        ('db_path = "data/memory.sqlite3"', 'db_path = ""', "db_path"),
+        ('db_path = "data/memory.sqlite3"', 'db_path = "data/memory-demo.sqlite3"', "db_path"),
+    ],
+)
+def test_memory_rejects_bad_values(tmp_path: Path, old: str, new: str, match: str) -> None:
+    path = _write_replaced(tmp_path, old, new)
+    with pytest.raises(ValueError, match=match):
+        load_settings(path, env_path=tmp_path / "missing.env", environ={})
+
+
+def test_memory_db_path_resolves_against_the_repo(tmp_path: Path) -> None:
+    from obsilord.config import DEMO_DB_PATH, memory_db_path
+
+    s = load_settings(EXAMPLE, env_path=tmp_path / "missing.env", environ={})
+    assert memory_db_path(s) == REPO_ROOT / "data" / "memory.sqlite3"
+    demo = replace(s, debug=replace(s.debug, demo_memory=True))
+    assert memory_db_path(demo) == REPO_ROOT / DEMO_DB_PATH
+    absolute = replace(s, memory=replace(s.memory, db_path=str(tmp_path / "m.sqlite3")))
+    assert memory_db_path(absolute) == tmp_path / "m.sqlite3"

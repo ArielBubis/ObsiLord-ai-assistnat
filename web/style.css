@@ -484,7 +484,8 @@ body[data-status="thinking"] .scan-line {
 
 /* Small HUD buttons, styled like the debug panel's. */
 #llm-notice-close,
-#llm-refresh {
+#llm-refresh,
+#conv-new {
   flex: none;
   padding: 2px 8px;
   background: var(--void);
@@ -497,20 +498,71 @@ body[data-status="thinking"] .scan-line {
 }
 
 #llm-notice-close:hover,
-#llm-refresh:hover:not(:disabled) {
+#llm-refresh:hover:not(:disabled),
+#conv-new:hover:not(:disabled) {
   background: var(--cyan);
   color: var(--border-black);
 }
 
 #llm-notice-close:focus-visible,
-#llm-refresh:focus-visible {
+#llm-refresh:focus-visible,
+#conv-new:focus-visible,
+#conv-list button:focus-visible {
   outline: 2px solid var(--signal);
   outline-offset: 2px;
 }
 
-#llm-refresh:disabled {
+#llm-refresh:disabled,
+#conv-new:disabled {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+#conv-group[hidden] {
+  display: none;
+}
+
+/* Stored conversations, newest first; scrolls after a dozen. */
+#conv-list {
+  display: grid;
+  gap: 2px;
+  max-height: 220px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+#conv-list button {
+  width: 100%;
+  padding: 3px 6px;
+  background: none;
+  color: var(--text);
+  border: 1px solid transparent;
+  font: 400 11px var(--font-mono);
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+#conv-list button:hover:not(:disabled) {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+#conv-list button.current {
+  border-color: var(--signal);
+  color: var(--signal);
+  cursor: default;
+}
+
+#conv-list button:disabled:not(.current) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+#conv-note:empty {
+  display: none;
 }
 
 #llm-notice-lines {
@@ -768,6 +820,55 @@ body[data-status="thinking"] .scan-line {
   color: var(--text);
   font-weight: 400;
   text-transform: none;
+}
+
+/* Memory tests: questions to ask against the demo history. */
+#debug-memory {
+  width: 100%;
+}
+
+#debug-memory p {
+  margin: 0 0 4px;
+}
+
+#debug-memory-note {
+  color: var(--text);
+  font-weight: 400;
+  text-transform: none;
+}
+
+#debug-memory .memory-group-title {
+  margin-top: 8px;
+  color: var(--cyan);
+}
+
+#debug-memory ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  text-transform: none;
+}
+
+#debug-memory li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  align-items: baseline;
+}
+
+#debug-memory li button {
+  grid-row: span 2;
+  padding: 1px 6px;
+}
+
+#debug-memory .memory-q {
+  color: var(--text);
+}
+
+#debug-memory .memory-e {
+  font-weight: 400;
 }
 
 /* Reduced motion (on Windows this follows "Animation effects"): no sweep;

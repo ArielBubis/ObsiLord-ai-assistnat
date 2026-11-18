@@ -58,9 +58,18 @@ the cap. Each request is recorded on its own:
   the client's prompt_overhead_chars, i.e. the system prompt, + the tool
   results) / 4 for input and max_output_tokens for output.
 
+Other tools (extra_tools, for example recall) are declared after the camera
+tools and run in the same step, without state looking (looking is sent only
+when a camera tool is called). Each extra tool runs at most once per turn
+(MSG_ONE_CALL for more); an exception becomes MSG_TOOL_FAILED.
+
 History is updated once the LLM has finished with a non-empty reply (before
 speech ends), so failed LLM turns leave it unchanged. It holds the user text
-and the reply text only, never tool calls or results.
+and the reply text, and the reply carries ToolNotes: each tool call of the
+turn with its result as one capped line, so a later turn can refer to it.
+on_turn (if given) is then awaited with the user text, the reply and the
+notes, to write the conversation store. Its errors are logged (type name
+only) and never end the turn.
 """
 
 from __future__ import annotations
@@ -72,7 +81,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable, Sequence
 
 from obsilord.llm.base import (
     Done,
@@ -80,12 +89,15 @@ from obsilord.llm.base import (
     Message,
     TextDelta,
     ToolCall,
+    ToolNote,
     ToolResult,
     UsageUpdate,
+    note_from_result,
 )
 from obsilord.look import MSG_ONE_LOOK, MSG_SEARCH_OFF, SEARCH_IMAGE_TOOL, LookTool
 from obsilord.sentences import SentenceSplitter
 from obsilord.stt.base import SAMPLE_RATE, STTClient, pcm16_duration_ms
+from obsilord.tools import Tool
 from obsilord.tts.base import TTSClient
 from obsilord.tts.text import clean_for_speech
 from obsilord.usage import CapExceeded, UsageTracker
@@ -94,6 +106,11 @@ log = logging.getLogger(__name__)
 
 # Sends one message: a dict goes out as a JSON text frame, bytes as a binary frame.
 Send = Callable[[dict[str, Any] | bytes], Awaitable[None]]
+# Called once per finished turn with (user text, reply, tool notes).
+OnTurn = Callable[[str, str, tuple[ToolNote, ...]], Awaitable[None]]
+
+MSG_ONE_CALL = "Only one call to this tool per turn."
+MSG_TOOL_FAILED = "The tool failed."
 
 MSG_CAP = "Daily token cap reached. Try again tomorrow."
 MSG_LLM_FAILED = "LLM request failed."
@@ -334,11 +351,16 @@ async def run_text_turn(
     turn_timeout_s: float = 60.0,
     tts: TTSClient | None = None,
     looker: LookTool | None = None,
+    *,
+    extra_tools: Sequence[Tool] = (),
+    on_turn: OnTurn | None = None,
 ) -> str | None:
     """Run one turn. Returns the reply text, or None if the turn failed.
 
     tts: speak the reply sentence by sentence; None keeps text-only behavior.
-    looker: declares look() and runs it; None offers no tools.
+    looker: declares look() and runs it; None offers no camera tools.
+    extra_tools: other tools to declare (see the module docstring).
+    on_turn: awaited once the turn has a reply, to store it.
 
     Never raises except CancelledError. Unexpected errors are logged (type name
     only) and reported to the client as a generic error, best effort.
@@ -359,6 +381,8 @@ async def run_text_turn(
             looker,
             t0=t0,
             deadline=deadline,
+            extra_tools=extra_tools,
+            on_turn=on_turn,
         )
     except asyncio.CancelledError:
         raise
@@ -383,6 +407,9 @@ async def run_voice_turn(
     turn_timeout_s: float = 60.0,
     tts: TTSClient | None = None,
     looker: LookTool | None = None,
+    *,
+    extra_tools: Sequence[Tool] = (),
+    on_turn: OnTurn | None = None,
 ) -> str | None:
     """Run one spoken turn: STT, then the text turn body with the transcript.
 
@@ -407,6 +434,8 @@ async def run_voice_turn(
             turn_timeout_s,
             tts,
             looker,
+            extra_tools=extra_tools,
+            on_turn=on_turn,
         )
     except asyncio.CancelledError:
         raise
@@ -463,6 +492,9 @@ async def _run_voice_turn(
     turn_timeout_s: float,
     tts: TTSClient | None,
     looker: LookTool | None,
+    *,
+    extra_tools: Sequence[Tool] = (),
+    on_turn: OnTurn | None = None,
 ) -> str | None:
     t0 = time.monotonic()
     # One deadline for STT and the rest of the turn.
@@ -523,6 +555,8 @@ async def _run_voice_turn(
         t0=t0,
         deadline=deadline,
         voice=_VoiceTiming(stt_ms, audio_ms),
+        extra_tools=extra_tools,
+        on_turn=on_turn,
     )
 
 
@@ -540,6 +574,8 @@ async def _run_turn(
     t0: float,
     deadline: float,
     voice: _VoiceTiming | None = None,
+    extra_tools: Sequence[Tool] = (),
+    on_turn: OnTurn | None = None,
 ) -> str | None:
     """The shared turn body after state thinking has been sent.
 
@@ -551,8 +587,13 @@ async def _run_turn(
         return None
 
     messages = [*history, Message(role="user", text=text)]
-    tools = list(looker.tools) if looker is not None else []
+    camera_tools = list(looker.tools) if looker is not None else []
+    camera_names = {tool.name for tool in camera_tools}
+    extra = {t.spec.name: t for t in extra_tools if t.spec.name not in camera_names}
+    tools = [*camera_tools, *(t.spec for t in extra.values())]
     tool_names = {tool.name for tool in tools}
+    turn_results: list[ToolResult] = []
+    finished: tuple[str, tuple[ToolNote, ...]] | None = None
 
     async def snapshot(kind: str, jpeg: bytes) -> None:
         # The frame (kind "camera") or the crop about to be uploaded ("search")
@@ -655,36 +696,50 @@ async def _run_turn(
                     st.tokens_thinking += ru.done.tokens_thinking
         return error
 
-    async def run_tools(lookup: LookTool) -> list[ToolResult]:
+    async def run_extra(call: ToolCall, used: set[str]) -> dict[str, Any]:
+        if call.name in used:
+            return {"error": MSG_ONE_CALL}
+        used.add(call.name)
+        try:
+            return await extra[call.name].run(dict(call.args))
+        except Exception as exc:  # noqa: BLE001 - a tool error is the model's to explain
+            log.warning("tool %s failed: %s", call.name, type(exc).__name__)
+            return {"error": MSG_TOOL_FAILED}
+
+    async def run_tools() -> list[ToolResult]:
         """Answer every call of the first request; only the first camera tool
-        call (look or search_image) runs."""
+        call (look or search_image) runs, and each other tool once."""
         nonlocal look_ms
         # Speech from before the call (including a sentence the splitter still
-        # holds) goes out first, so no speaking state lands in the look.
+        # holds) goes out first, so no speaking state lands in the tool step.
         rest = splitter.flush()
         if rest:
             enqueue([rest])
         await _drain_speech(queue, worker)
-        await send({"type": "state", "state": "looking"})
+        if any(call.name in camera_names for call in calls):
+            await send({"type": "state", "state": "looking"})
         sp.speaking_sent = False
         t_look = time.monotonic()
         results: list[ToolResult] = []
         looked = False
+        used: set[str] = set()
         for call in calls:
             if call.name not in tool_names:
                 # The model may ask for the search although it was not offered.
                 off = call.name == SEARCH_IMAGE_TOOL.name
                 message = MSG_SEARCH_OFF if off else f"Unknown tool: {call.name}."
                 results.append(ToolResult(call, {"error": message}))
-            elif looked:
+            elif call.name in extra:
+                results.append(ToolResult(call, await run_extra(call, used)))
+            elif looked or looker is None:
                 results.append(ToolResult(call, {"error": MSG_ONE_LOOK}))
             elif call.name == SEARCH_IMAGE_TOOL.name:
                 looked = True
-                response = await lookup.search_image(call.args.get("target"), snapshot)
+                response = await looker.search_image(call.args.get("target"), snapshot)
                 results.append(ToolResult(call, response))
             else:
                 looked = True
-                response = await lookup.look(call.args.get("question"), snapshot)
+                response = await looker.look(call.args.get("question"), snapshot)
                 results.append(ToolResult(call, response))
         look_ms = int((time.monotonic() - t_look) * 1000)
         await send({"type": "state", "state": "thinking"})
@@ -693,12 +748,12 @@ async def _run_turn(
     try:
         async with asyncio.timeout_at(deadline):
             failed = await stream_once(None)
-            if failed is None and calls and looker is not None:
-                results = await run_tools(looker)
+            if failed is None and calls and tools:
+                turn_results = await run_tools()
                 if _cap_reached(usage, llm):
                     capped = True
                 else:
-                    failed = await stream_once(results)
+                    failed = await stream_once(turn_results)
 
             if failed is None and not capped:
                 rest = splitter.flush()
@@ -709,9 +764,11 @@ async def _run_turn(
                     {"type": "transcript", "role": "assistant", "text": reply, "final": True}
                 )
                 if reply.strip():
+                    notes = tuple(note_from_result(r) for r in turn_results)
                     history.append(Message(role="user", text=text))
-                    history.append(Message(role="assistant", text=reply))
+                    history.append(Message(role="assistant", text=reply, tools=notes))
                     trim_history(history, history_turns)
+                    finished = (reply, notes)
                 else:
                     log.warning("turn: the model gave no text (%d requests)", st.requests)
                 if worker is not None:
@@ -722,6 +779,14 @@ async def _run_turn(
     finally:
         # No binary frame may follow the idle sent below or by the caller.
         await _stop_worker(worker)
+
+    if finished is not None and on_turn is not None:
+        # The turn is in history, so it is stored too (even if speech then
+        # timed out). Never ends the turn.
+        try:
+            await on_turn(text, *finished)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("turn not stored: %s", type(exc).__name__)
 
     total_ms = int((time.monotonic() - t0) * 1000)
     if timed_out:

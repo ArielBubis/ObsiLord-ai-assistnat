@@ -858,10 +858,22 @@ def test_routecheck_cases_cover_every_choice() -> None:
     from obsilord.llm.routecheck import CASES
 
     expected = {c.expected for c in CASES}
-    assert expected == {"look", "search_image", NO_TOOL}
+    assert expected == {"look", "search_image", "recall", NO_TOOL}
     assert any(c.history for c in CASES if c.expected == "look")
     assert any(c.history for c in CASES if c.expected == NO_TOOL)
+    # A follow-up answered by an earlier tool result needs no new call.
+    assert any(m.tools for c in CASES if c.expected == NO_TOOL for m in c.history)
     assert len({c.text for c in CASES}) == len(CASES)
+
+
+def test_routecheck_recall_cases_expect_none_without_recall() -> None:
+    from obsilord.llm.routecheck import CASES, expected_for
+
+    recall_case = next(c for c in CASES if c.expected == "recall")
+    assert expected_for(recall_case, search=True, recall=True) == "recall"
+    assert expected_for(recall_case, search=True, recall=False) == NO_TOOL
+    search_case = next(c for c in CASES if c.expected == "search_image")
+    assert expected_for(search_case, search=False, recall=True) == "look"
 
 
 def test_routecheck_report(capsys: pytest.CaptureFixture[str]) -> None:
