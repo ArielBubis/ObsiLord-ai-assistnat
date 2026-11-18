@@ -29,8 +29,9 @@ class DemoTurn:
 
 @dataclass(frozen=True)
 class DemoCheck:
-    """kind: recall (the answer needs recall), recall-none (recall finds
-    nothing), inline, tool-note, resume, continue (no recall needed).
+    """kind: recall (the answer needs recall), recall-date (recall by date;
+    "{day}" in the question becomes e.g. "5th of November"), recall-none
+    (recall finds nothing), inline, tool-note, resume, continue (no recall).
     search: keywords a model would pass to recall, with expect_in a text the
     top hit must hold (both checked by the tests); None for other kinds."""
 
@@ -131,6 +132,11 @@ DEMO_CONVERSATIONS: tuple[DemoConversation, ...] = (
                 search="cat",
                 expect_in="pita",
             ),
+            DemoCheck(
+                "What did we talk about on the {day}?",
+                "Your cat Pita hiding under the bed, and that she hates the vacuum.",
+                kind="recall-date",
+            ),
         ),
     ),
     DemoConversation(
@@ -218,15 +224,23 @@ def reset_demo_db(path: Path) -> None:
         Path(f"{path}{suffix}").unlink(missing_ok=True)
 
 
+def _ordinal(n: int) -> str:
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 def demo_checks(now: float) -> list[dict[str, Any]]:
     """The debug panel's list: per demo conversation its date and label, then
     the checks that are not tied to one date."""
     out: list[dict[str, Any]] = []
     for conv in DEMO_CONVERSATIONS:
-        date = f"{datetime.fromtimestamp(when(conv, now)):%Y-%m-%d}"
+        at = datetime.fromtimestamp(when(conv, now))
+        date = f"{at:%Y-%m-%d}"
+        day = f"{_ordinal(at.day)} of {at:%B}"
         for check in conv.checks:
+            question = check.question.replace("{day}", day)
             out.append(
-                {"date": date, "label": conv.label, "question": check.question, "expected": check.expected, "kind": check.kind}
+                {"date": date, "label": conv.label, "question": question, "expected": check.expected, "kind": check.kind}
             )
     for check in EXTRA_CHECKS:
         out.append({"date": "", "label": "any time", "question": check.question, "expected": check.expected, "kind": check.kind})

@@ -47,8 +47,9 @@ class Hit:
 
 
 class SearchSource(Protocol):
+    # since/until: unix seconds, since inclusive, until exclusive.
     async def search(
-        self, query: str, limit: int, days_back: int | None = None, now: float | None = None
+        self, query: str, limit: int, since: float | None = None, until: float | None = None
     ) -> list[Hit]: ...
 
 

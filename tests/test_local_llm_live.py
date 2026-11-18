@@ -19,7 +19,7 @@ from obsilord.config import load_settings
 from obsilord.llm.base import Done, Message, TextDelta, ToolCall, ToolNote, ToolResult
 from obsilord.llm.openai_compat import OpenAICompatServer
 from obsilord.look import LOOK_TOOL, SEARCH_IMAGE_TOOL
-from obsilord.memory.demo import seed_demo
+from obsilord.memory.demo import demo_checks, seed_demo
 from obsilord.memory.recall import RECALL_TOOL, RecallTool
 from obsilord.memory.store import SqliteStore
 
@@ -92,6 +92,40 @@ def test_earlier_tool_result_answers_a_follow_up_live(mode: str) -> None:
     print(f"\n{mode}: {answer!r} calls {[e for e in events if isinstance(e, ToolCall)]}")
     assert not any(isinstance(e, ToolCall) for e in events), "it looked again instead"
     assert "blue" in answer.lower()
+
+
+@pytest.mark.parametrize("mode", ["router", "native"])
+def test_recall_by_date_live(mode: str, tmp_path: Path) -> None:
+    """A question about a date (the demo conversation 13 days ago) finds it."""
+    now = time.time()
+    day = next(c for c in demo_checks(now) if c["kind"] == "recall-date")["question"].split("on the ")[1]
+    ask = [Message("user", f"what did we talk about in {day}")]
+
+    async def go() -> tuple[list[ToolCall], str]:
+        store = SqliteStore(tmp_path / "demo.sqlite3")
+        await store.open()
+        await seed_demo(store, now)
+        server = OpenAICompatServer(load_settings().llm_local)
+        try:
+            model = os.environ.get("OBSILORD_LOCAL_MODEL", "") or await server.default_model()
+            client = server.client(model, tool_mode=mode)
+            recall = RecallTool(store)
+            tools = [LOOK_TOOL, recall.tool().spec]
+            first = [e async for e in client.stream_reply(ask, tools)]
+            calls = [e for e in first if isinstance(e, ToolCall)]
+            results = [ToolResult(c, await recall.run(c.args)) for c in calls if c.name == "recall"]
+            follow = [
+                e async for e in client.stream_reply(ask, tools, tool_results=results, allow_tool_calls=False)
+            ] if results else []
+            return calls, _text(follow)
+        finally:
+            await server.aclose()
+            await store.close()
+
+    calls, answer = asyncio.run(go())
+    print(f"\n{mode}: calls {calls}\nanswer: {answer!r}")
+    assert [c.name for c in calls] == ["recall"]
+    assert "pita" in answer.lower() or "cat" in answer.lower(), answer
 
 
 @pytest.mark.parametrize("mode", ["router", "native"])

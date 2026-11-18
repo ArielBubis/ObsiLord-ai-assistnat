@@ -1,6 +1,7 @@
 """RecallTool: arguments, output format and caps, against a fake source."""
 
 import asyncio
+from datetime import date as Date
 from datetime import datetime
 from typing import Any
 
@@ -11,26 +12,38 @@ from obsilord.memory.recall import (
     MSG_RECALL_FAILED,
     RECALL_TOOL,
     RecallTool,
+    date_in_text,
     notes_to_store,
+    recall_spec,
 )
 
 # Local time, so the dates in the output do not depend on the time zone.
 NOW = datetime(2026, 11, 18, 15, 30).timestamp()
 YESTERDAY = datetime(2026, 11, 17, 19, 5).timestamp()
+NOV5 = datetime(2026, 11, 5, 22, 10).timestamp()
+DAY = 86400.0
 
 
 class FakeSource:
-    def __init__(self, hits: list[Hit] | None = None, fail: bool = False) -> None:
+    """hits: returned for any query. window_hits: returned only for an empty
+    query (the listing of a time window)."""
+
+    def __init__(
+        self, hits: list[Hit] | None = None, fail: bool = False, window_hits: list[Hit] | None = None
+    ) -> None:
         self.hits = hits or []
+        self.window_hits = window_hits
         self.fail = fail
-        self.calls: list[tuple[str, int, Any]] = []
+        self.calls: list[tuple[str, int, Any, Any]] = []
 
     async def search(
-        self, query: str, limit: int, days_back: int | None = None, now: float | None = None
+        self, query: str, limit: int, since: float | None = None, until: float | None = None
     ) -> list[Hit]:
-        self.calls.append((query, limit, days_back))
+        self.calls.append((query, limit, since, until))
         if self.fail:
             raise OSError("disk")
+        if self.window_hits is not None and not query:
+            return self.window_hits[:limit]
         return self.hits[:limit]
 
 
@@ -38,12 +51,19 @@ def _tool(source: FakeSource, max_chars: int = 1500) -> RecallTool:
     return RecallTool(source, max_results=5, max_chars=max_chars, clock=lambda: NOW)
 
 
-def test_spec_declares_query_and_days_back() -> None:
+def test_spec_declares_query_date_and_days_back() -> None:
     assert RECALL_TOOL.name == "recall"
     props = RECALL_TOOL.parameters["properties"]
-    assert set(props) == {"query", "days_back"}
+    assert set(props) == {"query", "date", "days_back"}
     assert RECALL_TOOL.parameters["required"] == ["query"]
     assert "earlier conversation" in RECALL_TOOL.description
+
+
+def test_spec_of_a_turn_carries_todays_date() -> None:
+    spec = recall_spec(NOW)
+    assert spec.name == "recall"
+    assert "Today is 2026-11-18 (Wednesday)." in spec.description
+    assert _tool(FakeSource()).tool().spec.description == spec.description
 
 
 def test_output_lists_hits_with_dates() -> None:
@@ -62,15 +82,104 @@ def test_no_match() -> None:
     assert result == {"output": "Today is 2026-11-18 (Wednesday). No earlier conversation matched 'skiing'."}
 
 
-def test_days_back_is_passed_and_clamped() -> None:
+def test_days_back_is_a_window_and_clamped() -> None:
     source = FakeSource()
     tool = _tool(source)
     asyncio.run(tool.run({"query": "", "days_back": 2}))
     asyncio.run(tool.run({"query": "x", "days_back": 10**9}))
     asyncio.run(tool.run({"query": "x", "days_back": "three"}))
     asyncio.run(tool.run({"query": "x", "days_back": 0}))
-    assert [c[2] for c in source.calls] == [2, MAX_DAYS_BACK, None, None]
-    assert source.calls[0][1] == 5
+    assert source.calls[0] == ("", 5, NOW - 2 * DAY, None)
+    assert source.calls[1][2] == NOW - MAX_DAYS_BACK * DAY
+    assert [c[2] for c in source.calls[2:]] == [None, None]
+
+
+def test_date_limits_the_search_to_that_day() -> None:
+    source = FakeSource([Hit(NOV5, "c", "My cat Pita is hiding.", "Poor Pita.")])
+    result = asyncio.run(_tool(source).run({"query": "", "date": "2026-11-05"}))
+    query, _, since, until = source.calls[0]
+    assert query == ""
+    assert since == datetime(2026, 11, 5).timestamp()
+    assert until == datetime(2026, 11, 6).timestamp()
+    assert "Earlier conversations on 2026-11-05, newest first:" in result["output"]
+    assert "2026-11-05 22:10 user: My cat Pita is hiding." in result["output"]
+
+
+def test_date_in_text() -> None:
+    today = Date(2026, 11, 18)
+    assert date_in_text("what did we talk about in 5th of november?", today) == Date(2026, 11, 5)
+    assert date_in_text("November 5", today) == Date(2026, 11, 5)
+    assert date_in_text("on nov 5th, 2025", today) == Date(2025, 11, 5)
+    assert date_in_text("5 Dec", today) == Date(2025, 12, 5)  # not yet this year
+    assert date_in_text("2026-10-01 dentist", today) == Date(2026, 10, 1)
+    assert date_in_text("yesterday", today) == Date(2026, 11, 17)
+    assert date_in_text("what did we say today", today) == Date(2026, 11, 18)
+    for none in ("dentist appointment", "may I ask", "31 february", "november 2025", ""):
+        assert date_in_text(none, today) is None, none
+
+
+def test_a_date_in_the_query_becomes_the_window() -> None:
+    # The router passes one arg only, so a date arrives inside query.
+    day_hit = Hit(NOV5, "c", "My cat Pita is hiding.", "Poor Pita.")
+    source = FakeSource(hits=[], window_hits=[day_hit])
+    result = asyncio.run(_tool(source).run({"query": "5th of November"}))
+    assert source.calls[0][2:] == (datetime(2026, 11, 5).timestamp(), datetime(2026, 11, 6).timestamp())
+    assert "My cat Pita is hiding." in result["output"]
+
+
+def test_a_date_in_the_query_wins_over_days_back() -> None:
+    # The shape of the original failure: a day in the query plus a guessed days_back.
+    source = FakeSource()
+    asyncio.run(_tool(source).run({"query": "5th of November", "days_back": 3}))
+    assert source.calls[0][2:] == (datetime(2026, 11, 5).timestamp(), datetime(2026, 11, 6).timestamp())
+
+
+def test_a_date_out_of_range_finds_nothing() -> None:
+    # datetime.timestamp() raises OSError on Windows before 1970.
+    for args in (
+        {"query": "x", "date": "1960-01-01"},
+        {"query": "what did we say on 1 jan 1900"},
+        {"query": "", "date": "9999-12-31"},
+        {"query": "", "date": "0001-01-01"},
+    ):
+        source = FakeSource()
+        result = asyncio.run(_tool(source).run(args))
+        assert source.calls == [], args
+        assert "No earlier conversation on " in result["output"], args
+
+
+def test_bad_dates_are_ignored() -> None:
+    source = FakeSource()
+    tool = _tool(source)
+    for bad in ("November 5", "2026-13-01", 20261105, ""):
+        asyncio.run(tool.run({"query": "cat", "date": bad}))
+    assert all(c[2] is None and c[3] is None for c in source.calls)
+
+
+def test_words_that_miss_fall_back_to_the_window() -> None:
+    # A small model asks for "November" on that date: no message holds the
+    # word, so the turns of the day are listed instead.
+    day_hit = Hit(NOV5, "c", "My cat Pita is hiding.", "Poor Pita.")
+    source = FakeSource(hits=[], window_hits=[day_hit])
+    result = asyncio.run(_tool(source).run({"query": "November 5th", "date": "2026-11-05"}))
+    assert [c[0] for c in source.calls] == ["November 5th", ""]
+    out = result["output"]
+    assert "Nothing matched 'November 5th'. Earlier conversations on 2026-11-05, newest first:" in out
+    assert "My cat Pita is hiding." in out
+
+
+def test_no_fallback_without_a_window() -> None:
+    source = FakeSource(hits=[], window_hits=[Hit(NOV5, "c", "u", "r")])
+    result = asyncio.run(_tool(source).run({"query": "skiing"}))
+    assert len(source.calls) == 1
+    assert "No earlier conversation matched 'skiing'." in result["output"]
+
+
+def test_empty_window() -> None:
+    result = asyncio.run(_tool(FakeSource()).run({"query": "", "date": "2026-11-04"}))
+    assert result["output"].endswith("No earlier conversation on 2026-11-04.")
+    result = asyncio.run(_tool(FakeSource()).run({"query": "", "days_back": 3}))
+    assert result["output"].endswith("No earlier conversation in the last 3 days.")
 
 
 def test_empty_query_with_days_says_recent() -> None:

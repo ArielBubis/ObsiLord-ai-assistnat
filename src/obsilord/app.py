@@ -623,11 +623,13 @@ def create_app(
         # conversation (None until its first turn is stored), and recall().
         store = await get_memory()
         conv_id: str | None = None
-        recall_tool: Tool | None = None
+        recall: RecallTool | None = None
         if store is not None and settings.memory.recall:
-            recall_tool = RecallTool(
-                store, settings.memory.recall_limit, settings.memory.recall_max_chars
-            ).tool()
+            recall = RecallTool(store, settings.memory.recall_limit, settings.memory.recall_max_chars)
+
+        def recall_tool() -> Tool | None:
+            # Built per turn: its description carries today's date.
+            return recall.tool() if recall is not None else None
 
         async def send(msg: dict[str, Any] | bytes) -> None:
             if isinstance(msg, dict) and msg.get("type") == "snapshot" and not snapshots_on:
@@ -834,7 +836,7 @@ def create_app(
                     turn_timeout_s=settings.llm.turn_timeout_s,
                     tts=app.state.tts,
                     looker=app.state.looker,
-                    extra_tools=turn_tools(provider, recall_tool),
+                    extra_tools=turn_tools(provider, recall_tool()),
                     on_turn=store_turn(provider, llm),
                 )
             )
@@ -960,7 +962,7 @@ def create_app(
                     turn_timeout_s=settings.llm.turn_timeout_s,
                     tts=app.state.tts,
                     looker=app.state.looker,
-                    extra_tools=turn_tools(provider, recall_tool),
+                    extra_tools=turn_tools(provider, recall_tool()),
                     on_turn=store_turn(provider, llm),
                 )
             )

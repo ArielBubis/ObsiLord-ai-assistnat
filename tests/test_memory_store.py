@@ -159,7 +159,7 @@ def test_search_finds_tool_rows_with_their_turn(tmp_path: Path) -> None:
     async def go() -> list[Any]:
         store = await _store(tmp_path / "m.sqlite3")
         await _seed(store)
-        hits = await store.search("funko", 5, now=T0)
+        hits = await store.search("funko", 5)
         await store.close()
         return hits
 
@@ -176,9 +176,9 @@ def test_search_days_back_and_empty_query(tmp_path: Path) -> None:
     async def go() -> tuple[list[Any], list[Any], list[Any]]:
         store = await _store(tmp_path / "m.sqlite3")
         await _seed(store)
-        old = await store.search("lisbon", 5, days_back=7, now=T0)
-        recent = await store.search("", 5, days_back=3, now=T0)
-        everything = await store.search("lisbon shakshuka", 5, now=T0)
+        old = await store.search("lisbon", 5, since=T0 - 7 * DAY)
+        recent = await store.search("", 5, since=T0 - 3 * DAY)
+        everything = await store.search("lisbon shakshuka", 5)
         await store.close()
         return old, recent, everything
 
@@ -188,11 +188,25 @@ def test_search_days_back_and_empty_query(tmp_path: Path) -> None:
     assert {h.user for h in everything} == {"I want shakshuka tonight", "trip to Lisbon in spring?"}
 
 
+def test_search_until_bounds_the_window(tmp_path: Path) -> None:
+    async def go() -> tuple[list[Any], list[Any]]:
+        store = await _store(tmp_path / "m.sqlite3")
+        await _seed(store)
+        day = await store.search("", 5, since=T0 - 1.5 * DAY, until=T0 - 0.5 * DAY)
+        words = await store.search("funko shakshuka", 5, until=T0 - 1.5 * DAY)
+        await store.close()
+        return day, words
+
+    day, words = run(go())
+    assert [h.user for h in day] == ["I want shakshuka tonight"]
+    assert [h.user for h in words] == ["what is this figure?"]
+
+
 def test_search_one_hit_per_turn(tmp_path: Path) -> None:
     async def go() -> list[Any]:
         store = await _store(tmp_path / "m.sqlite3")
         await _seed(store)
-        hits = await store.search("lisbon", 5, now=T0)  # user and reply both match
+        hits = await store.search("lisbon", 5)  # user and reply both match
         await store.close()
         return hits
 
@@ -203,7 +217,7 @@ def test_search_with_hostile_text_does_not_raise(tmp_path: Path) -> None:
     async def go() -> list[Any]:
         store = await _store(tmp_path / "m.sqlite3")
         await _seed(store)
-        hits = await store.search('") OR 1=1; -- NEAR(*', 5, now=T0)
+        hits = await store.search('") OR 1=1; -- NEAR(*', 5)
         await store.close()
         return hits
 
@@ -215,8 +229,8 @@ def test_prune_keeps_the_index_in_sync(tmp_path: Path) -> None:
         store = await _store(tmp_path / "m.sqlite3")
         await _seed(store)
         removed = await store.prune(30, now=T0)
-        gone = await store.search("lisbon", 5, now=T0)
-        kept = await store.search("shakshuka", 5, now=T0)
+        gone = await store.search("lisbon", 5)
+        kept = await store.search("shakshuka", 5)
         await store.close()
         return gone, kept, removed
 
@@ -247,7 +261,7 @@ def test_reopen_keeps_the_data(tmp_path: Path) -> None:
         await _seed(store)
         await store.close()
         store = await _store(path)
-        hits = await store.search("feta", 5, now=T0)
+        hits = await store.search("feta", 5)
         await store.close()
         return hits
 

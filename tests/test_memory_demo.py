@@ -12,6 +12,7 @@ from obsilord.memory.demo import (
     seed_demo,
     when,
 )
+from obsilord.memory.recall import RecallTool
 from obsilord.memory.store import SqliteStore
 
 NOW = datetime(2026, 11, 18, 15, 30).timestamp()
@@ -58,7 +59,7 @@ def test_every_recall_check_finds_its_fact(tmp_path: Path) -> None:
         for conv in DEMO_CONVERSATIONS:
             for check in conv.checks:
                 if check.search is not None:
-                    out.append((check.expect_in, await store.search(check.search, 5, now=NOW)))
+                    out.append((check.expect_in, await store.search(check.search, 5)))
         await store.close()
         return out
 
@@ -77,7 +78,7 @@ def test_negative_check_finds_nothing(tmp_path: Path) -> None:
 
     async def go() -> list:
         store = await _seeded(tmp_path / "demo.sqlite3")
-        hits = [await store.search(c.search or "", 5, now=NOW) for c in negative]
+        hits = [await store.search(c.search or "", 5) for c in negative]
         await store.close()
         return hits
 
@@ -87,13 +88,29 @@ def test_negative_check_finds_nothing(tmp_path: Path) -> None:
 def test_check_list_has_dates_labels_and_kinds() -> None:
     checks = demo_checks(NOW)
     kinds = {c["kind"] for c in checks}
-    assert {"recall", "recall-none", "inline", "tool-note", "resume", "continue"} <= kinds
+    assert {"recall", "recall-date", "recall-none", "inline", "tool-note", "resume", "continue"} <= kinds
+    by_date = next(c for c in checks if c["kind"] == "recall-date")
+    assert by_date["question"] == "What did we talk about on the 5th of November?"  # 13 days before NOW
+    assert by_date["date"] == "2026-11-05"
     first = checks[0]
     assert set(first) == {"date", "label", "question", "expected", "kind"}
     assert first["date"] == "2026-11-18" and first["label"] == "today"
     yesterday = [c for c in checks if c["label"] == "yesterday"]
     assert yesterday and yesterday[0]["date"] == "2026-11-17"
     assert all(c["date"] == "" for c in checks if c["kind"] in ("inline", "tool-note", "resume"))
+
+
+def test_date_check_finds_its_day_through_recall(tmp_path: Path) -> None:
+    # The question as a router would pass it: the date inside the query.
+    question = next(c for c in demo_checks(NOW) if c["kind"] == "recall-date")["question"]
+
+    async def go() -> dict:
+        store = await _seeded(tmp_path / "demo.sqlite3")
+        result = await RecallTool(store, clock=lambda: NOW).run({"query": question})
+        await store.close()
+        return result
+
+    assert "Pita" in run(go())["output"]
 
 
 def test_reset_removes_the_file_and_its_wal(tmp_path: Path) -> None:

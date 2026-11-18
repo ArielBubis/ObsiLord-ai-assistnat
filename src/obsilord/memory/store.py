@@ -274,30 +274,31 @@ class SqliteStore:
     # Search
 
     async def search(
-        self, query: str, limit: int, days_back: int | None = None, now: float | None = None
+        self, query: str, limit: int, since: float | None = None, until: float | None = None
     ) -> list[Hit]:
         """Matching turns, best match first (newer first on ties). With no
-        usable words in query: the newest turns. days_back limits both."""
-        since = None if days_back is None else _now(now) - days_back * DAY_S
-        return await self._call(self._search, fts_query(query), limit, since)
+        usable words in query: the newest turns. since and until (unix
+        seconds, since inclusive, until exclusive) bound both."""
+        return await self._call(self._search, fts_query(query), limit, since, until)
 
-    def _search(self, match: str | None, limit: int, since: float | None) -> list[Hit]:
+    def _search(self, match: str | None, limit: int, since: float | None, until: float | None) -> list[Hit]:
         con = self._db()
         floor = since if since is not None else float("-inf")
+        ceiling = until if until is not None else float("inf")
         if match is None:
             keys = con.execute(
-                "SELECT conversation_id, turn FROM messages WHERE role = 'user' AND ts >= ? "
+                "SELECT conversation_id, turn FROM messages WHERE role = 'user' AND ts >= ? AND ts < ? "
                 "ORDER BY ts DESC, id DESC LIMIT ?",
-                (floor, limit),
+                (floor, ceiling, limit),
             ).fetchall()
         else:
             keys = con.execute(
                 "SELECT m.conversation_id, m.turn FROM messages_fts f "
                 "JOIN messages m ON m.id = f.rowid "
-                "WHERE messages_fts MATCH ? AND m.ts >= ? "
+                "WHERE messages_fts MATCH ? AND m.ts >= ? AND m.ts < ? "
                 "GROUP BY m.conversation_id, m.turn "
                 "ORDER BY MIN(f.rank), MAX(m.ts) DESC LIMIT ?",
-                (match, floor, limit),
+                (match, floor, ceiling, limit),
             ).fetchall()
         return [self._hit(cid, turn) for cid, turn in keys]
 
