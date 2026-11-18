@@ -79,7 +79,7 @@ def test_clean_question() -> None:
     assert clean_question("") == DEFAULT_QUESTION
     assert clean_question(None) == DEFAULT_QUESTION
     assert clean_question(42) == DEFAULT_QUESTION
-    assert len(clean_question("x" * 1000)) == MAX_QUESTION_CHARS
+    assert len(clean_question("x" * (MAX_QUESTION_CHARS + 500))) == MAX_QUESTION_CHARS
 
 
 class FakeCamera:
@@ -192,7 +192,7 @@ def test_the_photo_look_tool_keeps_the_name_and_drops_qwenny() -> None:
     assert LOOK_PHOTO_TOOL.name == LOOK_TOOL.name
     assert LOOK_PHOTO_TOOL.parameters == LOOK_TOOL.parameters
     assert "Qwenny" not in LOOK_PHOTO_TOOL.description
-    assert "photo itself" in LOOK_PHOTO_TOOL.description
+    assert "Take one photo" in LOOK_PHOTO_TOOL.description
 
 
 def test_camera_and_model_load_run_at_the_same_time() -> None:

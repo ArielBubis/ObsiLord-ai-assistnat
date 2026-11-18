@@ -60,7 +60,7 @@ log = logging.getLogger(__name__)
 
 HOUR_S = 3600.0
 DEFAULT_QUESTION = "What is in front of the camera?"
-MAX_QUESTION_CHARS = 300
+MAX_QUESTION_CHARS = 1200
 
 MSG_ONE_LOOK = "Only one look per turn."
 # Passed on by the assistant: the usual causes are on the user's side.
@@ -81,7 +81,7 @@ MSG_TOO_LARGE = (
 MSG_SEARCH_FAILED = "The online image lookup failed."
 
 DEFAULT_TARGET = "the object the user is holding"
-MAX_TARGET_CHARS = 100
+MAX_TARGET_CHARS = 300
 MIN_CROP_EDGE_PX = 48
 
 
@@ -118,8 +118,7 @@ LOOK_TOOL = ToolSpec(
 LOOK_PHOTO_TOOL = ToolSpec(
     name=LOOK_TOOL.name,
     description=(
-        "Take one photo with the user's webcam. You get the photo itself and "
-        "look at it yourself. Pass what you want to find out about the view."
+        "Take one photo with the user's webcam, Pass what you want to find out about the view, if the request came with any question or ask for more info, oblige if you can"
     ),
     parameters=LOOK_TOOL.parameters,
 )
