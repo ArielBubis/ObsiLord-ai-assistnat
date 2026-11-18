@@ -27,3 +27,6 @@ captures/
 /web/ai-face/*.md
 # Local speed test for vision models, not part of the app.
 /scripts/vision_bench.py
+
+# Local scratch copy of the system prompt, never committed.
+/prompts/system copy.md
