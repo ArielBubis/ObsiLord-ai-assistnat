@@ -7,7 +7,8 @@
 // config has loaded. The loop runs from start(); frames are drawn once the
 // skin is in.
 
-import { FACE_CONFIG, loadFaceConfig, getFaceSkin, skinModulePath } from "./config.js";
+import { FACE_CONFIG, loadFaceConfig, getFaceSkin, getFaceDemo, skinModulePath } from "./config.js";
+import { faceWidth, sideReserve } from "./layout.js";
 import { createStateMachine, isValidState } from "./state.js";
 import { createIdle, buildFrame, frameKey, clampMouth, STILL_IDLE } from "./idle.js";
 import { createMouthEnvelope, createLevelSmoother, rmsToFrame, mouthSource } from "./mouth.js";
@@ -110,17 +111,31 @@ export function setIdleEnabled(enabled) {
 // Vertical: page and card padding, the header rail, the frame edges, and the
 // subtitle box, input row, push-to-talk hint, and error rows (#subtitles,
 // #ptt-hint, and #error-line have fixed heights). Horizontal: page padding,
-// card padding, and the card and frame borders.
+// card padding, and the card and frame borders. The side panels beside the
+// card (sideReserve in layout.js, from the window width alone) are subtracted
+// on top of this. The window resize event covers the stacking breakpoint.
 const UI_RESERVE_PX = 424;
 const UI_RESERVE_X_PX = 72;
+
+let fitTarget = null;
+
+// The server marks the body in demo mode, so the first fit is already right.
+function demoNow() {
+  return getFaceDemo() || document.body.dataset.demo === "true";
+}
 
 // Pick an integer number of device pixels per logical pixel (k), then size
 // the canvas in CSS px as 64*k/dpr, so every logical pixel is exactly k
 // device pixels wide even at 125% or 150% display scaling.
 function fitCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
+  // The stacking breakpoint uses innerWidth, the width CSS media queries test
+  // (scrollbar included). The room for the face uses clientWidth, which leaves
+  // the scrollbar out.
+  const sides = sideReserve(window.innerWidth, undefined, undefined, undefined, demoNow());
+  const room = document.documentElement.clientWidth;
   const availDevice = Math.min(
-    (Math.max(FACE_CONFIG.logicalWidth, window.innerWidth - UI_RESERVE_X_PX) * dpr) / FACE_CONFIG.logicalWidth,
+    (Math.max(FACE_CONFIG.logicalWidth, faceWidth(room, sides, UI_RESERVE_X_PX)) * dpr) / FACE_CONFIG.logicalWidth,
     (Math.max(FACE_CONFIG.logicalHeight, window.innerHeight - UI_RESERVE_PX) * dpr) / FACE_CONFIG.logicalHeight,
   );
   const k = Math.max(1, Math.floor(availDevice));
@@ -195,6 +210,7 @@ async function importSkin(name) {
 // throws.
 async function loadSkin() {
   await loadFaceConfig();
+  applyDemo();
   let name = getFaceSkin();
   let mod = await importSkin(name);
   if (!mod && name !== "code") {
@@ -207,9 +223,18 @@ async function loadSkin() {
   resolveSkin(name);
 }
 
+// Demo mode: CSS hides everything but the face, subtitles and chat, and the
+// side reserve drops to 0. The config arrives after start(), so refit then.
+function applyDemo() {
+  if (!getFaceDemo()) return;
+  document.body.dataset.demo = "true";
+  if (fitTarget) fitCanvas(fitTarget);
+}
+
 export function start(canvas) {
   if (started) return;
   started = true;
+  fitTarget = canvas;
   loadSkin();
   canvas.width = FACE_CONFIG.logicalWidth;
   canvas.height = FACE_CONFIG.logicalHeight;

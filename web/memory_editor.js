@@ -1,64 +1,93 @@
 // Editor for one stored conversation, in Settings > Conversations: rename it,
-// edit or delete its turns, add a turn by hand, delete the whole conversation.
+// edit or delete its turns, add turns by hand, delete the whole conversation.
 //
-// The page reads the turns with GET /conversations/{id} and changes them with
-// {"type": "memory", "action", ...} over the WebSocket. The server answers a
-// change with {"type": "memory", "action", "conversation"}; the editor then
-// reads the turns again. Stored text only goes into .value and textContent,
-// never innerHTML.
+// The page reads the turns with GET /conversations/{id}. Every change is
+// staged in the page (edits, deleted turns, added turns, a new title) and goes
+// to the server as one {"type": "memory", "action": "save"} after the user
+// answers the Save / Revert / Keep editing prompt, so a save applies all of it
+// or none. Delete conversation is separate and immediate (its own confirm).
+// Stored text only goes into .value and textContent, never innerHTML.
 //
-// The pure helpers at the top are tested with node --test.
+// The pure helpers are tested with node --test.
 
 export const MAX_EDIT = 4000;
 export const MAX_TITLE_EDIT = 80;
-
-function cleanText(value, max) {
-  if (typeof value !== "string") return null;
-  const text = value.trim();
-  return text && text.length <= max ? text : null;
-}
 
 function isId(value) {
   return typeof value === "string" && value !== "";
 }
 
-// JSON text for the WebSocket, or null when a field is missing, has the wrong
-// type, is empty after trimming, or is too long.
-export function memoryMessage(action, fields) {
-  const f = fields || {};
-  let body;
-  switch (action) {
-    case "edit": {
-      const text = cleanText(f.text, MAX_EDIT);
-      if (!Number.isInteger(f.message) || text === null) return null;
-      body = { message: f.message, text };
-      break;
-    }
-    case "delete_turn":
-      if (!isId(f.conversation) || !Number.isInteger(f.turn)) return null;
-      body = { conversation: f.conversation, turn: f.turn };
-      break;
-    case "delete_conversation":
-      if (!isId(f.conversation)) return null;
-      body = { conversation: f.conversation };
-      break;
-    case "rename": {
-      const title = cleanText(f.title, MAX_TITLE_EDIT);
-      if (!isId(f.conversation) || title === null) return null;
-      body = { conversation: f.conversation, title };
-      break;
-    }
-    case "add_turn": {
-      const user = cleanText(f.user, MAX_EDIT);
-      const reply = cleanText(f.reply, MAX_EDIT);
-      if (!isId(f.conversation) || user === null || reply === null) return null;
-      body = { conversation: f.conversation, user, reply };
-      break;
-    }
-    default:
-      return null;
+export function emptyStage() {
+  return { title: null, edits: new Map(), deletes: new Set(), adds: [] };
+}
+
+function storedTexts(rows) {
+  const stored = new Map();
+  for (const row of rows) for (const m of row.messages) stored.set(m.id, m.text.trim());
+  return stored;
+}
+
+// [[message id, trimmed text]] for the edits that differ from the stored text.
+function changedEdits(stage, rows) {
+  const stored = storedTexts(rows);
+  const out = [];
+  for (const [id, text] of stage.edits) {
+    if (stored.has(id) && text.trim() !== stored.get(id)) out.push([id, text.trim()]);
   }
-  return JSON.stringify({ type: "memory", action, ...body });
+  return out;
+}
+
+// A blank title keeps the current one, so it is not a change.
+function titleChanged(stage, storedTitle) {
+  if (typeof stage.title !== "string") return false;
+  const t = stage.title.trim();
+  return t !== "" && t !== String(storedTitle || "").trim();
+}
+
+function addHasText(a) {
+  return a.user.trim() !== "" || a.reply.trim() !== "";
+}
+
+export function hasChanges(stage, rows, storedTitle) {
+  return (
+    changedEdits(stage, rows).length > 0 ||
+    stage.deletes.size > 0 ||
+    stage.adds.some(addHasText) ||
+    titleChanged(stage, storedTitle)
+  );
+}
+
+// JSON text for the WebSocket, or null when nothing changed, an add is half
+// filled, or a text is empty or over the caps.
+export function saveMessage(conversation, expectTurns, stage, rows, storedTitle) {
+  if (!isId(conversation) || !Number.isInteger(expectTurns) || expectTurns < 1) return null;
+  if (!hasChanges(stage, rows, storedTitle)) return null;
+  const turnOf = new Map();
+  for (const row of rows) for (const m of row.messages) turnOf.set(m.id, row.turn);
+  const edits = [];
+  for (const [id, text] of changedEdits(stage, rows)) {
+    if (stage.deletes.has(turnOf.get(id))) continue;
+    if (text === "" || text.length > MAX_EDIT) return null;
+    edits.push({ message: id, text });
+  }
+  const adds = [];
+  for (const a of stage.adds) {
+    if (!addHasText(a)) continue;
+    const user = a.user.trim();
+    const reply = a.reply.trim();
+    if (!user || !reply || user.length > MAX_EDIT || reply.length > MAX_EDIT) return null;
+    adds.push({ user, reply });
+  }
+  const body = { type: "memory", action: "save", conversation, expect_turns: expectTurns };
+  if (titleChanged(stage, storedTitle)) {
+    const title = stage.title.trim();
+    if (title.length > MAX_TITLE_EDIT) return null;
+    body.title = title;
+  }
+  body.edits = edits;
+  body.delete_turns = [...stage.deletes].sort((x, y) => x - y);
+  body.add_turns = adds;
+  return JSON.stringify(body);
 }
 
 function roleLabel(m) {
@@ -68,7 +97,7 @@ function roleLabel(m) {
   return `Tool: ${name}`;
 }
 
-// [{ turn, when, messages: [{ id, role, label, text, editable }] }] from the
+// [{ turn, when, messages: [{ id, role, label, text }] }] from the
 // GET body; [] for a disabled or malformed one.
 export function editorRows(body) {
   if (!body || body.enabled !== true || !Array.isArray(body.turns)) return [];
@@ -84,31 +113,8 @@ export function editorRows(body) {
           role: m.role,
           label: roleLabel(m),
           text: typeof m.text === "string" ? m.text : "",
-          editable: true,
         })),
     }));
-}
-
-// What each message field shows after a re-read. drafts: Map of message id to
-// unsaved text. A draft stays while it differs from the stored text (compared
-// trimmed, since the server stores trimmed text); it is dropped once the save
-// is confirmed (same text) or the message is gone.
-// Returns { shown: Map id -> text, drafts: Map of the drafts still unsaved }.
-export function mergeDrafts(rows, drafts) {
-  const shown = new Map();
-  const kept = new Map();
-  const old = drafts instanceof Map ? drafts : new Map();
-  for (const row of rows) {
-    for (const m of row.messages) {
-      if (old.has(m.id) && old.get(m.id).trim() !== m.text.trim()) {
-        shown.set(m.id, old.get(m.id));
-        kept.set(m.id, old.get(m.id));
-      } else {
-        shown.set(m.id, m.text);
-      }
-    }
-  }
-  return { shown, drafts: kept };
 }
 
 function button(text, onClick) {
@@ -132,82 +138,186 @@ function field(labelText, value, multiline) {
 }
 
 // el: the container element (hidden until a conversation is opened).
-// send(text) sends on the socket. fetchTurns(id) resolves to the GET body, or
-// null when the conversation is gone.
-export function initMemoryEditor(el, send, fetchTurns) {
+// send(text) sends on the socket and returns false when it could not.
+// fetchTurns(id) resolves to the GET body, or null when the conversation is gone. confirmDialog: the <dialog> with buttons
+// marked data-act="save" | "revert" | "keep". onChange(), when given, runs when
+// the open conversation changes (the list relabels its button).
+const STALE_PREFIX = "This conversation changed since you opened it.";
+const NOT_CONNECTED = "Not connected. Your changes are kept; try Save again when the link is back.";
+
+export function initMemoryEditor(el, send, fetchTurns, confirmDialog, onChange) {
   let openId = null;
   let seq = 0;
-  // Unsaved text, kept across re-renders: per message id, the title, the add form.
-  let drafts = new Map();
-  let titleDraft = null;
+  let rows = [];
+  let storedTitle = "";
+  let stage = emptyStage();
   let addDraft = { user: "", reply: "" };
+  let note = "";
+  // The conversation to open once the prompt is answered (Edit clicked on
+  // another one while this one has changes).
+  let pending = null;
+  // A save or delete was sent and no answer has come yet.
+  let sending = false;
+
+  function changed() {
+    if (typeof onChange === "function") onChange();
+  }
+
+  function reset() {
+    stage = emptyStage();
+    addDraft = { user: "", reply: "" };
+    note = "";
+    rows = [];
+    storedTitle = "";
+    pending = null;
+    sending = false;
+  }
+
+  function hidePrompt() {
+    if (!confirmDialog) return;
+    if (typeof confirmDialog.close === "function" && confirmDialog.open) confirmDialog.close();
+    else confirmDialog.removeAttribute("open");
+  }
+
+  function showPrompt() {
+    if (!confirmDialog) return;
+    if (typeof confirmDialog.showModal === "function") {
+      if (!confirmDialog.open) confirmDialog.showModal();
+    } else {
+      confirmDialog.setAttribute("open", "");
+    }
+  }
 
   function close() {
     openId = null;
-    drafts = new Map();
-    titleDraft = null;
-    addDraft = { user: "", reply: "" };
+    reset();
     seq += 1;
     el.hidden = true;
     el.replaceChildren();
+    hidePrompt();
+    changed();
   }
 
-  function act(action, fields) {
-    const text = memoryMessage(action, { conversation: openId, ...fields });
-    if (text === null) return;
-    // One change at a time: the buttons stay off until the answer re-renders
-    // the editor or an error comes back (onError). Stops a double click from
-    // sending a position-based change twice.
-    setButtons(true);
-    send(text);
+  function dirty() {
+    return openId !== null && (hasChanges(stage, rows, storedTitle) || addHasText(addDraft));
   }
 
   function setButtons(disabled) {
+    sending = disabled;
     for (const b of el.querySelectorAll("button")) b.disabled = disabled;
+    if (confirmDialog) for (const b of confirmDialog.querySelectorAll("button")) b.disabled = disabled;
   }
 
-  function render(body) {
-    const parts = [];
-    const rows = editorRows(body);
-    const merged = mergeDrafts(rows, drafts);
-    drafts = merged.drafts;
-    const stored = typeof body.title === "string" ? body.title : "";
-    if (titleDraft !== null && titleDraft.trim() === stored.trim()) titleDraft = null;
+  // Move a filled add form into the staged adds. false when it is half filled.
+  function commitDraft() {
+    if (!addHasText(addDraft)) return true;
+    if (!addDraft.user.trim() || !addDraft.reply.trim()) return false;
+    stage.adds.push({ user: addDraft.user, reply: addDraft.reply });
+    addDraft = { user: "", reply: "" };
+    return true;
+  }
 
+  function doSave() {
+    if (openId === null || sending) return;
+    if (!commitDraft()) {
+      note = "Fill both boxes of the turn you are adding, or clear them.";
+      render();
+      return;
+    }
+    if (!hasChanges(stage, rows, storedTitle)) {
+      const next = pending;
+      close();
+      if (next !== null) api.open(next);
+      return;
+    }
+    const text = saveMessage(openId, rows.length, stage, rows, storedTitle);
+    if (text === null) {
+      note = `Each changed message needs text (under ${MAX_EDIT} characters), and each added turn needs both boxes.`;
+      pending = null;
+      render();
+      return;
+    }
+    note = "";
+    // The buttons stay off until the answer closes the editor or an error
+    // comes back (onError).
+    trySend(text);
+  }
+
+  // Send and lock the buttons until the answer. send() returns false when the
+  // socket is not open: then nothing is locked, the stage stays, a note says so.
+  function trySend(text) {
+    setButtons(true);
+    if (send(text) === false) {
+      setButtons(false);
+      note = NOT_CONNECTED;
+      pending = null;
+      render();
+      return false;
+    }
+    return true;
+  }
+
+  function revert() {
+    const next = pending;
+    close();
+    if (next !== null) api.open(next);
+  }
+
+  function requestSave() {
+    if (openId !== null && !sending) showPrompt();
+  }
+
+  function render() {
+    const parts = [];
     const head = document.createElement("div");
     head.className = "mem-head";
-    const title = field("Title", titleDraft !== null ? titleDraft : stored, false);
+    const title = field("Title", stage.title !== null ? stage.title : storedTitle, false);
     title.input.maxLength = MAX_TITLE_EDIT;
     title.input.addEventListener("input", () => {
-      titleDraft = title.input.value;
+      stage.title = title.input.value;
     });
     head.append(
       title.wrap,
-      button("Rename", () => act("rename", { title: title.input.value })),
-      button("Close", close),
+      button("Save", requestSave),
+      button("Close", () => {
+        if (dirty()) requestSave();
+        else close();
+      }),
     );
     parts.push(head);
 
+    if (note) {
+      const p = document.createElement("p");
+      p.className = "mem-note";
+      p.setAttribute("role", "alert");
+      p.textContent = note;
+      parts.push(p);
+    }
+
     for (const row of rows) {
+      const gone = stage.deletes.has(row.turn);
       const box = document.createElement("div");
-      box.className = "mem-turn";
+      box.className = gone ? "mem-turn mem-deleted" : "mem-turn";
       for (const m of row.messages) {
-        const f = field(m.label, merged.shown.get(m.id), true);
+        const shown = stage.edits.has(m.id) ? stage.edits.get(m.id) : m.text;
+        const f = field(m.label, shown, true);
         f.input.maxLength = MAX_EDIT;
+        f.input.readOnly = gone;
         f.input.addEventListener("input", () => {
-          drafts.set(m.id, f.input.value);
+          stage.edits.set(m.id, f.input.value);
         });
-        f.input.readOnly = !m.editable;
-        const save = button("Save", () => act("edit", { message: m.id, text: f.input.value }));
-        save.disabled = !m.editable;
-        box.append(f.wrap, save);
+        box.append(f.wrap);
       }
       box.append(
-        button("Delete turn", () => {
-          if (confirm("Delete this turn? This cannot be undone.")) {
-            act("delete_turn", { turn: row.turn });
-          }
-        }),
+        gone
+          ? button("Undo", () => {
+              stage.deletes.delete(row.turn);
+              render();
+            })
+          : button("Delete turn", () => {
+              stage.deletes.add(row.turn);
+              render();
+            }),
       );
       parts.push(box);
     }
@@ -216,31 +326,55 @@ export function initMemoryEditor(el, send, fetchTurns) {
     add.className = "mem-add";
     const user = field("Add turn: your message", addDraft.user, true);
     const reply = field("Add turn: his reply", addDraft.reply, true);
+    user.input.maxLength = MAX_EDIT;
+    reply.input.maxLength = MAX_EDIT;
     user.input.addEventListener("input", () => {
       addDraft.user = user.input.value;
     });
     reply.input.addEventListener("input", () => {
       addDraft.reply = reply.input.value;
     });
-    user.input.maxLength = MAX_EDIT;
-    reply.input.maxLength = MAX_EDIT;
     add.append(
       user.wrap,
       reply.wrap,
-      button("Add turn", () => act("add_turn", { user: user.input.value, reply: reply.input.value })),
+      button("Add turn", () => {
+        if (!addDraft.user.trim() || !addDraft.reply.trim()) {
+          note = "Fill both boxes to add a turn.";
+        } else {
+          commitDraft();
+          note = "";
+        }
+        render();
+      }),
     );
     parts.push(add);
+
+    stage.adds.forEach((a, i) => {
+      const item = document.createElement("div");
+      item.className = "mem-added";
+      const text = document.createElement("p");
+      text.textContent = `Added: ${a.user.trim()} / ${a.reply.trim()}`;
+      item.append(
+        text,
+        button("Remove", () => {
+          stage.adds.splice(i, 1);
+          render();
+        }),
+      );
+      parts.push(item);
+    });
 
     parts.push(
       button("Delete conversation", () => {
         if (confirm("Delete this whole conversation? This cannot be undone.")) {
-          act("delete_conversation", {});
+          trySend(JSON.stringify({ type: "memory", action: "delete_conversation", conversation: openId }));
         }
       }),
     );
 
     el.replaceChildren(...parts);
     el.hidden = false;
+    setButtons(sending);
   }
 
   async function load() {
@@ -257,25 +391,84 @@ export function initMemoryEditor(el, send, fetchTurns) {
       close();
       return;
     }
-    render(body);
+    rows = editorRows(body);
+    storedTitle = typeof body.title === "string" ? body.title : "";
+    render();
+    changed();
+  }
+
+  if (confirmDialog) {
+    const on = (act, fn) => {
+      const b = confirmDialog.querySelector(`[data-act="${act}"]`);
+      if (b) b.addEventListener("click", fn);
+    };
+    on("save", () => {
+      hidePrompt();
+      doSave();
+    });
+    on("revert", () => {
+      hidePrompt();
+      revert();
+    });
+    const keep = () => {
+      pending = null;
+      hidePrompt();
+    };
+    on("keep", keep);
+    // Escape closes the dialog: same as Keep editing.
+    confirmDialog.addEventListener("cancel", () => {
+      pending = null;
+    });
   }
 
   el.hidden = true;
 
-  return {
+  const api = {
     open(id) {
       if (!isId(id)) return;
-      if (id !== openId) {
-        drafts = new Map();
-        titleDraft = null;
-        addDraft = { user: "", reply: "" };
+      if (openId !== null && id !== openId && dirty()) {
+        pending = id;
+        showPrompt();
+        return;
       }
-      openId = id;
+      if (id !== openId) {
+        reset();
+        openId = id;
+        changed();
+      }
       load();
     },
-    // The server refused or failed a change: let the user try again.
-    onError() {
-      if (openId !== null) setButtons(false);
+    isOpen(id) {
+      return openId !== null && (id === undefined || id === openId);
+    },
+    isDirty() {
+      return dirty();
+    },
+    openId() {
+      return openId;
+    },
+    requestSave,
+    // The server refused or failed the save or delete: keep the stage, show
+    // the reason, allow a retry. An error with nothing in flight is not ours.
+    onError(message) {
+      if (openId === null || !sending) return;
+      pending = null;
+      note = typeof message === "string" && message ? message : "The server refused the change.";
+      // The stale refusal (app.py MSG_MEMORY_STALE) says to reopen; the stage
+      // is still here, so say how to get out of it.
+      if (note.startsWith(STALE_PREFIX)) note += " Revert discards your changes.";
+      setButtons(false);
+      render();
+    },
+    // The socket closed: release an unanswered save, keep the stage.
+    onDisconnect() {
+      if (openId === null) return;
+      pending = null;
+      if (sending) {
+        note = NOT_CONNECTED;
+        sending = false;
+        render();
+      }
     },
     onMessage(msg) {
       if (!msg || msg.type !== "memory" || openId === null) return;
@@ -284,8 +477,12 @@ export function initMemoryEditor(el, send, fetchTurns) {
         close();
         return;
       }
-      if (msg.action === "add_turn") addDraft = { user: "", reply: "" };
-      load();
+      if (msg.action === "save") {
+        const next = pending;
+        close();
+        if (next !== null) api.open(next);
+      }
     },
   };
+  return api;
 }

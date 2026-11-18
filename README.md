@@ -66,7 +66,7 @@ python -m obsilord.vision.fetch   # downloads llama.cpp and the vision model onc
 python -m obsilord
 ```
 
-Then open http://127.0.0.1:8765. All settings are in `config.toml`, with comments for each key.
+Then open http://127.0.0.1:8765. All settings are in `config.toml`, with comments for each key. Set `demo = true` under `[face]` to show only the face, subtitles and chat row.
 
 ## Roadmap
 

@@ -35,6 +35,12 @@ export function skinModulePath(name) {
 
 let activeThresholds = FACE_CONFIG.mouthThresholds;
 let activeSkin = FACE_CONFIG.skin;
+let activeDemo = false;
+
+// Demo mode ([face] demo): only the face, subtitles, chat row and error line.
+export function getFaceDemo() {
+  return activeDemo;
+}
 
 // Thresholds in use: from the server if loaded and valid, else the fallback.
 export function getMouthThresholds() {
@@ -58,13 +64,14 @@ export function validThresholds(t) {
 }
 
 // Checks a /config/face response. Pure.
-// Returns { thresholds, skin, warnings }: thresholds is a frozen copy of valid
+// Returns { thresholds, skin, demo, warnings }: thresholds is a frozen copy of valid
 // server values or null (use the fallback); skin is the server value if it is
-// one of FACE_SKINS, else fallback.skin; warnings lists problems to log.
+// one of FACE_SKINS, else fallback.skin; demo is true only for a boolean true
+// (anything else is false, silently); warnings lists problems to log.
 export function validateFaceConfig(raw, fallback = FACE_CONFIG) {
   const warnings = [];
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return { thresholds: null, skin: fallback.skin, warnings: ["face config: response is not an object"] };
+    return { thresholds: null, skin: fallback.skin, demo: false, warnings: ["face config: response is not an object"] };
   }
   let thresholds = null;
   if (validThresholds(raw.mouth_thresholds)) {
@@ -86,7 +93,7 @@ export function validateFaceConfig(raw, fallback = FACE_CONFIG) {
   } else {
     warnings.push(`face config: invalid skin ${JSON.stringify(raw.skin)}, using fallback "${fallback.skin}"`);
   }
-  return { thresholds, skin, warnings };
+  return { thresholds, skin, demo: raw.demo === true, warnings };
 }
 
 // Shared by the config loaders: GET url and parse JSON. Throws on network
@@ -111,10 +118,11 @@ export async function loadFaceConfig(fetchFn = globalThis.fetch, warn = console.
     warn(`face config: fetch failed (${errText(err)}), using fallback`);
     return activeThresholds;
   }
-  const { thresholds, skin, warnings } = validateFaceConfig(raw);
+  const { thresholds, skin, demo, warnings } = validateFaceConfig(raw);
   if (warnings.length > 0) warn(warnings.join("; "));
   if (thresholds) activeThresholds = thresholds;
   activeSkin = skin;
+  activeDemo = demo;
   return activeThresholds;
 }
 
@@ -122,6 +130,7 @@ export async function loadFaceConfig(fetchFn = globalThis.fetch, warn = console.
 export function resetFaceConfig() {
   activeThresholds = FACE_CONFIG.mouthThresholds;
   activeSkin = FACE_CONFIG.skin;
+  activeDemo = false;
 }
 
 // Playback EQ, served from the [tts] section of config.toml (flat keys

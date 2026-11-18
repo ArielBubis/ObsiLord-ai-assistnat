@@ -218,7 +218,7 @@ def test_deleting_a_conversation_removes_its_photos(tmp_path: Path) -> None:
     assert _saved(tmp_path) == [] and not (tmp_path / "photos" / cid).exists()
 
 
-def test_deleting_a_turn_removes_only_its_photos(tmp_path: Path) -> None:
+def test_save_removes_photos_of_deleted_turns(tmp_path: Path) -> None:
     client, cid = _two_look_turns(tmp_path)
     first, second = _saved(tmp_path)
     con = sqlite3.connect(tmp_path / "m.sqlite3")
@@ -227,11 +227,12 @@ def test_deleting_a_turn_removes_only_its_photos(tmp_path: Path) -> None:
     finally:
         con.close()
     names = {t: json.loads(m)["photo"] for t, m in metas}
-    assert _memory(client, action="delete_turn", conversation=cid, turn=1)["type"] == "memory"
+    saved = _memory(client, action="save", conversation=cid, expect_turns=2, delete_turns=[1])
+    assert saved == {"type": "memory", "action": "save", "conversation": cid}
     assert [p.name for p in _saved(tmp_path)] == [names[2]]
 
 
-def test_deleting_the_last_turn_removes_the_conversation_folder(tmp_path: Path) -> None:
+def test_save_deleting_every_turn_removes_the_conversation_folder(tmp_path: Path) -> None:
     client = TestClient(_app(tmp_path, SeeingToolLLM(_look_rounds(1))))
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
@@ -239,5 +240,6 @@ def test_deleting_the_last_turn_removes_the_conversation_folder(tmp_path: Path) 
         msgs = _turn(ws)
     cid = str(next(m["id"] for m in msgs if m["type"] == "conversation"))
     assert len(_saved(tmp_path)) == 1
-    assert _memory(client, action="delete_turn", conversation=cid, turn=1)["type"] == "memory"
+    saved = _memory(client, action="save", conversation=cid, expect_turns=1, delete_turns=[1])
+    assert saved == {"type": "memory", "action": "save", "conversation": cid}
     assert not (tmp_path / "photos" / cid).exists()

@@ -48,7 +48,9 @@ html {
 body {
   margin: 0;
   min-height: 100%;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(360px, 640px) minmax(520px, auto) minmax(360px, 640px);
+  column-gap: 16px;
   align-items: center;
   justify-content: center;
   padding: 12px;
@@ -60,6 +62,82 @@ body {
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 14px;
+}
+
+/* Side panels: Settings on the left, Snapshots on the right, top-aligned, each
+   scrolling on its own so a long editor never pushes the page. Below 1300px the
+   columns stack: card, then Settings, then Snapshots. The panels grow from 360px
+   (minimum) to 640px (maximum) into leftover width. The numbers 360px, 16px
+   and 1300px are mirrored in layout.js (SIDE_PANEL_PX is the 360 minimum,
+   COLUMN_GAP_PX, WIDE_MIN_PX); change them together. 1300 = 24 body padding
+   + 2 * 360 + 2 * 16 + 520 card minimum, rounded up. The face reserve always
+   assumes the 360 minimum, never the rendered width. */
+#left-panel,
+#right-panel {
+  align-self: start;
+  min-width: 0;
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+}
+
+#left-panel {
+  grid-column: 1;
+}
+
+main {
+  grid-column: 2;
+}
+
+#right-panel {
+  grid-column: 3;
+}
+
+/* [face] demo: only the face, subtitles, chat row and error line. The panels
+   leave the grid, so the card sits centered alone, and layout.js reserves no
+   side width (sideReserve with demo). */
+body[data-demo="true"] {
+  grid-template-columns: minmax(min(520px, 100%), auto);
+}
+
+body[data-demo="true"] main {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+body[data-demo="true"] #left-panel,
+body[data-demo="true"] #right-panel,
+body[data-demo="true"] #link-badge,
+body[data-demo="true"] #state-badge,
+body[data-demo="true"] #feed-label,
+body[data-demo="true"] #ptt-hint,
+body[data-demo="true"] #llm-notice,
+body[data-demo="true"] #debug {
+  display: none !important;
+}
+
+@media (width < 1300px) {
+  body {
+    grid-template-columns: minmax(min(520px, 100%), auto);
+    row-gap: 16px;
+    justify-content: center;
+  }
+
+  main {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  #left-panel {
+    grid-column: 1;
+    grid-row: 2;
+    max-height: none;
+  }
+
+  #right-panel {
+    grid-column: 1;
+    grid-row: 3;
+    max-height: none;
+  }
 }
 
 /* The card is exactly as wide as the face frame. Every other row has
@@ -651,6 +729,36 @@ body[data-status="thinking"] .scan-line {
   font: 400 11px var(--font-mono);
 }
 
+#conv-editor .mem-deleted textarea {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+#conv-editor .mem-note,
+#conv-editor .mem-added {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+  font: 400 11px var(--font-mono);
+}
+
+#conv-editor .mem-added p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+#mem-confirm {
+  background: var(--void);
+  color: var(--text);
+  border: 1px solid var(--cyan);
+  font: 400 13px var(--font-mono);
+}
+
+#mem-confirm .mem-confirm-buttons {
+  display: flex;
+  gap: 8px;
+}
+
 #conv-note:empty {
   display: none;
 }
@@ -667,7 +775,7 @@ body[data-status="thinking"] .scan-line {
 
 /* Settings panel: the chat model. */
 #settings {
-  margin-top: 8px;
+  margin-top: 0;
   color: var(--dim);
   font-size: 11px;
   font-weight: 700;
@@ -763,7 +871,7 @@ body[data-status="thinking"] .scan-line {
 /* Snapshot panel: a switch, and under it the frame of the last look and the
    crop that went to the image search. */
 #snapshots {
-  margin-top: 8px;
+  margin-top: 0;
   color: var(--dim);
   font-size: 11px;
   font-weight: 700;

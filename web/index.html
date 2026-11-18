@@ -8,42 +8,7 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <main>
-    <header class="hud-header">
-      <h1 class="brand-title"><span aria-hidden="true">// </span>Obsi-Lord</h1>
-      <div class="status-badges">
-        <span id="link-badge" class="brutal-badge">Link: <span id="status">connecting</span></span>
-        <span id="state-badge" class="brutal-badge">idle</span>
-      </div>
-    </header>
-    <div class="viewport-frame">
-      <span id="feed-label" class="viewport-label" aria-hidden="true">SYS.FEED</span>
-      <div class="viewport-screen">
-        <canvas id="face" width="64" height="48" aria-label="Obsi-Lord face"></canvas>
-        <div class="scan-line" aria-hidden="true"></div>
-      </div>
-    </div>
-    <section id="subtitles" aria-live="polite">
-      <p id="user-line"></p>
-      <p id="subtitle" tabindex="0" role="region" aria-label="Reply"></p>
-    </section>
-    <form id="chat" autocomplete="off">
-      <div class="input-wrapper">
-        <span class="input-prefix" aria-hidden="true">&gt;</span>
-        <input id="chat-input" type="text" maxlength="2000" placeholder="Type a message" aria-label="Message">
-      </div>
-      <button id="chat-send" type="submit">Send</button>
-      <button id="chat-talk" type="button">Hold to talk</button>
-    </form>
-    <p id="ptt-hint" data-mode="off"><span id="ptt-dot" aria-hidden="true"></span><span id="ptt-text"></span></p>
-    <p id="error-line" role="alert"></p>
-    <section id="llm-notice" role="status" hidden>
-      <div class="notice-head">
-        <p id="llm-notice-title"></p>
-        <button id="llm-notice-close" type="button" aria-label="Close the notice">Close</button>
-      </div>
-      <ul id="llm-notice-lines"></ul>
-    </section>
+  <aside id="left-panel">
     <details id="settings">
       <summary>Settings</summary>
       <fieldset class="settings-group">
@@ -89,22 +54,50 @@
         <div id="conv-editor" hidden></div>
       </fieldset>
     </details>
-    <section id="snapshots">
-      <label class="snap-switch">
-        <input id="snap-toggle" type="checkbox">
-        <span>Snapshots</span>
-      </label>
-      <div id="snap-panel" hidden>
-        <figure>
-          <figcaption>Camera</figcaption>
-          <div class="snap-frame"><img id="snap-camera" alt="The frame the camera took" hidden></div>
-        </figure>
-        <figure>
-          <figcaption>Sent to search</figcaption>
-          <div class="snap-frame"><img id="snap-search" alt="The crop sent to the image search" hidden></div>
-          <p id="snap-note"></p>
-        </figure>
+  </aside>
+  <dialog id="mem-confirm">
+    <p>Save the changes to this conversation?</p>
+    <div class="mem-confirm-buttons">
+      <button type="button" data-act="save">Save</button>
+      <button type="button" data-act="revert">Revert</button>
+      <button type="button" data-act="keep">Keep editing</button>
+    </div>
+  </dialog>
+  <main>
+    <header class="hud-header">
+      <h1 class="brand-title"><span aria-hidden="true">// </span>Obsi-Lord</h1>
+      <div class="status-badges">
+        <span id="link-badge" class="brutal-badge">Link: <span id="status">connecting</span></span>
+        <span id="state-badge" class="brutal-badge">idle</span>
       </div>
+    </header>
+    <div class="viewport-frame">
+      <span id="feed-label" class="viewport-label" aria-hidden="true">SYS.FEED</span>
+      <div class="viewport-screen">
+        <canvas id="face" width="64" height="48" aria-label="Obsi-Lord face"></canvas>
+        <div class="scan-line" aria-hidden="true"></div>
+      </div>
+    </div>
+    <section id="subtitles" aria-live="polite">
+      <p id="user-line"></p>
+      <p id="subtitle" tabindex="0" role="region" aria-label="Reply"></p>
+    </section>
+    <form id="chat" autocomplete="off">
+      <div class="input-wrapper">
+        <span class="input-prefix" aria-hidden="true">&gt;</span>
+        <input id="chat-input" type="text" maxlength="2000" placeholder="Type a message" aria-label="Message">
+      </div>
+      <button id="chat-send" type="submit">Send</button>
+      <button id="chat-talk" type="button">Hold to talk</button>
+    </form>
+    <p id="ptt-hint" data-mode="off"><span id="ptt-dot" aria-hidden="true"></span><span id="ptt-text"></span></p>
+    <p id="error-line" role="alert"></p>
+    <section id="llm-notice" role="status" hidden>
+      <div class="notice-head">
+        <p id="llm-notice-title"></p>
+        <button id="llm-notice-close" type="button" aria-label="Close the notice">Close</button>
+      </div>
+      <ul id="llm-notice-lines"></ul>
     </section>
     <section id="debug" hidden>
       <div id="debug-states"></div>
@@ -131,6 +124,25 @@
       </div>
     </section>
   </main>
+  <aside id="right-panel">
+    <section id="snapshots">
+      <label class="snap-switch">
+        <input id="snap-toggle" type="checkbox">
+        <span>Snapshots</span>
+      </label>
+      <div id="snap-panel" hidden>
+        <figure>
+          <figcaption>Camera</figcaption>
+          <div class="snap-frame"><img id="snap-camera" alt="The frame the camera took" hidden></div>
+        </figure>
+        <figure>
+          <figcaption>Sent to search</figcaption>
+          <div class="snap-frame"><img id="snap-search" alt="The crop sent to the image search" hidden></div>
+          <p id="snap-note"></p>
+        </figure>
+      </div>
+    </section>
+  </aside>
   <script type="module">
     import { start, getState, onStateChange, skinReady } from "/static/face.js";
     import { initDebug } from "/static/debug.js";

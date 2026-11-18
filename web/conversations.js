@@ -56,6 +56,11 @@ export function conversationNote(msg) {
   }
 }
 
+// "Save" for the conversation open in the editor, "Edit" for the others.
+export function editLabel(id, openId) {
+  return typeof id === "string" && id === openId ? "Save" : "Edit";
+}
+
 // [{ id, label, current }] from the /conversations body.
 export function listItems(body, currentId) {
   if (!body || body.enabled !== true || !Array.isArray(body.conversations)) return [];
@@ -72,9 +77,10 @@ export function reconnectMessage(state) {
 
 // el: { block, list, newBtn, note }. send(text) sends if the socket is open.
 // fetchList() resolves to the /conversations JSON.
-// onEdit(id), when given, adds an Edit button to each entry.
-// Returns { onMessage, announce, setDisabled, refresh }.
-export function initConversations(el, send, fetchList, onEdit) {
+// onEdit(id), when given, adds an Edit button to each entry (labelled Save for
+// the one editOpenId() names; the caller decides what the click does).
+// Returns { onMessage, announce, setDisabled, refresh, rerender }.
+export function initConversations(el, send, fetchList, onEdit, editOpenId) {
   const state = { known: false, id: null };
   let body = null;
   let disabled = false;
@@ -100,7 +106,7 @@ export function initConversations(el, send, fetchList, onEdit) {
           const edit = document.createElement("button");
           edit.type = "button";
           edit.className = "conv-edit";
-          edit.textContent = "Edit";
+          edit.textContent = editLabel(item.id, typeof editOpenId === "function" ? editOpenId() : null);
           edit.addEventListener("click", () => onEdit(item.id));
           li.appendChild(edit);
         }
@@ -144,6 +150,9 @@ export function initConversations(el, send, fetchList, onEdit) {
     },
     refresh() {
       load();
+    },
+    rerender() {
+      render();
     },
     setDisabled(value) {
       disabled = Boolean(value);

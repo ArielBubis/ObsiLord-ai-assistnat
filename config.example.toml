@@ -217,6 +217,11 @@ skin = "dither"   # "dither" (3D face, WebGL) or "code" (8-bit face)
 # stops startup with an error. A characters/ folder in the repo root is
 # gitignored, for your own files. Restart the server after changing this.
 character = ""
+# Shows only the face, the subtitles, the chat row and the error line: no
+# panels, badges, hints or debug tools. Unrelated to the demo_memory setting
+# in the debug section.
+# Read at startup: restart the server, then reload the page.
+demo = false
 
 [audio]
 push_to_talk_key = "Space"
