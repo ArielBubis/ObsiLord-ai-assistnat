@@ -1,57 +1,73 @@
 # Obsi-Lord
 
-Desktop prototype of a voice assistant with an 8-bit animated face. Everything runs on one PC with a webcam. The camera only takes a photo during a conversation turn: when you ask ("what am I holding?") or when the assistant decides to look, limited by a cooldown and an hourly cap.
+A voice assistant with an 8-bit face that lives on your desktop, sees through your webcam when it needs to, and keeps your conversations on your own PC.
 
-Status: working prototype. Text and voice chat, the animated face (pixel and 3D skins), look() with a local vision model, and an optional online lookup for a cut-out of the frame.
+Obsi-Lord is a personal prototype. You talk to it (or type), it answers out loud with a short, dry reply, and its pixel face reacts while it listens, thinks, looks and speaks. It can run fully offline on a local model, or use Gemini when you want a smarter chat model.
+
+**Status:** working prototype. Voice and text chat, the animated face, camera looks, an optional image lookup, and conversation memory all work today.
+
+## Why
+
+Most assistants live in the cloud, listen all the time, and forget you between sessions. Obsi-Lord tries the opposite:
+
+- **Local first.** Speech recognition, speech output, vision and (optionally) the chat model all run on your machine.
+- **The camera is not a stream.** It takes one photo only during a turn: when you ask ("what am I holding?") or when the assistant decides to look, within a cooldown and an hourly cap. The photo is described by a local vision model, and the chat model only ever gets that text.
+- **It remembers, locally.** Conversations are kept in one SQLite file on your PC, and the assistant can search them when you refer to something from before.
+- **It has a character.** Short, spoken replies with a bit of attitude, not a wall of markdown.
+
+## Features
+
+- **Talk or type.** Hold to talk, or type in the chat box. Replies stream as subtitles and are spoken as they arrive.
+- **An animated face.** A 64x48 pixel face with idle, listening, thinking, looking and speaking states, and an optional 3D skin.
+- **Pick your brain.** Gemini, or any local model behind an OpenAI-compatible server (LM Studio, Ollama), switchable from the page. Models with tool support call the camera themselves; for the rest, a small routing step picks the tool.
+- **Looks when it matters.** `look()` takes one photo and asks Qwenny, a small local vision model (Qwen3-VL-2B on llama.cpp), about it.
+- **Identifies things (opt-in).** For things a description can't name, like an album cover or a product, the local model cuts the object out of the photo and only that cut-out goes to an online lookup. Off by default, with hourly and monthly caps.
+- **Conversation memory.** Recent turns go with every request, a reload picks up where you left off, and with a local model the assistant can search older conversations ("what did we talk about yesterday?").
+- **Cost guards built in.** Usage logging, a daily token cap, and look() limits exist before any model call does.
 
 ## How it works
 
-- A browser page is the face, the microphone input, and the speaker output.
-- A Python backend does speech-to-text, the LLM call, text-to-speech (Piper), and the webcam grab.
-- The chat model is Gemini or a local model, picked in the page's Settings panel. Local means any server with an OpenAI-compatible API on your PC: LM Studio (default address `http://127.0.0.1:1234/v1`, turn on just-in-time model loading so the page can switch models) or Ollama, set in `[llm_local]`. The panel lists the server's models, and a note after each switch says what changes: with a local model the chat stays on the PC and costs nothing, but general knowledge is weaker, and a small model can miss a request to look. Models that LM Studio marks as tool-capable call the camera tools themselves, like Gemini; for models without tool support a short routing step picks the tool before each reply (`[llm_local] tool_mode` overrides the choice). Compare models with `python -m obsilord.llm.routecheck --model <id> --repeat 3` (add `--mode native` or `--mode router` to compare both ways, `--no-recall` to leave the memory tool out).
-- Camera frames stay on the PC by default: a small local vision model (Qwen3-VL-2B on llama.cpp, started only while it looks) describes the frame, and the chat model gets that text. Download it once with `python -m obsilord.vision.fetch` (add `--sample` for the photo the live tests use).
-- Optional, off by default: web image search (`[image_search]` in config.toml) for things the local model cannot name, such as an album cover. The local model finds the thing in the frame, the app cuts it out, and only that cut-out is uploaded: to Gemini (the default, same API key as the chat) or to Google Cloud Vision web detection (needs its own key). This is the one feature that sends part of a camera frame off the PC. The assistant is told to use it only when you ask it to identify something, and it has hourly and monthly caps.
-- The Snapshots switch on the page shows the frame the camera took and the cut-out that was sent to the search. The pictures are kept in memory only.
-- Conversation memory (`[memory]`): every finished turn (your text, the reply, and tool results as text) is kept in one SQLite file on the PC, `data/memory.sqlite3` (gitignored). Camera frames are never stored. The last turns go with every request, as before. A page reload continues the conversation if it ended less than 30 minutes ago; Settings, Conversations lists older ones to continue, or starts a new one. With a local model the assistant can also search older conversations itself (the recall tool), for example when you ask "what did we talk about yesterday?". Recall is not offered to Gemini, so old conversations do not go to Google that way. To try it with made-up history, set `[debug] demo_memory = true` (a separate demo file, reseeded at every start) and open the page with `?debug=1` for a list of questions to ask.
-- They talk over a WebSocket bound to 127.0.0.1 only.
-
-## Files
-
-- planning/ (local only, gitignored): PLAN.md (phases with tasks and "done when" checks; work one phase at a time), ARCHITECTURE.md (components, WebSocket protocol, state machine, interfaces, config keys), and handoff specs.
-- CLAUDE.md (local only, gitignored): conventions the coding agent must follow.
-- .claude/agents/ (local only, gitignored): subagents (backend-dev, face-dev, reviewer).
-- prompts/system.md: the assistant's system prompt. prompts/vision.md: instructions for the local vision model.
-- config.example.toml, .env.example, requirements.in, .gitignore: setup files.
-
-## Using this with a coding agent
-
-1. Move this folder to your projects directory and run `git init`.
-2. Open Claude Code in the folder.
-3. Paste the kickoff prompt below.
-
-Kickoff prompt:
-
 ```
-Read CLAUDE.md, planning/PLAN.md and planning/ARCHITECTURE.md. Outline the plan for Phase 0 in a few lines and wait for my OK. Then do Phase 0 only. Use the backend-dev subagent for implementation and the reviewer subagent before committing. Look up current versions of all dependencies before pinning them.
+ browser page                         Python backend (127.0.0.1 only)
+ ------------                         -------------------------------
+ face, mic, speaker  <-- WebSocket -->  speech to text   (faster-whisper)
+                                        chat model       (Gemini or local)
+                                        tools            look, search_image, recall
+                                        vision           (Qwen3-VL-2B, llama.cpp)
+                                        text to speech   (Piper)
+                                        memory           (SQLite + FTS5)
 ```
 
-For later phases: "Continue with Phase N. Same rules."
+One turn: you speak, the backend transcribes it, the chat model answers or calls a tool (take a photo, search memory), and the reply is split into sentences and spoken while the rest is still being written. The face follows the state of the turn.
 
-## Agent harness
+## Privacy
 
-A single agent that reads CLAUDE.md and planning/PLAN.md is enough for a solo prototype. The subagents are optional. They help mainly by keeping the main context clean and by giving you an independent review pass before each commit.
+- The server binds to 127.0.0.1 only. No open ports, no port forwarding.
+- Camera frames are never written to disk or logged. The Snapshots view in the page keeps the last photo in memory only.
+- The only feature that sends part of a photo off the PC is the opt-in image lookup, and it sends only the cut-out.
+- Conversation memory is text only and stays in `data/` (gitignored). Older conversations are searchable by local models only, so they are not sent to Gemini that way.
 
-- Main session: orchestrator. Reads the plan, delegates, integrates, commits once per phase.
-- backend-dev: everything under src/ and tests/.
-- face-dev: everything under web/.
-- reviewer: read-only. Runs after each phase, reports findings, edits nothing.
+## Built with
 
-Delegation per phase:
+Python 3.12, FastAPI, faster-whisper, Piper, llama.cpp, OpenCV, SQLite, plain JavaScript with a canvas face (three.js for the 3D skin), and the Gemini API or any OpenAI-compatible local server.
 
-- Phase 0: backend-dev
-- Phase 1: face-dev
-- Phase 2: backend-dev (LLM, sentence splitter) and face-dev (subtitles, fake mouth) in parallel, since the WebSocket protocol is already fixed in planning/ARCHITECTURE.md
-- Phase 3 and 4: both, in parallel, same reason
-- Phase 5: backend-dev, plus face-dev for the "looking" animation
-- Phase 6 (nice to have): both
-- Reviewer after every phase, before the commit
+## Running it
+
+Windows PC with a webcam and a microphone, Python 3.12.
+
+```
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+copy config.example.toml config.toml
+copy .env.example .env            # add GEMINI_API_KEY to use Gemini
+python -m obsilord.vision.fetch   # downloads llama.cpp and the vision model once
+python -m obsilord
+```
+
+Then open http://127.0.0.1:8765. All settings are in `config.toml`, with comments for each key.
+
+## Roadmap
+
+- Obsidian: conversations and notes in a vault.
+- A Telegram front end, using long polling so no inbound port is needed.
