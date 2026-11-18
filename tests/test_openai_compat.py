@@ -11,10 +11,12 @@ import httpx
 import pytest
 
 from obsilord.config import LocalLLMSettings
+from obsilord.llm import openai_compat
 from obsilord.llm.base import Done, Message, TextDelta, ToolCall, ToolResult, UsageUpdate
 from obsilord.llm.openai_compat import (
     LOCAL_MODE_NOTE,
     MAX_TOOL_RESULT_CHARS,
+    MSG_EMPTY,
     NO_TOOL,
     TOOL_RESULT_HEADER,
     LocalLLMError,
@@ -877,6 +879,75 @@ def test_empty_reply_is_an_error_not_silence() -> None:
     with pytest.raises(LocalLLMError, match="no answer"):
         asyncio.run(go())
     assert got == [UsageUpdate(50, 12, 0)]  # counts still reach the pipeline
+    assert len(script.requests) == 1
+
+
+def finish(reason: str) -> dict[str, Any]:
+    return {"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]}
+
+
+def _empty_stop() -> httpx.Response:
+    # Seen live: the model wrote one token (a newline or a bare tag) and stopped.
+    return sse(delta("\n"), finish("stop"), usage_chunk(50, 1))
+
+
+@pytest.mark.parametrize("mode", ["native", "router"])
+def test_an_empty_reply_that_stopped_is_asked_once_more(mode: str) -> None:
+    replies = [_empty_stop(), sse(delta("Hello."), finish("stop"), usage_chunk(50, 5))]
+    script = Script(*([route("none")] if mode == "router" else []), *replies)
+    got = events(script, ASK, tool_mode=mode)
+    assert "".join(e.text for e in got if isinstance(e, TextDelta)) == "Hello."
+    asks = script.bodies()[-2:]
+    assert asks[0] == asks[1]  # the same request again
+    route_usage = (30, 8) if mode == "router" else (0, 0)
+    # Both attempts are counted.
+    assert got[-1] == Done(route_usage[0] + 100, route_usage[1] + 6, 0)
+
+
+def test_an_empty_follow_up_is_asked_once_more() -> None:
+    call = ToolCall(name="look", args={"question": "q"}, call_id="call_1")
+    results = [ToolResult(call, {"output": "A red mug."})]
+    script = Script(_empty_stop(), sse(delta("A red mug."), finish("stop"), usage_chunk(60, 4)))
+    got = events(script, ASK, tool_mode="native", tool_results=results, allow_tool_calls=False)
+    assert "".join(e.text for e in got if isinstance(e, TextDelta)) == "A red mug."
+    assert len(script.requests) == 2
+
+
+def test_an_empty_reply_twice_is_an_error_that_says_what_happened() -> None:
+    script = Script(_empty_stop(), _empty_stop())
+    got: list[Any] = []
+
+    async def go() -> None:
+        srv = server(script)
+        try:
+            async for event in srv.client("m", system_prompt="S", tool_mode="native").stream_reply(ASK, TOOLS):
+                got.append(event)
+        finally:
+            await srv.aclose()
+
+    with pytest.raises(LocalLLMError) as info:
+        asyncio.run(go())
+    assert str(info.value) == MSG_EMPTY
+    assert "max_output_tokens" not in str(info.value)
+    assert len(script.requests) == 2
+    assert got[-1] == UsageUpdate(100, 2, 0)  # both attempts reach the pipeline
+
+
+def test_a_reply_cut_off_at_max_tokens_is_not_asked_again() -> None:
+    script = Script(sse(delta("<think>so many thoughts"), finish("length"), usage_chunk(50, 400)))
+    with pytest.raises(LocalLLMError, match="max_output_tokens"):
+        events(script, ASK, tool_mode="native")
+    assert len(script.requests) == 1
+
+
+def test_the_prompt_log_shows_the_raw_output_of_an_empty_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged: list[str] = []
+    monkeypatch.setattr(openai_compat.promptlog, "emit", lambda fn, *args: logged.append(fn(*args)))
+    script = Script(_empty_stop(), sse(delta("Hello."), finish("stop"), usage_chunk(50, 5)))
+    events(script, ASK, tool_mode="native")
+    responses = [t for t in logged if " reply response: " in t]
+    assert responses[0].splitlines()[1:] == ["[raw output] '\\n' (finish stop)"]
+    assert responses[1].splitlines()[1:] == ["Hello."]
 
 
 def test_router_timeout_is_not_followed_by_a_reply_request() -> None:

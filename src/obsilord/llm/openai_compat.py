@@ -90,6 +90,9 @@ MSG_NO_TEXT = (
     "the model gave no answer (it may have spent [llm_local] max_output_tokens "
     "thinking; raise it or pick a model without thinking)"
 )
+# The model ended its answer at once, twice in a row (seen with Qwen3.8 27B:
+# one token, then stop). Rare, and a second try usually answers.
+MSG_EMPTY = "the model ended its answer without saying anything, twice"
 MSG_TOOL_TEXT_ONLY = "the model wrote a tool call instead of an answer"
 
 ROUTER_INTRO = (
@@ -137,6 +140,11 @@ class LocalLLMError(RuntimeError):
 
 class LocalLLMUnreachable(LocalLLMError):
     """No connection to the local server. The router does not fall back on it."""
+
+
+class LocalEmptyReply(LocalLLMError):
+    """The model stopped on its own without text or a call. The client asks
+    once more; a second one reaches the pipeline."""
 
 
 class LocalToolsUnsupported(LocalLLMError):
@@ -1113,7 +1121,29 @@ class LocalClient:
         payload = await self._payload(
             [{"role": "system", "content": system}, *_history_messages(history)]
         )
-        async for event in self._stream(payload, history, so_far, call_tools, native=False):
+        async for event in self._stream_twice(payload, history, so_far, call_tools, native=False):
+            yield event
+
+    async def _stream_twice(
+        self,
+        payload: dict[str, Any],
+        history: list[Message],
+        so_far: Usage,
+        call_tools: list[ToolSpec],
+        native: bool,
+    ) -> AsyncIterator[LLMEvent]:
+        """_stream, sent once more when the model stopped without a word.
+        Nothing but counts has gone out then; the second try adds to them."""
+        seen = so_far
+        try:
+            async for event in self._stream(payload, history, so_far, call_tools, native):
+                if isinstance(event, UsageUpdate):
+                    seen = Usage(event.tokens_in, event.tokens_out, event.tokens_thinking)
+                yield event
+            return
+        except LocalEmptyReply:
+            log.warning("local: the model ended its answer without saying anything, asking once more")
+        async for event in self._stream(payload, history, seen, call_tools, native):
             yield event
 
     async def _mode(self) -> str:
@@ -1152,7 +1182,7 @@ class LocalClient:
         payload = await self._payload(
             messages, tools=openai_tools(tools), tool_choice="auto" if first else "none"
         )
-        async for event in self._stream(payload, history, Usage(), tools if first else [], native=True):
+        async for event in self._stream_twice(payload, history, Usage(), tools if first else [], native=True):
             yield event
 
     async def _stream(
@@ -1174,6 +1204,8 @@ class LocalClient:
         started = False  # leading whitespace (after a think block) is dropped
         usage: Usage | None = None
         parts: list[str] = []
+        raw_content: list[str] = []  # unfiltered, for the prompt log of an empty reply
+        finish: str | None = None
         try:
             async with self._server.stream(payload) as response:
                 if response.status_code != 200:
@@ -1210,13 +1242,18 @@ class LocalClient:
                     choices = chunk.get("choices")
                     if not isinstance(choices, list) or not choices:
                         continue
-                    delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+                    choice = choices[0] if isinstance(choices[0], dict) else {}
+                    reason = choice.get("finish_reason")
+                    if isinstance(reason, str) and reason:
+                        finish = reason
+                    delta = choice.get("delta")
                     if native and isinstance(delta, dict):
                         native_calls.feed(delta.get("tool_calls"))
                     content = delta.get("content") if isinstance(delta, dict) else None
                     # reasoning_content / reasoning fields are never spoken.
                     if not isinstance(content, str) or not content:
                         continue
+                    raw_content.append(content)
                     text = tool_text.feed(think.feed(content))
                     if not started:
                         text = text.lstrip()
@@ -1232,14 +1269,10 @@ class LocalClient:
         if rest:
             parts.append(rest)
             yield TextDelta(rest)
-        promptlog.emit(
-            _format_response,
-            n,
-            "reply",
-            "".join(parts) + tool_text.captured + native_calls.summary(),
-            usage,
-            (time.perf_counter() - t0) * 1000,
-        )
+        logged = "".join(parts) + tool_text.captured + native_calls.summary()
+        if not logged:
+            logged = f"[raw output] {''.join(raw_content)!r} (finish {finish})"
+        promptlog.emit(_format_response, n, "reply", logged, usage, (time.perf_counter() - t0) * 1000)
         user_text = history[-1].text if history and history[-1].role == "user" else ""
         calls: list[ToolCall] = []
         if native_calls:
@@ -1257,8 +1290,12 @@ class LocalClient:
         if not parts and not calls:
             # For example a think block cut off by max_tokens. Raised after the
             # last UsageUpdate, so the pipeline still records the counts.
-            only_call = bool(tool_text.captured or native_calls)
-            raise LocalLLMError(MSG_TOOL_TEXT_ONLY if only_call else MSG_NO_TEXT)
+            if tool_text.captured or native_calls:
+                raise LocalLLMError(MSG_TOOL_TEXT_ONLY)
+            if finish == "stop":
+                # Not out of tokens: the model chose to end (asked once more).
+                raise LocalEmptyReply(MSG_EMPTY)
+            raise LocalLLMError(MSG_NO_TEXT)
         if native and calls:
             # The follow-up sends the calls back as the model's own message.
             raw = assistant_message("".join(parts), calls)
