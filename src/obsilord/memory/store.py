@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from obsilord.llm.base import Message, ToolNote
-from obsilord.memory.base import ConversationInfo, Hit, StoredMessage, StoredTurn, TurnRecord
+from obsilord.memory.base import ConversationInfo, Hit, SaveOutcome, StoredMessage, StoredTurn, TurnRecord
 
 T = TypeVar("T")
 
@@ -228,32 +228,36 @@ class SqliteStore:
 
     def _add_turn(self, cid: str, r: TurnRecord) -> None:
         with self._db() as con:
-            row = con.execute("SELECT turns, title FROM conversations WHERE id = ?", (cid,)).fetchone()
-            if row is None:
-                raise KeyError(cid)
-            n = row[0] + 1
-            title = row[1] or _title(r.user_text)
+            self._add_turn_in(con, cid, r)
+
+    @staticmethod
+    def _add_turn_in(con: sqlite3.Connection, cid: str, r: TurnRecord) -> None:
+        row = con.execute("SELECT turns, title FROM conversations WHERE id = ?", (cid,)).fetchone()
+        if row is None:
+            raise KeyError(cid)
+        n = row[0] + 1
+        title = row[1] or _title(r.user_text)
+        con.execute(
+            "INSERT INTO messages (conversation_id, turn, ts, role, text) VALUES (?, ?, ?, 'user', ?)",
+            (cid, n, r.ts, r.user_text),
+        )
+        for note in r.notes:
+            # The photo's file name only; the image itself is never stored.
+            meta = {**({} if note.ok else {"ok": False}), **({"photo": note.photo} if note.photo else {})}
             con.execute(
-                "INSERT INTO messages (conversation_id, turn, ts, role, text) VALUES (?, ?, ?, 'user', ?)",
-                (cid, n, r.ts, r.user_text),
+                "INSERT INTO messages (conversation_id, turn, ts, role, text, tool_name, tool_arg, meta) "
+                "VALUES (?, ?, ?, 'tool', ?, ?, ?, ?)",
+                (cid, n, r.ts, note.result, note.name, note.arg, json.dumps(meta) if meta else None),
             )
-            for note in r.notes:
-                # The photo's file name only; the image itself is never stored.
-                meta = {**({} if note.ok else {"ok": False}), **({"photo": note.photo} if note.photo else {})}
-                con.execute(
-                    "INSERT INTO messages (conversation_id, turn, ts, role, text, tool_name, tool_arg, meta) "
-                    "VALUES (?, ?, ?, 'tool', ?, ?, ?, ?)",
-                    (cid, n, r.ts, note.result, note.name, note.arg, json.dumps(meta) if meta else None),
-                )
-            con.execute(
-                "INSERT INTO messages (conversation_id, turn, ts, role, text, provider, model) "
-                "VALUES (?, ?, ?, 'assistant', ?, ?, ?)",
-                (cid, n, r.ts, r.reply, r.provider, r.model),
-            )
-            con.execute(
-                "UPDATE conversations SET turns = ?, title = ?, last_at = MAX(last_at, ?) WHERE id = ?",
-                (n, title, r.ts, cid),
-            )
+        con.execute(
+            "INSERT INTO messages (conversation_id, turn, ts, role, text, provider, model) "
+            "VALUES (?, ?, ?, 'assistant', ?, ?, ?)",
+            (cid, n, r.ts, r.reply, r.provider, r.model),
+        )
+        con.execute(
+            "UPDATE conversations SET turns = ?, title = ?, last_at = MAX(last_at, ?) WHERE id = ?",
+            (n, title, r.ts, cid),
+        )
 
     # Editing
 
@@ -276,13 +280,6 @@ class SqliteStore:
                 out.append(StoredTurn(n, ts, (message,)))
         return out
 
-    async def message_conversation(self, message_id: int) -> str | None:
-        return await self._call(self._message_conversation, message_id)
-
-    def _message_conversation(self, message_id: int) -> str | None:
-        row = self._db().execute("SELECT conversation_id FROM messages WHERE id = ?", (message_id,)).fetchone()
-        return row[0] if row else None
-
     @staticmethod
     def _first_user_text(con: sqlite3.Connection, cid: str) -> str | None:
         row = con.execute(
@@ -303,31 +300,16 @@ class SqliteStore:
         if new_first is not None:
             con.execute("UPDATE conversations SET title = ? WHERE id = ?", (_title(new_first), cid))
 
-    async def edit_message(self, message_id: int, text: str) -> str | None:
-        """Replace a message's text. Returns its conversation id, None when
-        there is no such message."""
-        return await self._call(self._edit_message, message_id, text)
+    @staticmethod
+    def _edit_in(con: sqlite3.Connection, cid: str, turn: int, role: str, message_id: int, text: str) -> None:
+        old_first = SqliteStore._first_user_text(con, cid) if turn == 1 and role == "user" else None
+        con.execute("UPDATE messages SET text = ? WHERE id = ?", (text, message_id))
+        if old_first is not None:
+            SqliteStore._retitle(con, cid, old_first)
 
-    def _edit_message(self, message_id: int, text: str) -> str | None:
-        with self._db() as con:
-            row = con.execute(
-                "SELECT conversation_id, turn, role FROM messages WHERE id = ?", (message_id,)
-            ).fetchone()
-            if row is None:
-                return None
-            cid, n, role = row
-            old_first = self._first_user_text(con, cid) if n == 1 and role == "user" else None
-            con.execute("UPDATE messages SET text = ? WHERE id = ?", (text, message_id))
-            if old_first is not None:
-                self._retitle(con, cid, old_first)
-        return cid
-
-    async def turn_photos(self, conversation_id: str, turn: int) -> list[str]:
-        """File names of the photos saved with one turn's tool notes."""
-        return await self._call(self._turn_photos, conversation_id, turn)
-
-    def _turn_photos(self, cid: str, turn: int) -> list[str]:
-        rows = self._db().execute(
+    @staticmethod
+    def _turn_photos_in(con: sqlite3.Connection, cid: str, turn: int) -> list[str]:
+        rows = con.execute(
             "SELECT meta FROM messages WHERE conversation_id = ? AND turn = ? AND role = 'tool' "
             "AND meta IS NOT NULL ORDER BY id",
             (cid, turn),
@@ -342,27 +324,89 @@ class SqliteStore:
                 names.append(name)
         return names
 
-    async def delete_turn(self, conversation_id: str, turn: int) -> bool:
-        """Delete one turn and renumber the later ones. Deleting the last
-        remaining turn deletes the conversation."""
-        return await self._call(self._delete_turn, conversation_id, turn)
-
-    def _delete_turn(self, cid: str, turn: int) -> bool:
-        with self._db() as con:
-            old_first = self._first_user_text(con, cid) if turn == 1 else None
-            cur = con.execute("DELETE FROM messages WHERE conversation_id = ? AND turn = ?", (cid, turn))
-            if cur.rowcount == 0:
-                return False
-            con.execute(
-                "UPDATE messages SET turn = turn - 1 WHERE conversation_id = ? AND turn > ?", (cid, turn)
-            )
-            con.execute("UPDATE conversations SET turns = turns - 1 WHERE id = ?", (cid,))
-            left = con.execute("SELECT turns FROM conversations WHERE id = ?", (cid,)).fetchone()
-            if left is not None and left[0] <= 0:
+    @staticmethod
+    def _delete_turn_in(con: sqlite3.Connection, cid: str, turn: int, keep_empty: bool) -> None:
+        """Delete one turn and renumber the later ones. When none is left the
+        conversation row goes too (or, with keep_empty, only an automatic
+        title is cleared so the next added turn titles it)."""
+        old_first = SqliteStore._first_user_text(con, cid) if turn == 1 else None
+        con.execute("DELETE FROM messages WHERE conversation_id = ? AND turn = ?", (cid, turn))
+        con.execute("UPDATE messages SET turn = turn - 1 WHERE conversation_id = ? AND turn > ?", (cid, turn))
+        con.execute("UPDATE conversations SET turns = turns - 1 WHERE id = ?", (cid,))
+        left = con.execute("SELECT turns, title FROM conversations WHERE id = ?", (cid,)).fetchone()
+        if left is not None and left[0] <= 0:
+            if not keep_empty:
                 con.execute("DELETE FROM conversations WHERE id = ?", (cid,))
-            elif old_first is not None:
-                self._retitle(con, cid, old_first)
-        return True
+            elif old_first is not None and left[1] == _title(old_first):
+                con.execute("UPDATE conversations SET title = '' WHERE id = ?", (cid,))
+        elif old_first is not None:
+            SqliteStore._retitle(con, cid, old_first)
+
+    async def save_changes(
+        self,
+        conversation_id: str,
+        expect_turns: int,
+        title: str | None,
+        edits: list[tuple[int, str]],
+        delete_turns: list[int],
+        add_turns: list[tuple[str, str]],
+    ) -> SaveOutcome:
+        """Apply the editor's changes in one transaction: all or nothing.
+
+        "missing": the conversation, an edited message (it must belong to this
+        conversation) or a deleted turn is not there. "stale": the turn count
+        is not expect_turns. Edits of messages in a deleted turn are dropped.
+        Added turns keep the conversation's last_at. A blank title keeps the
+        current one."""
+        return await self._call(
+            self._save_changes, conversation_id, expect_turns, title, edits, delete_turns, add_turns
+        )
+
+    def _save_changes(
+        self,
+        cid: str,
+        expect_turns: int,
+        title: str | None,
+        edits: list[tuple[int, str]],
+        delete_turns: list[int],
+        add_turns: list[tuple[str, str]],
+    ) -> SaveOutcome:
+        with self._db() as con:
+            row = con.execute("SELECT turns, last_at FROM conversations WHERE id = ?", (cid,)).fetchone()
+            if row is None:
+                return SaveOutcome("missing")
+            turns, last_at = row
+            if turns != expect_turns:
+                return SaveOutcome("stale")
+            doomed = sorted(set(delete_turns), reverse=True)
+            if any(not 1 <= n <= turns for n in doomed):
+                return SaveOutcome("missing")
+            live: list[tuple[int, int, str, str]] = []  # (message id, turn, role, text)
+            for message_id, text in edits:
+                found = con.execute(
+                    "SELECT conversation_id, turn, role FROM messages WHERE id = ?", (message_id,)
+                ).fetchone()
+                if found is None or found[0] != cid:
+                    return SaveOutcome("missing")
+                if found[1] not in doomed:
+                    live.append((message_id, found[1], found[2], text))
+            photos: list[str] = []
+            for n in sorted(doomed):
+                photos += self._turn_photos_in(con, cid, n)
+            for message_id, n, role, text in live:
+                self._edit_in(con, cid, n, role, message_id, text)
+            for n in doomed:
+                self._delete_turn_in(con, cid, n, keep_empty=bool(add_turns))
+            for user, reply in add_turns:
+                self._add_turn_in(con, cid, TurnRecord(user, reply, (), "edited", "", last_at))
+            left = con.execute("SELECT turns FROM conversations WHERE id = ?", (cid,)).fetchone()
+            if left is None or left[0] <= 0:
+                con.execute("DELETE FROM conversations WHERE id = ?", (cid,))
+                return SaveOutcome("ok", tuple(photos), True)
+            new_title = (title or "").strip()[:TITLE_MAX_CHARS].strip()
+            if new_title:
+                con.execute("UPDATE conversations SET title = ? WHERE id = ?", (new_title, cid))
+        return SaveOutcome("ok", tuple(photos), False)
 
     async def delete_conversation(self, conversation_id: str) -> bool:
         return await self._call(self._delete_conversation, conversation_id)
@@ -371,19 +415,6 @@ class SqliteStore:
         with self._db() as con:
             con.execute("DELETE FROM messages WHERE conversation_id = ?", (cid,))
             cur = con.execute("DELETE FROM conversations WHERE id = ?", (cid,))
-        return cur.rowcount > 0
-
-    async def rename(self, conversation_id: str, title: str) -> bool:
-        """Set the title (stripped, cut to TITLE_MAX_CHARS). False when the
-        title is blank or the conversation is unknown."""
-        title = title.strip()[:TITLE_MAX_CHARS].strip()
-        if not title:
-            return False
-        return await self._call(self._rename, conversation_id, title)
-
-    def _rename(self, cid: str, title: str) -> bool:
-        with self._db() as con:
-            cur = con.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, cid))
         return cur.rowcount > 0
 
     async def last_turns(self, conversation_id: str, n: int) -> list[Message]:

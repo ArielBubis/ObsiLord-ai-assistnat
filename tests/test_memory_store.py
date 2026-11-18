@@ -384,55 +384,6 @@ def test_turns_lists_every_message_in_order(tmp_path: Path) -> None:
     run(go())
 
 
-def test_edit_message_updates_text_and_search(tmp_path: Path) -> None:
-    async def go() -> None:
-        store = await _store(tmp_path / "t.sqlite3")
-        cid = await store.new_conversation("voice", now=T0)
-        await store.add_turn(cid, turn("favourite colour", "blue", T0))
-        reply = (await store.turns(cid))[0].messages[1]
-        assert await store.edit_message(reply.id, "green") == cid
-        assert [h.reply for h in await store.search("green", 5)] == ["green"]
-        assert await store.search("blue", 5) == []
-        assert await store.edit_message(999999, "x") is None
-        await store.close()
-
-    run(go())
-
-
-def test_delete_turn_renumbers_and_add_turn_continues(tmp_path: Path) -> None:
-    async def go() -> None:
-        store = await _store(tmp_path / "t.sqlite3")
-        cid = await store.new_conversation("voice", now=T0)
-        for i, word in enumerate(["a", "b", "c"]):
-            await store.add_turn(cid, turn(word, word.upper(), T0 + i))
-        assert await store.delete_turn(cid, 2) is True
-        got = await store.turns(cid)
-        assert [t.turn for t in got] == [1, 2]
-        assert _texts(got, "user") == ["a", "c"]
-        info = await store.info(cid)
-        assert info is not None and info.turns == 2
-        await store.add_turn(cid, turn("d", "D", T0 + 5))
-        assert [t.turn for t in await store.turns(cid)] == [1, 2, 3]
-        history = await store.last_turns(cid, 2)
-        assert [m.text for m in history if m.role == "user"] == ["c", "d"]
-        assert await store.delete_turn(cid, 9) is False
-        await store.close()
-
-    run(go())
-
-
-def test_deleting_the_last_turn_deletes_the_conversation(tmp_path: Path) -> None:
-    async def go() -> None:
-        store = await _store(tmp_path / "t.sqlite3")
-        cid = await store.new_conversation("voice", now=T0)
-        await store.add_turn(cid, turn("only", "one", T0))
-        assert await store.delete_turn(cid, 1) is True
-        assert await store.exists(cid) is False
-        await store.close()
-
-    run(go())
-
-
 def test_delete_conversation_removes_messages_and_index(tmp_path: Path) -> None:
     async def go() -> None:
         store = await _store(tmp_path / "t.sqlite3")
@@ -447,69 +398,195 @@ def test_delete_conversation_removes_messages_and_index(tmp_path: Path) -> None:
     run(go())
 
 
-def test_title_follows_the_first_turn(tmp_path: Path) -> None:
+# save_changes: the editor's one atomic save
+
+
+async def _three(tmp_path: Path, name: str = "s.sqlite3") -> tuple[SqliteStore, str]:
+    store = await _store(tmp_path / name)
+    cid = await store.new_conversation("voice", now=T0)
+    for i, word in enumerate(["a", "b", "c"]):
+        await store.add_turn(cid, turn(word, word * 5, T0 + i))
+    return store, cid
+
+
+def _photo_turn(user: str, photo: str, ts: float) -> TurnRecord:
+    return TurnRecord(user, user.upper(), (ToolNote("look", "q", "r", photo=photo),), "x", "m", ts)
+
+
+def test_save_applies_edits_deletes_adds_and_title(tmp_path: Path) -> None:
     async def go() -> None:
-        store = await _store(tmp_path / "t.sqlite3")
-        cid = await store.new_conversation("voice", now=T0)
-        for i, word in enumerate(["dentist on friday", "pizza later", "tea"]):
-            await store.add_turn(cid, turn(word, "ok", T0 + i))
-        assert await store.delete_turn(cid, 1) is True
+        store, cid = await _three(tmp_path)
+        reply = (await store.turns(cid))[0].messages[1]
+        out = await store.save_changes(cid, 3, "T", [(reply.id, "xylophone")], [2], [("d", "e")])
+        assert (out.status, out.photos, out.deleted) == ("ok", (), False)
+        got = await store.turns(cid)
+        assert [t.turn for t in got] == [1, 2, 3]
+        assert _texts(got, "user") == ["a", "c", "d"]
+        assert got[0].messages[1].text == "xylophone"
         info = await store.info(cid)
-        assert info is not None and info.title == "pizza later"
-        first = (await store.turns(cid))[0].messages[0]
-        await store.edit_message(first.id, "pasta later")
-        info = await store.info(cid)
-        assert info is not None and info.title == "pasta later"
-        assert await store.rename(cid, "Food") is True
-        await store.delete_turn(cid, 1)
-        info = await store.info(cid)
-        assert info is not None and info.title == "Food"
+        assert info is not None and info.title == "T" and info.turns == 3
+        assert [h.reply for h in await store.search("xylophone", 5)] == ["xylophone"]
+        assert await store.search("aaaaa", 5) == []
         await store.close()
 
     run(go())
 
 
-def test_message_conversation(tmp_path: Path) -> None:
+def test_save_with_a_stale_turn_count_is_refused(tmp_path: Path) -> None:
     async def go() -> None:
-        store = await _store(tmp_path / "t.sqlite3")
-        cid = await store.new_conversation("voice", now=T0)
-        await store.add_turn(cid, turn("hi", "hello", T0))
-        message = (await store.turns(cid))[0].messages[0]
-        assert await store.message_conversation(message.id) == cid
-        assert await store.message_conversation(999999) is None
+        store, cid = await _three(tmp_path)
+        out = await store.save_changes(cid, 2, "T", [], [1], [("d", "e")])
+        assert out.status == "stale" and out.deleted is False
+        assert _texts(await store.turns(cid), "user") == ["a", "b", "c"]
+        info = await store.info(cid)
+        assert info is not None and info.title == "a"
+        assert (await store.save_changes("nope", 1, None, [], [], [])).status == "missing"
         await store.close()
 
     run(go())
 
 
-def test_rename_strips_and_caps(tmp_path: Path) -> None:
+def test_save_with_a_foreign_message_changes_nothing(tmp_path: Path) -> None:
+    async def go() -> None:
+        store, cid = await _three(tmp_path)
+        other = await store.new_conversation("voice", now=T0)
+        await store.add_turn(other, turn("zzz", "ZZZ", T0))
+        foreign = (await store.turns(other))[0].messages[0]
+        out = await store.save_changes(cid, 3, "T", [(foreign.id, "hacked")], [2], [("d", "e")])
+        assert out.status == "missing"
+        out = await store.save_changes(cid, 3, "T", [(999999, "x")], [2], [])
+        assert out.status == "missing"
+        assert _texts(await store.turns(cid), "user") == ["a", "b", "c"]
+        assert _texts(await store.turns(other), "user") == ["zzz"]
+        await store.close()
+
+    run(go())
+
+
+def test_save_edit_of_a_deleted_turn_is_dropped(tmp_path: Path) -> None:
+    async def go() -> None:
+        store, cid = await _three(tmp_path)
+        second = (await store.turns(cid))[1].messages[0]
+        out = await store.save_changes(cid, 3, None, [(second.id, "edited")], [2], [])
+        assert out.status == "ok"
+        got = await store.turns(cid)
+        assert _texts(got, "user") == ["a", "c"] and [t.turn for t in got] == [1, 2]
+        await store.close()
+
+    run(go())
+
+
+def test_save_deleting_every_turn_deletes_the_conversation(tmp_path: Path) -> None:
+    async def go() -> None:
+        store = await _store(tmp_path / "s.sqlite3")
+        cid = await store.new_conversation("voice", now=T0)
+        await store.add_turn(cid, _photo_turn("a", "p1.jpg", T0))
+        await store.add_turn(cid, turn("b", "B", T0 + 1))
+        await store.add_turn(cid, _photo_turn("c", "p3.jpg", T0 + 2))
+        out = await store.save_changes(cid, 3, "T", [], [1, 2, 3], [])
+        assert out.status == "ok" and out.deleted is True
+        assert sorted(out.photos) == ["p1.jpg", "p3.jpg"]
+        assert await store.exists(cid) is False
+        assert await store.search("A", 5) == []
+        await store.close()
+
+    run(go())
+
+
+def test_save_deleting_a_turn_reports_only_its_photos(tmp_path: Path) -> None:
+    async def go() -> None:
+        store = await _store(tmp_path / "s.sqlite3")
+        cid = await store.new_conversation("voice", now=T0)
+        await store.add_turn(cid, _photo_turn("a", "p1.jpg", T0))
+        await store.add_turn(cid, _photo_turn("b", "p2.jpg", T0 + 1))
+        out = await store.save_changes(cid, 2, None, [], [1], [])
+        assert out.photos == ("p1.jpg",) and out.deleted is False
+        await store.close()
+
+    run(go())
+
+
+def test_save_keeps_last_at_and_auto_title_rules(tmp_path: Path) -> None:
     from obsilord.memory.store import TITLE_MAX_CHARS
 
     async def go() -> None:
-        store = await _store(tmp_path / "t.sqlite3")
+        store = await _store(tmp_path / "s.sqlite3")
         cid = await store.new_conversation("voice", now=T0)
-        await store.add_turn(cid, turn("hi", "hello", T0))
-        assert await store.rename(cid, "  x  ") is True
+        for i, word in enumerate(["dentist on friday", "pizza later", "tea"]):
+            await store.add_turn(cid, turn(word, "ok", T0 + i))
+        # An added turn keeps last_at.
+        out = await store.save_changes(cid, 3, None, [], [], [("u", "r")])
+        assert out.status == "ok"
         info = await store.info(cid)
-        assert info is not None and info.title == "x"
-        await store.rename(cid, "y" * 200)
+        assert info is not None and info.last_at == T0 + 2 and info.turns == 4
+        # Deleting turn 1 with an auto title retitles from the new turn 1.
+        await store.save_changes(cid, 4, None, [], [1], [])
+        info = await store.info(cid)
+        assert info is not None and info.title == "pizza later"
+        # Editing turn 1's user text retitles too.
+        first = (await store.turns(cid))[0].messages[0]
+        await store.save_changes(cid, 3, None, [(first.id, "pasta later")], [], [])
+        info = await store.info(cid)
+        assert info is not None and info.title == "pasta later"
+        # A renamed title is kept; blank means keep.
+        await store.save_changes(cid, 3, "  Food  ", [], [], [])
+        await store.save_changes(cid, 3, "   ", [], [], [])
+        info = await store.info(cid)
+        assert info is not None and info.title == "Food"
+        await store.save_changes(cid, 3, None, [], [1], [])
+        info = await store.info(cid)
+        assert info is not None and info.title == "Food"
+        await store.save_changes(cid, 2, "y" * 200, [], [], [])
         info = await store.info(cid)
         assert info is not None and info.title == "y" * TITLE_MAX_CHARS
-        assert await store.rename(cid, "   ") is False
-        assert await store.rename("missing", "x") is False
         await store.close()
 
     run(go())
 
 
-def test_turn_photos_names_the_photos_of_one_turn(tmp_path: Path) -> None:
+def test_save_deleting_everything_but_adding_turns_keeps_the_conversation(tmp_path: Path) -> None:
     async def go() -> None:
-        store = await _store(tmp_path / "t.sqlite3")
-        cid = await store.new_conversation("voice", now=T0)
-        await store.add_turn(cid, TurnRecord("a", "A", (ToolNote("look", "q", "r", photo="p1.jpg"),), "x", "m", T0))
-        await store.add_turn(cid, turn("b", "B", T0 + 1))
-        assert await store.turn_photos(cid, 1) == ["p1.jpg"]
-        assert await store.turn_photos(cid, 2) == []
-        assert await store.turn_photos(cid, 9) == []
+        store, cid = await _three(tmp_path)
+        out = await store.save_changes(cid, 3, None, [], [1, 2, 3], [("new", "N")])
+        assert out.status == "ok" and out.deleted is False
+        got = await store.turns(cid)
+        assert [t.turn for t in got] == [1] and _texts(got, "user") == ["new"]
+        info = await store.info(cid)
+        assert info is not None and info.title == "new"
+        await store.close()
 
-    asyncio.run(go())
+    run(go())
+
+
+def test_save_with_a_turn_out_of_range_changes_nothing(tmp_path: Path) -> None:
+    async def go() -> None:
+        store, cid = await _three(tmp_path)
+        out = await store.save_changes(cid, 3, "T", [], [2, 9], [])
+        assert out.status == "missing"
+        assert _texts(await store.turns(cid), "user") == ["a", "b", "c"]
+        await store.close()
+
+    run(go())
+
+
+def test_save_that_fails_midway_rolls_everything_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(con: sqlite3.Connection, cid: str, r: TurnRecord) -> None:
+        raise RuntimeError("disk trouble")
+
+    async def go() -> None:
+        store, cid = await _three(tmp_path)
+        before = await store.turns(cid)
+        reply = before[0].messages[1]
+        monkeypatch.setattr(SqliteStore, "_add_turn_in", staticmethod(boom))
+        with pytest.raises(RuntimeError):
+            await store.save_changes(cid, 3, "New title", [(reply.id, "changed")], [2], [("d", "e")])
+        after = await store.turns(cid)
+        assert [(t.turn, [m.text for m in t.messages]) for t in after] == [
+            (t.turn, [m.text for m in t.messages]) for t in before
+        ]
+        info = await store.info(cid)
+        assert info is not None and info.title == "a" and info.turns == 3
+        assert await store.search("changed", 5) == []
+        await store.close()
+
+    run(go())

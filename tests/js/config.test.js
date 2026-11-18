@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 
 import {
   FACE_CONFIG, FACE_CONFIG_URL, validThresholds, validateFaceConfig, loadFaceConfig,
-  getMouthThresholds, resetFaceConfig, FACE_SKINS, getFaceSkin, skinModulePath,
+  getMouthThresholds, resetFaceConfig, getFaceDemo, FACE_SKINS, getFaceSkin, skinModulePath,
   AUDIO_CONFIG_URL, AUDIO_EQ_DEFAULTS, EQ_LIMITS,
   validateAudioConfig, loadAudioSettings, fetchConfigJson, validateMaxUtterance,
   MAX_UTTERANCE_DEFAULT_S, MAX_UTTERANCE_LIMITS,
@@ -29,6 +29,24 @@ test("validThresholds: three strictly increasing numbers in (0, 1]", () => {
   ]) {
     assert.equal(validThresholds(bad), false, JSON.stringify(bad));
   }
+});
+
+test("validateFaceConfig keeps demo only when it is true", () => {
+  assert.equal(validateFaceConfig({ ...good, demo: true }).demo, true);
+  assert.equal(validateFaceConfig({ ...good, demo: false }).demo, false);
+  assert.equal(validateFaceConfig(good).demo, false);
+  assert.equal(validateFaceConfig({ ...good, demo: "yes" }).demo, false);
+  assert.equal(validateFaceConfig({ ...good, demo: 1 }).demo, false);
+  assert.equal(validateFaceConfig(null).demo, false);
+});
+
+test("loadFaceConfig applies demo and resetFaceConfig clears it", async () => {
+  resetFaceConfig();
+  assert.equal(getFaceDemo(), false);
+  await loadFaceConfig(async () => ({ ok: true, json: async () => ({ ...good, demo: true }) }), () => {});
+  assert.equal(getFaceDemo(), true);
+  resetFaceConfig();
+  assert.equal(getFaceDemo(), false);
 });
 
 test("validateFaceConfig accepts a good response without warnings", () => {

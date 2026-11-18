@@ -129,3 +129,22 @@ def test_face_config_has_skin_but_not_character(tmp_path: Path) -> None:
     assert body["skin"] == "code"
     assert "character" not in body
     assert str(path) not in str(body)
+
+
+def test_face_config_sends_demo(tmp_path: Path) -> None:
+    assert _client(_settings(tmp_path)).get("/config/face").json()["demo"] is False
+    on = _client(_settings(tmp_path, demo=True)).get("/config/face").json()
+    assert on["demo"] is True
+
+
+def test_index_has_demo_flag_when_demo_on(tmp_path: Path) -> None:
+    resp = _client(_settings(tmp_path, demo=True)).get("/")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    assert '<body data-demo="true">' in resp.text
+    assert resp.headers["cache-control"] == "no-cache"
+
+
+def test_index_has_no_demo_flag_when_demo_off(tmp_path: Path) -> None:
+    resp = _client(_settings(tmp_path)).get("/")
+    assert "data-demo" not in resp.text

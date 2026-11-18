@@ -67,6 +67,18 @@ class Hit:
     tools: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class SaveOutcome:
+    """The result of one editor save. status: "ok", "missing" (the
+    conversation or a message is not there) or "stale" (the turn count moved
+    since the editor opened it). photos: file names of the deleted turns'
+    photos. deleted: the conversation is gone after the save."""
+
+    status: str
+    photos: tuple[str, ...] = ()
+    deleted: bool = False
+
+
 class SearchSource(Protocol):
     # since/until: unix seconds, since inclusive, until exclusive.
     async def search(
@@ -102,12 +114,14 @@ class MemoryStore(SearchSource, Protocol):
 
     async def turns(self, conversation_id: str) -> list[StoredTurn]: ...
 
-    async def edit_message(self, message_id: int, text: str) -> str | None: ...
-
-    async def delete_turn(self, conversation_id: str, turn: int) -> bool: ...
-
     async def delete_conversation(self, conversation_id: str) -> bool: ...
 
-    async def rename(self, conversation_id: str, title: str) -> bool: ...
-
-    async def message_conversation(self, message_id: int) -> str | None: ...
+    async def save_changes(
+        self,
+        conversation_id: str,
+        expect_turns: int,
+        title: str | None,
+        edits: list[tuple[int, str]],
+        delete_turns: list[int],
+        add_turns: list[tuple[str, str]],
+    ) -> SaveOutcome: ...

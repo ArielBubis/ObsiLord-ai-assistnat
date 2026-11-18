@@ -252,6 +252,7 @@ def test_face_config_endpoint(client: TestClient) -> None:
         "logical_height": 48,
         "mouth_thresholds": [0.05, 0.15, 0.30],
         "skin": "dither",
+        "demo": False,
     }
 
 
@@ -266,7 +267,7 @@ def test_face_config_follows_settings(tmp_path: Path) -> None:
     assert body["mouth_thresholds"] == [0.1, 0.2, 0.4]
     assert body["skin"] == "code"
     # The character path is not exposed: the page loads /face/character.glb.
-    assert set(body) == {"logical_width", "logical_height", "mouth_thresholds", "skin"}
+    assert set(body) == {"logical_width", "logical_height", "mouth_thresholds", "skin", "demo"}
 
 
 def test_audio_config_endpoint(client: TestClient) -> None:

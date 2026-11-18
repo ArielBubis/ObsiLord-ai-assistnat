@@ -61,12 +61,16 @@ first turn). {"type": "conversation", "id": "<id>" | null} continues another
 conversation or starts a new one (refused while a turn or recording runs).
 GET /conversations lists them for the Settings panel; GET /conversations/{id}
 returns one with its turns and messages (read only). The memory editor sends
-{"type": "memory", "action": "edit" | "delete_turn" | "delete_conversation" |
-"rename" | "add_turn", ...} (fields: message, text, conversation, turn,
-title, user, reply; text capped at MAX_EDIT_CHARS); the reply is {"type":
-"memory", "action", "conversation"}, plus a conversation message (reason
-"edited", or "new" when the open one was deleted) when the open conversation
-changed. Refused while a turn runs in the open conversation. recall() is declared
+{"type": "memory", "action": "save", "conversation", "expect_turns",
+"title"?, "edits": [{"message", "text"}], "delete_turns": [turn],
+"add_turns": [{"user", "reply"}]} (all changes in one transaction, at most
+MAX_SAVE_EDITS / MAX_SAVE_DELETES / MAX_SAVE_ADDS of each, text capped at
+MAX_EDIT_CHARS; refused with MSG_MEMORY_STALE when the conversation's turn
+count is not expect_turns) or {"type": "memory", "action":
+"delete_conversation", "conversation"}; the reply is {"type": "memory",
+"action", "conversation"}, plus a conversation message (reason "edited", or
+"new" when the open one is gone) when the open conversation changed. Refused
+while a turn runs or audio records in the open conversation. recall() is declared
 for the local model only. The store is opened on first use; if it cannot be
 opened, memory is off for the session and everything else works. With
 [debug] demo_memory the store is a separate demo file, deleted and seeded
@@ -138,6 +142,10 @@ MAX_SQL_INT = 2**63 - 1  # SQLite integers are 64-bit signed
 MSG_MEMORY_BAD = "That memory change was not understood."
 MSG_MEMORY_MISSING = "That conversation or message no longer exists."
 MAX_EDIT_CHARS = 4000
+MAX_SAVE_EDITS = 500
+MAX_SAVE_DELETES = 500
+MAX_SAVE_ADDS = 50
+MSG_MEMORY_STALE = "This conversation changed since you opened it. Reopen it to edit."
 MSG_BAD_PHOTOS = "Unknown Photos setting."
 
 CHANNEL = "web"
@@ -514,8 +522,16 @@ def create_app(
     recording_limit_s = stt_cfg.max_utterance_s + RECORDING_GRACE_S
 
     @app.get("/", include_in_schema=False)
-    async def index() -> FileResponse:
-        return FileResponse(index_path, media_type="text/html", headers=NO_CACHE)
+    async def index() -> Response:
+        if not settings.face.demo:
+            return FileResponse(index_path, media_type="text/html", headers=NO_CACHE)
+        # [face] demo: mark the body in the served page so the first paint is
+        # already the demo layout (the config fetch arrives later). Fixed
+        # string replace, no user text involved.
+        html = index_path.read_text(encoding="utf-8").replace(
+            "<body>", '<body data-demo="true">', 1
+        )
+        return Response(html, media_type="text/html", headers=NO_CACHE)
 
     @app.get("/config/face", include_in_schema=False)
     async def face_config() -> dict[str, Any]:
@@ -526,6 +542,7 @@ def create_app(
             "logical_height": face.logical_height,
             "mouth_thresholds": list(face.mouth_thresholds),
             "skin": face.skin,
+            "demo": face.demo,
         }
 
     @app.get("/face/character.glb", include_in_schema=False)
@@ -889,116 +906,104 @@ def create_app(
             async with recording_lock:
                 await _handle_memory_locked(payload)
 
-        async def drop_photos(action: str, cid: str, names: list[str]) -> None:
+        async def drop_photos(cid: str, names: tuple[str, ...], whole: bool) -> None:
             """Remove the saved photos of what the editor deleted."""
             try:
-                if action == "delete_conversation" or (
-                    action == "delete_turn" and store is not None and await store.info(cid) is None
-                ):
+                if whole:
                     removed = await photo_store.delete_conversation(cid)
-                elif action == "delete_turn":
-                    removed = await photo_store.delete_files(cid, names)
                 else:
-                    return
+                    removed = await photo_store.delete_files(cid, list(names))
                 log.debug("memory: removed %d photos", removed)
             except Exception as exc:  # noqa: BLE001 - the change is stored; photos are cleaned up later
                 log.warning("photos: could not remove photos (%s)", type(exc).__name__)
 
         async def _handle_memory_locked(payload: dict[str, Any]) -> None:
-            """The memory editor's changes (edit, delete, rename, add a turn).
-            Never logs message text, only the action."""
+            """The memory editor's writes: one atomic save, or delete a
+            conversation. Never logs message text, only the action."""
             if store is None:
                 await send({"type": "error", "message": MSG_MEMORY_OFF})
                 return
             action = payload.get("action")
             bad = {"type": "error", "message": MSG_MEMORY_BAD}
-            missing = {"type": "error", "message": MSG_MEMORY_MISSING}
 
-            def text_field(name: str) -> str | None:
-                v = payload.get(name)
+            def text_of(v: Any) -> str | None:
                 if not isinstance(v, str) or len(v) > MAX_EDIT_CHARS or not v.strip():
                     return None
                 return v
 
-            def int_field(name: str) -> int | None:
-                v = payload.get(name)
+            def int_of(v: Any) -> int | None:
                 if not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= MAX_SQL_INT:
                     return None
                 return v
 
-            def conv_field() -> str | None:
-                v = payload.get("conversation")
-                return v if isinstance(v, str) and _CONVERSATION_ID.fullmatch(v) else None
+            def items(name: str, limit: int) -> list[Any] | None:
+                v = payload.get(name, [])
+                return v if isinstance(v, list) and len(v) <= limit else None
 
-            message_id: int | None = None
-            turn_no: int | None = None
-            cid: str | None = None
-            text: str | None = None
-            title: str | None = None
-            user: str | None = None
-            reply: str | None = None
-            if action == "edit":
-                message_id, text = int_field("message"), text_field("text")
-                if message_id is None or text is None:
-                    await send(bad)
-                    return
-                cid = await store.message_conversation(message_id)
-            elif action == "delete_turn":
-                cid, turn_no = conv_field(), int_field("turn")
-                if cid is None or turn_no is None:
-                    await send(bad)
-                    return
-            elif action == "delete_conversation":
-                cid = conv_field()
-                if cid is None:
-                    await send(bad)
-                    return
-            elif action == "rename":
-                cid, title = conv_field(), text_field("title")
-                if cid is None or title is None:
-                    await send(bad)
-                    return
-            elif action == "add_turn":
-                cid, user, reply = conv_field(), text_field("user"), text_field("reply")
-                if cid is None or user is None or reply is None:
-                    await send(bad)
-                    return
-            else:
+            v = payload.get("conversation")
+            cid = v if isinstance(v, str) and _CONVERSATION_ID.fullmatch(v) else None
+            if cid is None or action not in ("save", "delete_conversation"):
                 await send(bad)
                 return
-            if cid is None or await store.info(cid) is None:
-                await send(missing)
+            expect = 0
+            title: str | None = None
+            edits: list[tuple[int, str]] = []
+            doomed: list[int] = []
+            adds: list[tuple[str, str]] = []
+            if action == "save":
+                raw_edits = items("edits", MAX_SAVE_EDITS)
+                raw_deletes = items("delete_turns", MAX_SAVE_DELETES)
+                raw_adds = items("add_turns", MAX_SAVE_ADDS)
+                expect_in = int_of(payload.get("expect_turns"))
+                raw_title = payload.get("title")
+                if (
+                    raw_edits is None or raw_deletes is None or raw_adds is None or expect_in is None
+                    or not (raw_title is None or (isinstance(raw_title, str) and len(raw_title) <= MAX_EDIT_CHARS))
+                ):
+                    await send(bad)
+                    return
+                expect, title = expect_in, raw_title
+                for e in raw_edits:
+                    mid = int_of(e.get("message")) if isinstance(e, dict) else None
+                    etext = text_of(e.get("text")) if isinstance(e, dict) else None
+                    if mid is None or etext is None:
+                        await send(bad)
+                        return
+                    edits.append((mid, etext))
+                for d in raw_deletes:
+                    turn_no = int_of(d)
+                    if turn_no is None:
+                        await send(bad)
+                        return
+                    doomed.append(turn_no)
+                for a in raw_adds:
+                    user = text_of(a.get("user")) if isinstance(a, dict) else None
+                    reply = text_of(a.get("reply")) if isinstance(a, dict) else None
+                    if user is None or reply is None:
+                        await send(bad)
+                        return
+                    adds.append((user, reply))
+            if await store.info(cid) is None:
+                await send({"type": "error", "message": MSG_MEMORY_MISSING})
                 return
             is_open = cid == conv_id
             if is_open and (recording is not None or turn_running()):
                 await send({"type": "error", "message": MSG_CONVERSATION_BUSY})
                 return
-            ok = True
-            gone_photos: list[str] = []
-            if action == "delete_turn":
-                assert turn_no is not None
-                gone_photos = await store.turn_photos(cid, turn_no)
-            if action == "edit":
-                assert message_id is not None and text is not None
-                ok = await store.edit_message(message_id, text) is not None
-            elif action == "delete_turn":
-                assert turn_no is not None
-                ok = await store.delete_turn(cid, turn_no)
-            elif action == "delete_conversation":
-                ok = await store.delete_conversation(cid)
-            elif action == "rename":
-                assert title is not None
-                ok = await store.rename(cid, title)
+            if action == "delete_conversation":
+                if not await store.delete_conversation(cid):
+                    await send({"type": "error", "message": MSG_MEMORY_MISSING})
+                    return
+                await drop_photos(cid, (), True)
             else:
-                assert user is not None and reply is not None
-                # Keep the conversation's place in the list (and resume).
-                existing = await store.info(cid)
-                stamp = existing.last_at if existing is not None else time.time()
-                await store.add_turn(cid, TurnRecord(user, reply, (), "edited", "", stamp))
-            if not ok:
-                await send(bad if action == "rename" else missing)
-                return
-            await drop_photos(action, cid, gone_photos)
+                outcome = await store.save_changes(cid, expect, title, edits, doomed, adds)
+                if outcome.status == "stale":
+                    await send({"type": "error", "message": MSG_MEMORY_STALE})
+                    return
+                if outcome.status != "ok":
+                    await send({"type": "error", "message": MSG_MEMORY_MISSING})
+                    return
+                await drop_photos(cid, outcome.photos, outcome.deleted)
             log.info("memory: %s", action)
             await send({"type": "memory", "action": action, "conversation": cid})
             if not is_open:

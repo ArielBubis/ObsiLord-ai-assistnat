@@ -222,6 +222,8 @@ class FaceSettings:
     # Character file (.face.glb, .glb or .vrm), relative to the repo root (or
     # absolute). Checked by app startup. Empty means the bundled character.
     character: str = ""  # added in Phase 8
+    # Show only the face, subtitles, chat row and error line (Phase 5h).
+    demo: bool = False
 
 
 @dataclass(frozen=True)

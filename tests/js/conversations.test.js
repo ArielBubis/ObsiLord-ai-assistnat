@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  formatWhen, conversationLabel, conversationMessage, conversationNote, listItems,
+  formatWhen, conversationLabel, conversationMessage, conversationNote, listItems, editLabel,
   reconnectMessage, MAX_TITLE,
 } from "../../web/conversations.js";
 import { checksView, MSG_NO_DEMO } from "../../web/memory_checks.js";
@@ -92,4 +92,10 @@ test("conversationNote treats edited like switch", () => {
     conversationNote({ type: "conversation", reason: "switch", last_at: T, turns: 2 }),
   );
   assert.ok(conversationNote({ type: "conversation", reason: "edited", last_at: T, turns: 2 }).startsWith("Continuing"));
+});
+
+test("editLabel says Save for the conversation open in the editor", () => {
+  assert.equal(editLabel("a", "a"), "Save");
+  assert.equal(editLabel("a", "b"), "Edit");
+  assert.equal(editLabel("a", null), "Edit");
 });

@@ -323,7 +323,7 @@ OPTIONAL_KEYS = {
         "high_shelf_hz",
         "high_shelf_db",
     ],
-    "face": ["skin", "character"],
+    "face": ["skin", "character", "demo"],
 }
 
 
@@ -598,6 +598,23 @@ def test_rejects_unknown_skin(tmp_path: Path, value: str) -> None:
 def test_rejects_wrong_face_types(tmp_path: Path, old: str, new: str, match: str) -> None:
     with pytest.raises(ValueError, match=match):
         _load(_write_replaced(tmp_path, old, new), tmp_path)
+
+
+def test_face_demo_defaults_to_false(tmp_path: Path) -> None:
+    path = _write_replaced(tmp_path, "demo = false\n", "")
+    assert _load(path, tmp_path).face.demo is False
+    assert _load(EXAMPLE, tmp_path).face.demo is False
+
+
+def test_face_demo_can_be_turned_on(tmp_path: Path) -> None:
+    path = _write_replaced(tmp_path, "demo = false", "demo = true")
+    assert _load(path, tmp_path).face.demo is True
+
+
+def test_face_demo_must_be_a_bool(tmp_path: Path) -> None:
+    path = _write_replaced(tmp_path, "demo = false", 'demo = "yes"')
+    with pytest.raises(ValueError, match=r"face\.demo expected bool, got str"):
+        _load(path, tmp_path)
 
 
 def test_character_file_not_checked_by_config(tmp_path: Path) -> None:

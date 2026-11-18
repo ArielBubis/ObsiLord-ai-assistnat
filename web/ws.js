@@ -144,12 +144,18 @@ const conversations = initConversations(
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return resp.json();
   },
-  (id) => memoryEditor.open(id),
+  (id) => {
+    if (memoryEditor.isOpen(id)) memoryEditor.requestSave();
+    else memoryEditor.open(id);
+  },
+  () => memoryEditor.openId(),
 );
 const memoryEditor = initMemoryEditor(
   document.getElementById("conv-editor"),
   (text) => {
-    if (isOpen()) ws.send(text);
+    if (!isOpen()) return false;
+    ws.send(text);
+    return true;
   },
   async (id) => {
     const resp = await fetch(`/conversations/${encodeURIComponent(id)}`, { cache: "no-store" });
@@ -157,6 +163,8 @@ const memoryEditor = initMemoryEditor(
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return resp.json();
   },
+  document.getElementById("mem-confirm"),
+  () => conversations.rerender(),
 );
 
 let ws = null;
@@ -649,7 +657,7 @@ function handleMessage(event) {
       break;
     case "error":
       showError(msg.message);
-      memoryEditor.onError();
+      memoryEditor.onError(msg.message);
       break;
     case "snapshot":
       snapshots.show(msg);
@@ -702,6 +710,7 @@ function connect() {
     if (ws !== sock) return;
     connected = false;
     statusEl.textContent = "disconnected";
+    memoryEditor.onDisconnect();
     // Drop any recording; the server forgets it with the connection.
     if (rec !== null) dropRecording(rec);
     clearOrphan();
