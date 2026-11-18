@@ -128,6 +128,66 @@ def test_recall_by_date_live(mode: str, tmp_path: Path) -> None:
     assert "pita" in answer.lower() or "cat" in answer.lower(), answer
 
 
+def _sample_photo() -> bytes:
+    """The live tests' sample photo at the camera's 768 px edge, as a JPEG."""
+    import cv2
+
+    from obsilord.vision.fetch import SAMPLE_DIR
+
+    path = SAMPLE_DIR / "bee.jpg"
+    if not path.is_file():
+        pytest.skip("sample photo missing: python -m obsilord.vision.fetch --sample")
+    img = cv2.imread(str(path))
+    h, w = img.shape[:2]
+    scale = 768 / max(h, w)
+    ok, buf = cv2.imencode(".jpg", cv2.resize(img, (int(w * scale), int(h * scale))), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    assert ok
+    return buf.tobytes()
+
+
+@pytest.mark.parametrize("mode", ["router", "native"])
+def test_a_vision_model_sees_the_look_photo_live(mode: str) -> None:
+    """Phase 5f: the photo goes to the chat model itself, and a kept photo
+    answers a follow-up."""
+    from dataclasses import replace
+
+    from obsilord.look import LOOK_PHOTO_TOOL, MSG_PHOTO_TAKEN
+    from obsilord.pipeline import PHOTO_NOTE_TEXT
+
+    photo = _sample_photo()
+    ask = [Message("user", "What am I holding? One short sentence.")]
+
+    async def go() -> tuple[bool, str, str, float]:
+        server = OpenAICompatServer(load_settings().llm_local)
+        try:
+            model = os.environ.get("OBSILORD_LOCAL_MODEL", "") or await server.default_model()
+            client = server.client(model, tool_mode=mode)
+            if not await client.sees_images():
+                pytest.skip(f"{model} does not see photos (LM Studio type is not vlm)")
+            call = ToolCall("look", {"question": "What am I holding?"}, call_id="call_1")
+            result = ToolResult(call, {"output": MSG_PHOTO_TAKEN}, image=photo)
+            t0 = time.perf_counter()
+            follow = [
+                e async for e in client.stream_reply(ask, [LOOK_PHOTO_TOOL], tool_results=[result], allow_tool_calls=False)
+            ]
+            ms = (time.perf_counter() - t0) * 1000
+            note = ToolNote("look", "What am I holding?", PHOTO_NOTE_TEXT, image=photo)
+            history = [
+                ask[0],
+                Message("assistant", _text(follow), tools=(note,)),
+                Message("user", "What color is the flower? One word."),
+            ]
+            later = [e async for e in client.stream_reply(history, [LOOK_PHOTO_TOOL])]
+            return True, _text(follow), _text(later), ms
+        finally:
+            await server.aclose()
+
+    _, answer, color, ms = asyncio.run(go())
+    print(f"\n{mode}: {ms:.0f} ms answer {answer!r}\nfollow-up color {color!r}")
+    assert any(w in answer.lower() for w in ("bee", "flower", "cosmos")), answer
+    assert any(w in color.lower() for w in ("pink", "magenta", "purple", "rose")), color
+
+
 @pytest.mark.parametrize("mode", ["router", "native"])
 def test_recall_of_demo_history_live(mode: str, tmp_path: Path) -> None:
     """The model calls recall() for an earlier conversation, the demo store

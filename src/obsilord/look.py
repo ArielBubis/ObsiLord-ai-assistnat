@@ -1,7 +1,9 @@
 """The camera tools: look() and, when [image_search] is on, search_image().
 
 look(): one webcam frame, described by the local vision model. Gemini only
-ever gets text. Looker.look(question) returns the tool response:
+ever gets text. take_photo() is look() for a local chat model that sees
+photos: the frame goes to that model itself and the vision model is not
+started (Phase 5f). Looker.look(question) returns the tool response:
 {"output": answer} or {"error": message}, where message is short and readable
 so the model can pass it on. It never raises except CancelledError.
 
@@ -111,6 +113,19 @@ LOOK_TOOL = ToolSpec(
 )
 
 
+# look() for a chat model that sees photos (a local vision model): the photo
+# goes to the model itself and Qwenny is not used. Same name and argument.
+LOOK_PHOTO_TOOL = ToolSpec(
+    name=LOOK_TOOL.name,
+    description=(
+        "Take one photo with the user's webcam. You get the photo itself and "
+        "look at it yourself. Pass what you want to find out about the view."
+    ),
+    parameters=LOOK_TOOL.parameters,
+)
+MSG_PHOTO_TAKEN = "Photo taken. It is attached: look at it and answer from what you see."
+
+
 SEARCH_IMAGE_TOOL = ToolSpec(
     name="search_image",
     description=(
@@ -154,6 +169,10 @@ class LookTool(Protocol):
     tools: list[ToolSpec]
 
     async def look(self, question: Any, snapshot: Snapshot | None = None) -> dict[str, Any]: ...
+
+    async def take_photo(
+        self, snapshot: Snapshot | None = None
+    ) -> tuple[dict[str, Any], bytes | None]: ...
 
     async def search_image(
         self, target: Any, snapshot: Snapshot | None = None
@@ -294,6 +313,28 @@ class Looker:
             return {"error": MSG_NO_ANSWER}
         log.info("look: answered in %d ms", ms)
         return {"output": answer}
+
+    async def take_photo(
+        self, snapshot: Snapshot | None = None
+    ) -> tuple[dict[str, Any], bytes | None]:
+        """look() for a chat model that sees photos: (response, the frame).
+        Same limiter; the vision model is not started. The frame is None when
+        the look was refused or failed."""
+        refusal = self._limiter.refusal()
+        if refusal is not None:
+            log.info("look: refused (cooldown or hourly cap)")
+            return {"error": refusal}, None
+        self._limiter.record()  # no await since the check, as in look()
+        t0 = time.perf_counter()
+        try:
+            jpeg = await self._camera.capture_jpeg()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the turn goes on with an error result
+            return self._failure(exc), None
+        await _emit(snapshot, "camera", jpeg)
+        log.info("look: photo for the chat model in %d ms", (time.perf_counter() - t0) * 1000)
+        return {"output": MSG_PHOTO_TAKEN}, jpeg
 
     @staticmethod
     def _failure(group: Exception) -> dict[str, Any]:

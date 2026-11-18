@@ -89,7 +89,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from obsilord import promptlog
-from obsilord.config import Settings, memory_db_path
+from obsilord.config import Settings, memory_db_path, photos_dir_path
 from obsilord.face_character import check_character
 from obsilord.llm.base import LLMClient, Message, ToolNote
 from obsilord.llm.openai_compat import LocalLLMError, OpenAICompatServer
@@ -99,6 +99,7 @@ from obsilord.memory.base import ConversationInfo, MemoryStore, TurnRecord
 from obsilord.memory.demo import demo_checks, reset_demo_db, seed_demo
 from obsilord.memory.recall import RecallTool, notes_to_store
 from obsilord.memory.store import SqliteStore
+from obsilord.photos import PHOTO_MODES, PhotoStore, TurnPhotos, attach_photos, keep_newest_photos
 from obsilord.pipeline import MSG_NOT_CAUGHT, run_text_turn, run_voice_turn
 from obsilord.tools import Tool
 from obsilord.stt.base import SAMPLE_RATE as STT_SAMPLE_RATE
@@ -126,6 +127,7 @@ MSG_NOT_RECORDING = "No recording in progress."
 MSG_CONVERSATION_BUSY = "Wait for the current reply before switching the conversation."
 MSG_MEMORY_OFF = "Conversation memory is off."
 MSG_UNKNOWN_CONVERSATION = "Unknown conversation."
+MSG_BAD_PHOTOS = "Unknown Photos setting."
 
 CHANNEL = "web"
 _CONVERSATION_ID = re.compile(r"[0-9a-f]{32}")
@@ -385,10 +387,12 @@ def create_app(
     looker: LookTool | None = None,
     local: OpenAICompatServer | None = None,
     memory: MemoryStore | None = None,
+    photos: PhotoStore | None = None,
 ) -> FastAPI:
-    """Build the app. Pass llm, usage, tts, stt, looker, local, and memory to
-    inject fakes (tests). llm is the Gemini client; local the local LLM
-    server; memory the conversation store (None builds it from [memory]).
+    """Build the app. Pass llm, usage, tts, stt, looker, local, memory, and
+    photos to inject fakes (tests). llm is the Gemini client; local the local
+    LLM server; memory the conversation store (None builds it from [memory]);
+    photos the folder for Photos "disk" (None: [camera] photos_dir).
 
     tts=None loads the voice from settings (nothing is loaded when [tts] voice
     is empty). stt=None loads the STT model from settings (nothing is loaded
@@ -421,6 +425,9 @@ def create_app(
         local = OpenAICompatServer(settings.llm_local)
     if memory is None:
         memory = _default_memory(settings)
+    if photos is None:
+        photos = PhotoStore(photos_dir_path(settings))
+    photo_store = photos
     origins = allowed_origins(settings)
     log.info(
         "chat LLM: pages start on %s (Gemini %s, local server %s)",
@@ -431,6 +438,13 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Saved photos go with [memory] retention_days (0 keeps everything).
+        try:
+            removed = await photo_store.prune(settings.memory.retention_days)
+            if removed:
+                log.info("photos: deleted %d old photos", removed)
+        except OSError as exc:
+            log.warning("photos: could not clean up old photos (%s)", type(exc).__name__)
         yield
         for client in (app.state.llm, app.state.local):
             aclose = getattr(client, "aclose", None)
@@ -533,6 +547,11 @@ def create_app(
             "max_utterance_s": settings.stt.max_utterance_s,
         }
 
+    @app.get("/config/photos", include_in_schema=False)
+    async def photos_config() -> dict[str, Any]:
+        # The Photos setting's default for a page that has not chosen one.
+        return {"default": settings.camera.photos, "keep": settings.camera.photos_keep}
+
     @app.get("/config/llm", include_in_schema=False)
     async def llm_config() -> dict[str, Any]:
         # Both chat providers for the Settings panel. No secrets: only whether
@@ -542,7 +561,7 @@ def create_app(
         error: str | None = None
         try:
             models = [
-                {"id": m.id, "loaded": m.loaded, "tools": m.tools}
+                {"id": m.id, "loaded": m.loaded, "tools": m.tools, "vision": m.vision}
                 for m in await app.state.local.list_models()
             ]
         except LocalLLMError as exc:
@@ -626,6 +645,49 @@ def create_app(
         recall: RecallTool | None = None
         if store is not None and settings.memory.recall:
             recall = RecallTool(store, settings.memory.recall_limit, settings.memory.recall_max_chars)
+
+        # The Photos setting for this page ({"type": "photos", "mode": ...});
+        # [camera] photos until the page says.
+        photo_mode = settings.camera.photos
+        photo_keep = settings.camera.photos_keep
+
+        async def save_photo(jpeg: bytes) -> str:
+            """Photos "disk": write a look's frame next to its conversation,
+            creating the conversation row if this is its first turn."""
+            nonlocal conv_id
+            if store is not None and conv_id is None:
+                conv_id = await store.new_conversation(CHANNEL)
+            return await photo_store.save(conv_id, jpeg)
+
+        def turn_photos() -> TurnPhotos:
+            return TurnPhotos(photo_mode, photo_keep, save_photo if photo_mode == "disk" else None)  # type: ignore[arg-type]
+
+        async def load_photos() -> None:
+            """Photos "disk": give the history its saved frames back (a resumed
+            conversation). Called right before a turn starts, under
+            recording_lock, so no turn changes history meanwhile; frames that
+            are already loaded are not read again."""
+            if photo_mode != "disk" or conv_id is None:
+                return
+            try:
+                await attach_photos(history, photo_store, conv_id, photo_keep)
+            except Exception as exc:  # noqa: BLE001 - photos are optional
+                log.warning("photos: could not load saved photos (%s)", type(exc).__name__)
+
+        async def handle_photos(payload: dict[str, Any]) -> None:
+            nonlocal photo_mode
+            async with recording_lock:
+                mode = payload.get("mode")
+                if mode not in PHOTO_MODES:
+                    await send({"type": "error", "message": MSG_BAD_PHOTOS})
+                    return
+                photo_mode = mode
+                # A running turn may be changing history: then the next turn
+                # drops the photos itself (pipeline), and saved ones load
+                # before the next turn (load_photos).
+                if mode == "off" and not turn_running():
+                    keep_newest_photos(history, 0)
+                await send({"type": "photos", "mode": photo_mode})
 
         def recall_tool() -> Tool | None:
             # Built per turn: its description carries today's date, and the
@@ -828,6 +890,7 @@ def create_app(
             if llm is None:
                 await send({"type": "error", "message": MSG_NO_KEY})
                 return
+            await load_photos()
             start_turn(
                 run_text_turn(
                     text,
@@ -842,6 +905,7 @@ def create_app(
                     looker=app.state.looker,
                     extra_tools=turn_tools(provider, recall_tool()),
                     on_turn=store_turn(provider, llm),
+                    photos=turn_photos(),
                 )
             )
 
@@ -951,6 +1015,7 @@ def create_app(
                 await send({"type": "error", "message": MSG_NO_KEY})
                 await send({"type": "state", "state": "idle"})
                 return
+            await load_photos()
             start_turn(
                 run_voice_turn(
                     pcm16,
@@ -968,6 +1033,7 @@ def create_app(
                     looker=app.state.looker,
                     extra_tools=turn_tools(provider, recall_tool()),
                     on_turn=store_turn(provider, llm),
+                    photos=turn_photos(),
                 )
             )
 
@@ -1018,6 +1084,8 @@ def create_app(
                     continue
                 elif kind == "snapshots":
                     snapshots_on = payload.get("on") is True
+                elif kind == "photos":
+                    await handle_photos(payload)
                 elif kind == "llm":
                     await handle_llm(payload)
                 elif kind == "conversation":

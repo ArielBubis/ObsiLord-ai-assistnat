@@ -97,6 +97,15 @@ def fts_query(text: str) -> str | None:
     return " OR ".join(f'"{t}"*' for t in tokens)
 
 
+def _meta(raw: str | None) -> dict[str, Any]:
+    """A tool row's meta JSON as a dict ({} when empty or unreadable)."""
+    try:
+        value = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def _title(text: str) -> str:
     return " ".join(text.split())[:TITLE_MAX_CHARS]
 
@@ -229,10 +238,12 @@ class SqliteStore:
                 (cid, n, r.ts, r.user_text),
             )
             for note in r.notes:
+                # The photo's file name only; the image itself is never stored.
+                meta = {**({} if note.ok else {"ok": False}), **({"photo": note.photo} if note.photo else {})}
                 con.execute(
                     "INSERT INTO messages (conversation_id, turn, ts, role, text, tool_name, tool_arg, meta) "
                     "VALUES (?, ?, ?, 'tool', ?, ?, ?, ?)",
-                    (cid, n, r.ts, note.result, note.name, note.arg, None if note.ok else json.dumps({"ok": False})),
+                    (cid, n, r.ts, note.result, note.name, note.arg, json.dumps(meta) if meta else None),
                 )
             con.execute(
                 "INSERT INTO messages (conversation_id, turn, ts, role, text, provider, model) "
@@ -265,8 +276,17 @@ class SqliteStore:
                 out.append(Message("user", text))
                 notes = []
             elif role == "tool":
-                ok = not (meta and json.loads(meta).get("ok") is False)
-                notes.append(ToolNote(tool_name or "", tool_arg or "", text, ok=ok))
+                extra = _meta(meta)
+                photo = extra.get("photo")
+                notes.append(
+                    ToolNote(
+                        tool_name or "",
+                        tool_arg or "",
+                        text,
+                        ok=extra.get("ok") is not False,
+                        photo=photo if isinstance(photo, str) else "",
+                    )
+                )
             else:
                 out.append(Message("assistant", text, tools=tuple(notes)))
         return out

@@ -10,9 +10,12 @@ import pytest
 from obsilord.camera import CameraError
 from obsilord.look import (
     DEFAULT_QUESTION,
+    LOOK_PHOTO_TOOL,
+    LOOK_TOOL,
     MAX_QUESTION_CHARS,
     MSG_CAMERA_FAILED,
     MSG_NO_ANSWER,
+    MSG_PHOTO_TAKEN,
     MSG_VISION_FAILED,
     LookLimiter,
     Looker,
@@ -151,6 +154,45 @@ def test_look_returns_the_answer_as_output() -> None:
     assert result == {"output": "The user holds a red mug."}
     assert vision.described == [(b"jpeg-bytes", "What am I holding?")]
     assert vision.exited == 1
+
+
+def test_take_photo_returns_the_frame_without_the_vision_model() -> None:
+    camera, vision = FakeCamera(), FakeVision()
+    sent: list[tuple[str, bytes]] = []
+
+    async def snapshot(kind: str, jpeg: bytes) -> None:
+        sent.append((kind, jpeg))
+
+    response, image = asyncio.run(_looker(camera, vision).take_photo(snapshot))
+    assert response == {"output": MSG_PHOTO_TAKEN}
+    assert image == b"jpeg-bytes"
+    assert sent == [("camera", b"jpeg-bytes")]
+    assert vision.entered == 0  # llama-server never starts
+
+
+def test_take_photo_shares_the_look_limiter() -> None:
+    looker = _looker(FakeCamera(), FakeVision())
+
+    async def go() -> tuple[Any, Any]:
+        await looker.look("one")
+        return await looker.take_photo(), await looker.take_photo()
+
+    (first, image), (second, none) = asyncio.run(go())
+    assert "cooldown" in first["error"].lower() and image is None
+    assert "cooldown" in second["error"].lower() and none is None
+
+
+def test_take_photo_reports_a_camera_failure() -> None:
+    response, image = asyncio.run(_looker(FakeCamera(fail=True), FakeVision()).take_photo())
+    assert response == {"error": MSG_CAMERA_FAILED}
+    assert image is None
+
+
+def test_the_photo_look_tool_keeps_the_name_and_drops_qwenny() -> None:
+    assert LOOK_PHOTO_TOOL.name == LOOK_TOOL.name
+    assert LOOK_PHOTO_TOOL.parameters == LOOK_TOOL.parameters
+    assert "Qwenny" not in LOOK_PHOTO_TOOL.description
+    assert "photo itself" in LOOK_PHOTO_TOOL.description
 
 
 def test_camera_and_model_load_run_at_the_same_time() -> None:

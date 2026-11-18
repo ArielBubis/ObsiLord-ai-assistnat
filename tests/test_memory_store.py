@@ -97,6 +97,26 @@ def test_add_turn_then_last_turns_rebuilds_notes(tmp_path: Path) -> None:
     ]
 
 
+def test_a_photo_name_is_stored_and_the_image_never_is(tmp_path: Path) -> None:
+    note = ToolNote("look", "q", "Photo taken.", photo="20261118-204203-250.jpg", image=b"JPEGDATA")
+    failed = ToolNote("look", "q", "Camera failed.", ok=False, photo="20261118-204204-000.jpg")
+
+    async def go() -> list[Message]:
+        store = await _store(tmp_path / "m.sqlite3")
+        cid = await store.new_conversation("web", now=T0)
+        await store.add_turn(cid, turn("look", "A mug.", T0, (note, failed)))
+        got = await store.last_turns(cid, 1)
+        await store.close()
+        return got
+
+    notes = run(go())[1].tools
+    assert [(n.photo, n.ok, n.image) for n in notes] == [
+        ("20261118-204203-250.jpg", True, None),
+        ("20261118-204204-000.jpg", False, None),
+    ]
+    assert b"JPEGDATA" not in (tmp_path / "m.sqlite3").read_bytes()
+
+
 def test_conversation_info_and_order(tmp_path: Path) -> None:
     async def go() -> list[Any]:
         store = await _store(tmp_path / "m.sqlite3")

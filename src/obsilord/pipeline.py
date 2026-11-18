@@ -63,6 +63,15 @@ tools and run in the same step, without state looking (looking is sent only
 when a camera tool is called). Each extra tool runs at most once per turn
 (MSG_ONE_CALL for more); an exception becomes MSG_TOOL_FAILED.
 
+Photos (photos, see obsilord.photos): when the chat model sees photos
+(llm.sees_images(), a local vision model), look is declared as
+LOOK_PHOTO_TOOL and runs looker.take_photo(), so the frame goes with the
+follow-up as ToolResult.image. Its note says the model looked itself and
+carries the image while Photos keeps it (the newest photos.keep). In "disk"
+mode every look's camera frame (also Qwenny's and search_image's) is saved
+after the tool step and its file name goes in the note; a failed save is
+logged and the turn goes on.
+
 History is updated once the LLM has finished with a non-empty reply (before
 speech ends), so failed LLM turns leave it unchanged. It holds the user text
 and the reply text, and the reply carries ToolNotes: each tool call of the
@@ -80,7 +89,7 @@ import json
 import logging
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Sequence
 
 from obsilord.llm.base import (
@@ -94,7 +103,15 @@ from obsilord.llm.base import (
     UsageUpdate,
     note_from_result,
 )
-from obsilord.look import MSG_ONE_LOOK, MSG_SEARCH_OFF, SEARCH_IMAGE_TOOL, LookTool
+from obsilord.look import (
+    LOOK_PHOTO_TOOL,
+    LOOK_TOOL,
+    MSG_ONE_LOOK,
+    MSG_SEARCH_OFF,
+    SEARCH_IMAGE_TOOL,
+    LookTool,
+)
+from obsilord.photos import TurnPhotos, keep_newest_photos
 from obsilord.sentences import SentenceSplitter
 from obsilord.stt.base import SAMPLE_RATE, STTClient, pcm16_duration_ms
 from obsilord.tools import Tool
@@ -111,6 +128,8 @@ OnTurn = Callable[[str, str, tuple[ToolNote, ...]], Awaitable[None]]
 
 MSG_ONE_CALL = "Only one call to this tool per turn."
 MSG_TOOL_FAILED = "The tool failed."
+# History note of a look whose photo the chat model saw itself.
+PHOTO_NOTE_TEXT = "A photo was taken and you looked at it yourself."
 
 MSG_CAP = "Daily token cap reached. Try again tomorrow."
 MSG_LLM_FAILED = "LLM request failed."
@@ -354,6 +373,7 @@ async def run_text_turn(
     *,
     extra_tools: Sequence[Tool] = (),
     on_turn: OnTurn | None = None,
+    photos: TurnPhotos | None = None,
 ) -> str | None:
     """Run one turn. Returns the reply text, or None if the turn failed.
 
@@ -361,6 +381,7 @@ async def run_text_turn(
     looker: declares look() and runs it; None offers no camera tools.
     extra_tools: other tools to declare (see the module docstring).
     on_turn: awaited once the turn has a reply, to store it.
+    photos: the Photos setting (see obsilord.photos); None is "off".
 
     Never raises except CancelledError. Unexpected errors are logged (type name
     only) and reported to the client as a generic error, best effort.
@@ -383,6 +404,7 @@ async def run_text_turn(
             deadline=deadline,
             extra_tools=extra_tools,
             on_turn=on_turn,
+            photos=photos,
         )
     except asyncio.CancelledError:
         raise
@@ -410,6 +432,7 @@ async def run_voice_turn(
     *,
     extra_tools: Sequence[Tool] = (),
     on_turn: OnTurn | None = None,
+    photos: TurnPhotos | None = None,
 ) -> str | None:
     """Run one spoken turn: STT, then the text turn body with the transcript.
 
@@ -436,6 +459,7 @@ async def run_voice_turn(
             looker,
             extra_tools=extra_tools,
             on_turn=on_turn,
+            photos=photos,
         )
     except asyncio.CancelledError:
         raise
@@ -444,6 +468,19 @@ async def run_voice_turn(
         await _send_quietly(send, {"type": "error", "message": MSG_UNEXPECTED})
         await _send_quietly(send, {"type": "state", "state": "idle"})
         return None
+
+
+async def _sees_images(llm: LLMClient) -> bool:
+    """Whether the chat model takes photos (a local vision model). Clients
+    without sees_images (Gemini) and a failing check count as no."""
+    check = getattr(llm, "sees_images", None)
+    if check is None:
+        return False
+    try:
+        return await check() is True
+    except Exception as exc:  # noqa: BLE001 - look() falls back to Qwenny
+        log.warning("image support check failed: %s", type(exc).__name__)
+        return False
 
 
 def _counts_toward_cap(llm: LLMClient) -> bool:
@@ -495,6 +532,7 @@ async def _run_voice_turn(
     *,
     extra_tools: Sequence[Tool] = (),
     on_turn: OnTurn | None = None,
+    photos: TurnPhotos | None = None,
 ) -> str | None:
     t0 = time.monotonic()
     # One deadline for STT and the rest of the turn.
@@ -557,6 +595,7 @@ async def _run_voice_turn(
         voice=_VoiceTiming(stt_ms, audio_ms),
         extra_tools=extra_tools,
         on_turn=on_turn,
+        photos=photos,
     )
 
 
@@ -576,6 +615,7 @@ async def _run_turn(
     voice: _VoiceTiming | None = None,
     extra_tools: Sequence[Tool] = (),
     on_turn: OnTurn | None = None,
+    photos: TurnPhotos | None = None,
 ) -> str | None:
     """The shared turn body after state thinking has been sent.
 
@@ -586,21 +626,57 @@ async def _run_turn(
     if not await _cap_allows(usage, llm, send):
         return None
 
+    photos = photos or TurnPhotos()
+    if not photos.kept:
+        # Photos is "off" (maybe switched while an earlier turn ran): no
+        # earlier photo goes with this request.
+        keep_newest_photos(history, 0)
     messages = [*history, Message(role="user", text=text)]
     camera_tools = list(looker.tools) if looker is not None else []
+    # A model that sees photos gets the frame from look() instead of Qwenny's text.
+    sees = any(t.name == LOOK_TOOL.name for t in camera_tools) and await _sees_images(llm)
+    if sees:
+        camera_tools = [LOOK_PHOTO_TOOL if t.name == LOOK_TOOL.name else t for t in camera_tools]
     camera_names = {tool.name for tool in camera_tools}
     extra = {t.spec.name: t for t in extra_tools if t.spec.name not in camera_names}
     tools = [*camera_tools, *(t.spec for t in extra.values())]
     tool_names = {tool.name for tool in tools}
     turn_results: list[ToolResult] = []
     finished: tuple[str, tuple[ToolNote, ...]] | None = None
+    frame: bytes | None = None  # the camera frame of this turn's look, for "disk"
+    camera_index: int | None = None  # which result ran the camera
+    saved_name = ""
 
     async def snapshot(kind: str, jpeg: bytes) -> None:
         # The frame (kind "camera") or the crop about to be uploaded ("search")
         # for the page's snapshot panel. The app's send drops these unless the
         # page asked for them. Never logged.
+        nonlocal frame
+        if kind == "camera":
+            frame = jpeg
         b64 = base64.b64encode(jpeg).decode("ascii")
         await send({"type": "snapshot", "kind": kind, "jpeg_b64": b64})
+
+    async def save_frame() -> str:
+        """"disk": write this turn's frame. A failure is logged, never fatal."""
+        if photos.mode != "disk" or photos.save is None or frame is None:
+            return ""
+        try:
+            return await photos.save(frame)
+        except Exception as exc:  # noqa: BLE001 - the turn goes on without it
+            log.warning("photo not saved: %s", type(exc).__name__)
+            return ""
+
+    def turn_notes() -> tuple[ToolNote, ...]:
+        notes = []
+        for i, r in enumerate(turn_results):
+            note = note_from_result(r)
+            if r.image is not None:
+                note = replace(note, result=PHOTO_NOTE_TEXT, image=r.image if photos.kept else None)
+            if i == camera_index and saved_name:
+                note = replace(note, photo=saved_name)
+            notes.append(note)
+        return tuple(notes)
     splitter = SentenceSplitter()
     sentence_count = 0
     st = _TurnState()
@@ -709,7 +785,7 @@ async def _run_turn(
     async def run_tools() -> list[ToolResult]:
         """Answer every call of the first request; only the first camera tool
         call (look or search_image) runs, and each other tool once."""
-        nonlocal look_ms
+        nonlocal look_ms, camera_index
         # Speech from before the call (including a sentence the splitter still
         # holds) goes out first, so no speaking state lands in the tool step.
         rest = splitter.flush()
@@ -735,10 +811,17 @@ async def _run_turn(
                 results.append(ToolResult(call, {"error": MSG_ONE_LOOK}))
             elif call.name == SEARCH_IMAGE_TOOL.name:
                 looked = True
+                camera_index = len(results)
                 response = await looker.search_image(call.args.get("target"), snapshot)
                 results.append(ToolResult(call, response))
+            elif sees:
+                looked = True
+                camera_index = len(results)
+                response, image = await looker.take_photo(snapshot)
+                results.append(ToolResult(call, response, image=image))
             else:
                 looked = True
+                camera_index = len(results)
                 response = await looker.look(call.args.get("question"), snapshot)
                 results.append(ToolResult(call, response))
         look_ms = int((time.monotonic() - t_look) * 1000)
@@ -750,6 +833,7 @@ async def _run_turn(
             failed = await stream_once(None)
             if failed is None and calls and tools:
                 turn_results = await run_tools()
+                saved_name = await save_frame()
                 if _cap_reached(usage, llm):
                     capped = True
                 else:
@@ -764,10 +848,11 @@ async def _run_turn(
                     {"type": "transcript", "role": "assistant", "text": reply, "final": True}
                 )
                 if reply.strip():
-                    notes = tuple(note_from_result(r) for r in turn_results)
+                    notes = turn_notes()
                     history.append(Message(role="user", text=text))
                     history.append(Message(role="assistant", text=reply, tools=notes))
                     trim_history(history, history_turns)
+                    keep_newest_photos(history, photos.kept)
                     finished = (reply, notes)
                 else:
                     log.warning("turn: the model gave no text (%d requests)", st.requests)

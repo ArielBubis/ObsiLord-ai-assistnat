@@ -63,6 +63,22 @@
         <p id="llm-server" class="settings-dim"></p>
         <p id="llm-status" class="settings-dim" aria-live="polite"></p>
       </fieldset>
+      <fieldset class="settings-group">
+        <legend>Photos</legend>
+        <label class="settings-choice">
+          <input type="radio" name="photos-mode" value="off">
+          <span>Don't keep <span class="settings-dim">(used for that reply only)</span></span>
+        </label>
+        <label class="settings-choice">
+          <input type="radio" name="photos-mode" value="followup">
+          <span>Keep for follow-ups <span class="settings-dim">(in memory, newest only)</span></span>
+        </label>
+        <label class="settings-choice">
+          <input type="radio" name="photos-mode" value="disk">
+          <span>Save to disk <span class="settings-dim">(data/photos on this PC)</span></span>
+        </label>
+        <p class="settings-dim">Follow-ups see a photo again only with a local model that sees photos. Other models get Qwenny's description, as before.</p>
+      </fieldset>
       <fieldset id="conv-group" class="settings-group" hidden>
         <legend>Conversations</legend>
         <div class="settings-row">

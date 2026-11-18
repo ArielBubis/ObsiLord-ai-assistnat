@@ -1,8 +1,9 @@
 """CameraService: one webcam frame per look(), as a JPEG in memory (OpenCV).
 
 opencv-python 5.0.0.93 (pinned). cv2 is imported lazily, inside functions.
-Frames are never written to disk or logged; the log gets timings and the frame
-size only. Checked on the dev machine 2026-10-27 (Logitech Brio 100) with a
+Frames are never logged (the log gets timings and the frame size only), and
+this module never writes them to disk: only obsilord.photos does, with Photos
+set to "disk". Checked on the dev machine 2026-10-27 (Logitech Brio 100) with a
 local bench script (not in the repo):
 - cv2.VideoCapture(0) with OpenCV's default Windows backend (Media
   Foundation) hung inside the call; Ctrl+C did not reach it.

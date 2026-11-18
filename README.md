@@ -20,7 +20,7 @@ Most assistants live in the cloud, listen all the time, and forget you between s
 - **Talk or type.** Hold to talk, or type in the chat box. Replies stream as subtitles and are spoken as they arrive.
 - **An animated face.** A 3D character rendered with three.js and redrawn as dots (dither, halftone or ASCII), with a backdrop of a voice ring and drifting orbs. It has idle, listening, thinking, looking and speaking states, blinks and glances, a mouth driven by the speech audio, and expressions saved in the character. Bring your own character as a .glb or .vrm file. A 64x48 8-bit face is the alternative skin, and the fallback when WebGL is not available.
 - **Pick your brain.** Gemini, or any local model behind an OpenAI-compatible server (LM Studio, Ollama), switchable from the page. Models with tool support call the camera themselves; for the rest, a small routing step picks the tool.
-- **Looks when it matters.** `look()` takes one photo and asks Qwenny, a small local vision model (Qwen3-VL-2B on llama.cpp), about it.
+- **Looks when it matters.** `look()` takes one photo. A local chat model that sees images gets the photo itself; for Gemini and text-only models, Qwenny, a small local vision model (Qwen3-VL-2B on llama.cpp), describes it. Settings, Photos chooses whether photos are dropped after the reply, kept for follow-ups ("what color was it?"), or saved to disk.
 - **Identifies things (opt-in).** For things a description can't name, like an album cover or a product, the local model cuts the object out of the photo and only that cut-out goes to an online lookup. Off by default, with hourly and monthly caps.
 - **Conversation memory.** Recent turns go with every request, a reload within 30 minutes picks up where you left off (older conversations can be continued from Settings), and with a local model the assistant can search older conversations ("what did we talk about yesterday?").
 - **Cost guards built in.** Usage logging, a daily token cap, and look() limits exist before any model call does.
@@ -43,7 +43,7 @@ One turn: you speak, the backend transcribes it, the chat model answers or calls
 ## Privacy
 
 - The server binds to 127.0.0.1 only. No open ports, no port forwarding.
-- Camera frames are never written to disk or logged. The Snapshots view in the page keeps the last photo in memory only.
+- Camera frames are never logged, and they are written to disk only if you set Photos to "Save to disk" in Settings (into `data/photos/`, gitignored). By default a photo is used for its reply and then dropped. The Snapshots view in the page keeps the last photo in memory only.
 - The only feature that sends part of a photo off the PC is the opt-in image lookup, and it sends only the cut-out.
 - Conversation memory is text only and stays in `data/` (gitignored). Older conversations are searchable by local models only, so they are not sent to Gemini that way.
 

@@ -13,6 +13,7 @@ from obsilord.config import (
     load_secrets,
     load_settings,
     parse_dotenv,
+    photos_dir_path,
 )
 
 EXAMPLE = REPO_ROOT / "config.example.toml"
@@ -628,6 +629,36 @@ def test_vision_section_is_optional(
     s = _load(_without_vision_section(tmp_path), tmp_path)
     assert s.vision == VisionSettings()
     assert "vision.backend" in caplog.text  # listed as defaulted
+
+
+def test_photo_keys_from_example(tmp_path: Path) -> None:
+    s = _load(EXAMPLE, tmp_path)
+    assert (s.camera.photos, s.camera.photos_keep, s.camera.photos_dir) == ("off", 2, "data/photos")
+    assert photos_dir_path(s) == s.repo_root / "data" / "photos"
+
+
+def test_photo_keys_are_optional(tmp_path: Path) -> None:
+    text = EXAMPLE.read_text(encoding="utf-8")
+    start = text.index("# Photos (Settings, Photos)")
+    end = text.index("[vision]")
+    path = tmp_path / "config.toml"
+    path.write_text(text[:start] + text[end:], encoding="utf-8")
+    s = _load(path, tmp_path)
+    assert (s.camera.photos, s.camera.photos_keep, s.camera.photos_dir) == ("off", 2, "data/photos")
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "match"),
+    [
+        ('photos = "off"', 'photos = "always"', "camera.photos"),
+        ("photos_keep = 2", "photos_keep = -1", "camera.photos_keep"),
+        ("photos_keep = 2", "photos_keep = 11", "camera.photos_keep"),
+        ('photos_dir = "data/photos"', 'photos_dir = " "', "camera.photos_dir"),
+    ],
+)
+def test_bad_photo_keys_are_rejected(tmp_path: Path, old: str, new: str, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        _load(_write_replaced(tmp_path, old, new), tmp_path)
 
 
 def test_camera_keys_added_in_phase_5_are_optional(tmp_path: Path) -> None:

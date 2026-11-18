@@ -149,6 +149,19 @@ class FakeToolLLM:
             yield event
 
 
+class SeeingToolLLM(FakeToolLLM):
+    """FakeToolLLM for a local model that sees photos (sees_images)."""
+
+    def __init__(self, rounds: list[list[Any]], sees: bool | Exception = True) -> None:
+        super().__init__(rounds)
+        self.sees = sees
+
+    async def sees_images(self) -> bool:
+        if isinstance(self.sees, Exception):
+            raise self.sees
+        return self.sees
+
+
 class FakeLooker:
     """Returns `response` for every look or search; questions and targets
     record the arguments. search: also declare search_image().
@@ -169,6 +182,9 @@ class FakeLooker:
         self.tools = [LOOK_TOOL, SEARCH_IMAGE_TOOL] if search else [LOOK_TOOL]
         # Sent through the snapshot callback of each call, as (kind, jpeg).
         self.snapshots: list[tuple[str, bytes]] = []
+        # take_photo(): the frame it returns and how often it ran.
+        self.photo: bytes | None = b"photo-jpeg"
+        self.photos_taken = 0
 
     async def _answer(self, snapshot: Any) -> dict[str, Any]:
         if self.delay_s:
@@ -185,6 +201,16 @@ class FakeLooker:
     async def search_image(self, target: Any, snapshot: Any = None) -> dict[str, Any]:
         self.targets.append(target)
         return await self._answer(snapshot)
+
+    async def take_photo(self, snapshot: Any = None) -> tuple[dict[str, Any], bytes | None]:
+        self.photos_taken += 1
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
+        if snapshot is not None and self.photo is not None:
+            await snapshot("camera", self.photo)
+        if self.photo is None:
+            return {"error": "The camera could not take a photo."}, None
+        return {"output": "Photo taken."}, self.photo
 
 
 class FakeTTS:

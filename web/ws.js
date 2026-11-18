@@ -35,6 +35,7 @@ import { createPlayer } from "./audio.js";
 import { createMic, micErrorMessage } from "./audio_in.js";
 import { loadAudioSettings, MAX_UTTERANCE_DEFAULT_S } from "./config.js";
 import { initSnapshots } from "./snapshots.js";
+import { initPhotos } from "./photos.js";
 import { initSettings } from "./settings.js";
 import { initConversations } from "./conversations.js";
 import {
@@ -110,6 +111,22 @@ const settings = initSettings(
     return resp.json();
   },
 );
+
+const photos = initPhotos(
+  { radios: [...document.querySelectorAll('input[name="photos-mode"]')] },
+  safeStorage(),
+  (text) => {
+    if (isOpen()) ws.send(text);
+  },
+);
+fetch("/config/photos", { cache: "no-store" })
+  .then((resp) => (resp.ok ? resp.json() : null))
+  .then((cfg) => {
+    if (cfg) photos.setDefault(cfg.default);
+  })
+  .catch(() => {
+    // The radios show "off" until the server says otherwise.
+  });
 
 const conversations = initConversations(
   {
@@ -622,6 +639,9 @@ function handleMessage(event) {
     case "snapshot":
       snapshots.show(msg);
       break;
+    case "photos":
+      photos.show(msg);
+      break;
     case "notice":
       settings.showNotice(msg);
       break;
@@ -651,6 +671,7 @@ function connect() {
     if (errorLine.textContent === NOT_CONNECTED) errorLine.textContent = "";
     sock.send(JSON.stringify({ type: "ping" }));
     snapshots.announce();
+    photos.announce();
     settings.announce();
     conversations.announce();
     updateHint();

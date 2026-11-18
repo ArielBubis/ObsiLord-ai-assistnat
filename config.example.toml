@@ -113,7 +113,8 @@ high_shelf_hz = 3500.0
 high_shelf_db = 0.0
 
 [camera]
-# Used by look(). Frames stay in memory: never written to disk or logged.
+# Used by look(). Frames stay in memory and are never logged. They are written
+# to disk only with Photos set to "Save to disk" (see photos below).
 device_index = 0
 max_edge_px = 768      # longest edge sent to the vision model (64 to 4096)
 warmup_frames = 5      # frames read and dropped after opening (exposure settles)
@@ -123,6 +124,19 @@ max_per_hour = 30      # looks per rolling hour (at least 1)
 # "any". Media Foundation hung on open on the dev machine (Brio 100).
 api = "dshow"
 timeout_s = 20         # limit for opening the camera and grabbing one frame
+# Photos (Settings, Photos): what happens to a look's photo after the reply.
+# The page's choice wins; this is the default for a page that has none.
+#   "off"       used for that reply only (a local model that sees photos gets
+#               it; otherwise Qwenny describes it, as before)
+#   "followup"  the photos_keep newest photos stay in memory and go with later
+#               turns to a local model that sees photos
+#   "disk"      as "followup", and every look's frame is saved to
+#               photos_dir/<conversation>/<time>.jpg (gitignored under data/).
+#               A resumed conversation gets its photos back. Old photos are
+#               deleted after the memory section's retention_days.
+photos = "off"
+photos_keep = 2        # 0 to 10
+photos_dir = "data/photos"
 
 [vision]
 # Local vision model for look(): the frame is described on this PC and Gemini

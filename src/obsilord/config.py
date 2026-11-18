@@ -134,6 +134,10 @@ class TTSSettings:
 
 
 CAMERA_APIS = ("dshow", "msmf", "any")
+# The Photos setting (obsilord.photos.PHOTO_MODES, repeated here so config
+# imports nothing from the app).
+PHOTO_MODES = ("off", "followup", "disk")
+PHOTOS_KEEP_MAX = 10
 CAMERA_MAX_EDGE_MIN_PX = 64
 CAMERA_MAX_EDGE_MAX_PX = 4096
 CAMERA_WARMUP_MAX = 60
@@ -152,6 +156,12 @@ class CameraSettings:
     api: str = "dshow"  # added in Phase 5
     # Limit for opening the camera and grabbing one frame, in seconds.
     timeout_s: float = 20.0  # added in Phase 5
+    # Photos setting default, one of PHOTO_MODES (see obsilord.photos). Added
+    # in Phase 5f; the page's choice wins.
+    photos: str = "off"
+    photos_keep: int = 2
+    # Relative to the repo root unless absolute. Written only in "disk" mode.
+    photos_dir: str = "data/photos"
 
 
 VISION_BACKENDS = ("cuda", "cpu")
@@ -577,6 +587,16 @@ def _check_camera(camera: CameraSettings) -> None:
         )
     if not camera.timeout_s > 0:
         raise ValueError(f"config: camera.timeout_s must be > 0, got {camera.timeout_s:g}")
+    if camera.photos not in PHOTO_MODES:
+        raise ValueError(
+            f"config: camera.photos must be one of {list(PHOTO_MODES)}, got {camera.photos!r}"
+        )
+    if not 0 <= camera.photos_keep <= PHOTOS_KEEP_MAX:
+        raise ValueError(
+            f"config: camera.photos_keep must be in 0..{PHOTOS_KEEP_MAX}, got {camera.photos_keep}"
+        )
+    if not camera.photos_dir.strip():
+        raise ValueError("config: camera.photos_dir must not be empty")
 
 
 def _check_vision(vision: VisionSettings) -> None:
@@ -690,6 +710,12 @@ def _check_memory(memory: MemorySettings) -> None:
             raise ValueError(f"config: memory.{name} must be >= 0, got {getattr(memory, name)}")
     if memory.list_limit < 1:
         raise ValueError(f"config: memory.list_limit must be >= 1, got {memory.list_limit}")
+
+
+def photos_dir_path(settings: Settings) -> Path:
+    """[camera] photos_dir, relative paths against the repo root."""
+    path = Path(settings.camera.photos_dir)
+    return path if path.is_absolute() else settings.repo_root / path
 
 
 def memory_db_path(settings: Settings) -> Path:

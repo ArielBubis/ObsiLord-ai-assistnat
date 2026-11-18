@@ -18,12 +18,18 @@ class ToolNote:
 
     arg: the call's first string argument (the question, target or query).
     result: the output, or the error when ok is False. One line, capped.
+    photo: the file name of the look's frame when Photos is "disk" (see
+    obsilord.photos), "" otherwise. Stored with the note.
+    image: the frame itself (JPEG) while it is kept for follow-ups, in memory
+    only. Never stored, compared or printed.
     """
 
     name: str
     arg: str
     result: str
     ok: bool = True
+    photo: str = ""
+    image: bytes | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -71,10 +77,13 @@ class ToolResult:
     """The answer to one ToolCall, sent with the follow-up request.
 
     response is a JSON object: {"output": ...} on success or {"error": ...}.
+    image: the photo itself (JPEG) for a model that sees photos, None
+    otherwise. Never compared or printed.
     """
 
     call: ToolCall
     response: dict[str, Any]
+    image: bytes | None = field(default=None, compare=False, repr=False)
 
 
 def note_from_result(result: ToolResult, limit: int = NOTE_MAX_CHARS) -> ToolNote:

@@ -4,6 +4,7 @@ model list. All HTTP goes through httpx.MockTransport (no server needed)."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from typing import Any, AsyncIterator, Callable
 
@@ -12,12 +13,13 @@ import pytest
 
 from obsilord.config import LocalLLMSettings
 from obsilord.llm import openai_compat
-from obsilord.llm.base import Done, Message, TextDelta, ToolCall, ToolResult, UsageUpdate
+from obsilord.llm.base import Done, Message, TextDelta, ToolCall, ToolNote, ToolResult, UsageUpdate
 from obsilord.llm.openai_compat import (
     LOCAL_MODE_NOTE,
     MAX_TOOL_RESULT_CHARS,
     MSG_EMPTY,
     NO_TOOL,
+    PHOTO_NOTE,
     TOOL_RESULT_HEADER,
     LocalLLMError,
     LocalLLMTimeout,
@@ -1106,9 +1108,9 @@ def _models(script: Script, **settings: Any) -> list[LocalModel]:
 def test_lmstudio_model_list_is_chat_models_loaded_first() -> None:
     script = Script(httpx.Response(200, json=LMSTUDIO_MODELS))
     assert _models(script) == [
-        LocalModel("qwen3-14b", True, False),
-        LocalModel("gemma-12b", False, False),
-        LocalModel("qwen3-vl-8b", False, False),
+        LocalModel("qwen3-14b", True, False, False),
+        LocalModel("gemma-12b", False, False, False),
+        LocalModel("qwen3-vl-8b", False, False, True),  # type "vlm": sees photos
     ]
     assert script.paths() == ["/api/v0/models"]
 
@@ -1132,6 +1134,122 @@ def test_lmstudio_model_list_reads_tool_support() -> None:
 def test_openai_model_list_does_not_know_tool_support() -> None:
     script = Script(httpx.Response(404), httpx.Response(200, json={"data": [{"id": "llama3.2"}]}))
     assert [m.tools for m in _models(script)] == [None]
+
+
+def test_openai_model_list_does_not_know_vision() -> None:
+    script = Script(httpx.Response(404), httpx.Response(200, json={"data": [{"id": "llama3.2"}]}))
+    assert [m.vision for m in _models(script)] == [None]
+
+
+# --- photos for a model that sees them (Phase 5f) ------------------------------------
+
+JPEG = b"\xff\xd8photo"
+IMAGE_PART = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(JPEG).decode()}}
+VLM_LIST = {"object": "list", "data": [{"id": "qwen3-14b", "type": "vlm", "state": "loaded", "capabilities": ["tool_use"]}]}
+LLM_LIST = {"object": "list", "data": [{"id": "qwen3-14b", "type": "llm", "state": "loaded", "capabilities": ["tool_use"]}]}
+PHOTO_CALL = ToolCall(name="look", args={"question": "What am I holding?"}, call_id="call_1")
+
+
+def _photo_result() -> ToolResult:
+    return ToolResult(PHOTO_CALL, {"output": "Photo taken."}, image=JPEG)
+
+
+def _noted(image: bytes | None) -> list[Message]:
+    note = ToolNote("look", "What am I holding?", "A photo was taken.", image=image)
+    return [
+        Message("user", "What am I holding?"),
+        Message("assistant", "A red mug.", tools=(note,)),
+        Message("user", "What color was it?"),
+    ]
+
+
+def test_sees_images_asks_the_model_list_once() -> None:
+    script = Script(httpx.Response(200, json=VLM_LIST))
+
+    async def go() -> list[bool]:
+        srv = server(script, tool_mode="native")
+        try:
+            client = srv.client("qwen3-14b", system_prompt="SYS")
+            return [await client.sees_images(), await client.sees_images()]
+        finally:
+            await srv.aclose()
+
+    assert asyncio.run(go()) == [True, True]
+    assert script.paths() == ["/api/v0/models"]
+
+
+def test_a_text_model_does_not_see_images() -> None:
+    async def go() -> bool:
+        srv = server(Script(httpx.Response(200, json=LLM_LIST)))
+        try:
+            return await srv.client("qwen3-14b").sees_images()
+        finally:
+            await srv.aclose()
+
+    assert asyncio.run(go()) is False
+
+
+def test_native_follow_up_puts_the_photo_in_the_tool_message() -> None:
+    script = Script(httpx.Response(200, json=VLM_LIST), sse(delta("A red mug."), finish("stop"), usage_chunk()))
+    events(script, ASK, tool_mode="native", tool_results=[_photo_result()], allow_tool_calls=False)
+    messages = script.bodies()[-1]["messages"]
+    tool = next(m for m in messages if m["role"] == "tool")
+    assert tool["content"] == [{"type": "text", "text": json.dumps({"output": "Photo taken."})}, IMAGE_PART]
+    assert PHOTO_NOTE in messages[0]["content"]
+
+
+def test_router_follow_up_puts_the_photo_in_the_user_message() -> None:
+    script = Script(httpx.Response(200, json=VLM_LIST), sse(delta("A red mug."), finish("stop"), usage_chunk()))
+    events(script, ASK, tool_mode="router", tool_results=[_photo_result()], allow_tool_calls=False)
+    messages = script.bodies()[-1]["messages"]
+    assert messages[-1] == {
+        "role": "user",
+        "content": [{"type": "text", "text": "What am I holding?"}, IMAGE_PART],
+    }
+    assert PHOTO_NOTE in messages[0]["content"]
+
+
+def test_a_model_that_does_not_see_images_gets_text_only() -> None:
+    script = Script(httpx.Response(200, json=LLM_LIST), sse(delta("Hm."), finish("stop"), usage_chunk()))
+    events(script, ASK, tool_mode="native", tool_results=[_photo_result()], allow_tool_calls=False)
+    body = json.dumps(script.bodies()[-1])
+    assert "image_url" not in body and PHOTO_NOTE not in body
+
+
+def test_a_kept_photo_goes_with_the_native_history() -> None:
+    script = Script(httpx.Response(200, json=VLM_LIST), sse(delta("Red."), finish("stop"), usage_chunk()))
+    events(script, _noted(JPEG), tool_mode="native")
+    messages = script.bodies()[-1]["messages"]
+    tool = next(m for m in messages if m["role"] == "tool")
+    assert tool["content"][1] == IMAGE_PART
+
+
+def test_a_kept_photo_goes_with_the_router_history_in_its_user_message() -> None:
+    script = Script(route("none"), httpx.Response(200, json=VLM_LIST), sse(delta("Red."), finish("stop"), usage_chunk()))
+    events(script, _noted(JPEG), tool_mode="router")
+    messages = script.bodies()[-1]["messages"]
+    assert messages[1] == {"role": "user", "content": [{"type": "text", "text": "What am I holding?"}, IMAGE_PART]}
+    assert messages[-1] == {"role": "user", "content": "What color was it?"}
+
+
+def test_history_without_photos_asks_no_model_list() -> None:
+    script = Script(sse(delta("Red."), finish("stop"), usage_chunk()))
+    events(script, _noted(None), tool_mode="native")
+    assert script.paths() == ["/v1/chat/completions"]
+    assert "image_url" not in json.dumps(script.bodies()[-1])
+
+
+def test_the_prompt_log_shows_images_as_a_placeholder() -> None:
+    payload = {
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "What am I holding?"}, IMAGE_PART]},
+            {"role": "tool", "content": [{"type": "text", "text": "{}"}, IMAGE_PART]},
+        ],
+    }
+    text = _format_request(1, "reply", payload)
+    assert text.splitlines()[1:] == ["[user] What am I holding? [image]", "[tool] {} [image]"]
+    assert base64.b64encode(JPEG).decode() not in text
 
 
 def _tool_mode(setting: str, listed: Any, model: str = "m") -> tuple[str, str]:
