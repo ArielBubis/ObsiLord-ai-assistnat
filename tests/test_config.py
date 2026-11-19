@@ -919,6 +919,24 @@ def test_memory_rejects_bad_values(tmp_path: Path, old: str, new: str, match: st
         load_settings(path, env_path=tmp_path / "missing.env", environ={})
 
 
+def test_tools_max_rounds_default_and_optional(tmp_path: Path) -> None:
+    s = load_settings(EXAMPLE, env_path=tmp_path / "missing.env", environ={})
+    assert s.tools.max_rounds == 3
+    text = EXAMPLE.read_text(encoding="utf-8")
+    start = text.index("[tools]")
+    end = text.index("[", start + 1)
+    path = tmp_path / "config.toml"
+    path.write_text(text[:start] + text[end:], encoding="utf-8")
+    assert load_settings(path, env_path=tmp_path / "missing.env", environ={}).tools.max_rounds == 3
+
+
+@pytest.mark.parametrize("value", ["0", "7"])
+def test_tools_max_rounds_rejects_out_of_range(tmp_path: Path, value: str) -> None:
+    path = _write_replaced(tmp_path, "max_rounds = 3", f"max_rounds = {value}")
+    with pytest.raises(ValueError, match="max_rounds"):
+        load_settings(path, env_path=tmp_path / "missing.env", environ={})
+
+
 def test_memory_db_path_resolves_against_the_repo(tmp_path: Path) -> None:
     from obsilord.config import DEMO_DB_PATH, memory_db_path
 

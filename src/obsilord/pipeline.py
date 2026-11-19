@@ -37,17 +37,25 @@ closes that sentence with tts_end if tts_start was sent, and sends at most one
 On timeout, LLM error, or cancellation the worker is cancelled and awaited
 before error and idle are sent, so no binary frame follows the idle.
 
-Without a TTSClient the Phase 2 sequence is kept: state speaking is sent on the
-first text delta.
+Without a TTSClient, state speaking is sent on the first text delta.
 
-look() (when a LookTool is given, the tool is declared): if the first request
-ends with a ToolCall, the speech queued so far is sent first, then state
-looking, then the look (only the first look call runs; others get
-MSG_ONE_LOOK, unknown tools an error), then state thinking. A second cap check
-follows, then one follow-up request with the tool results and
-allow_tool_calls=False. Speaking is sent again on the follow-up's first audio
-frame (or text delta without TTS). At most two requests per turn. If the cap
-is reached before the follow-up, the turn ends with the cap error.
+Tools (a Registry, see obsilord.tools.registry): the turn's tools come from
+the registry once per turn, from whether the model is a cloud model and
+whether it sees photos. A request that ends with ToolCalls starts a tool
+round: the speech queued so far is sent first, then state looking if a call
+uses the camera (policy face_state), then every call runs in order through
+the registry (which applies the limits, the groups, the timeouts and the
+block of acting tools after untrusted output), then state thinking. The next
+request carries every round so far. Up to max_rounds rounds; the request
+after the last allowed round forbids further calls (allow_tool_calls=False),
+so a turn makes at most max_rounds + 1 requests. Every request after the
+first is preceded by a cap check for a counted client; if the cap is reached
+then, the turn ends with the cap error. Speaking is sent again on the first
+audio frame (or text delta without TTS) after a round.
+
+A cloud model gets the history without the tool notes of tools whose results
+may not go to it (TurnTools.cloud_visible): private-data tools that are off
+for a cloud model, and any tool not offered now.
 
 Usage accounting: once a request has been started, usage is always recorded,
 in a finally block, so failed, timed-out, and cancelled streams count toward
@@ -58,18 +66,13 @@ the cap. Each request is recorded on its own:
   the client's prompt_overhead_chars, i.e. the system prompt, + the tool
   results) / 4 for input and max_output_tokens for output.
 
-Other tools (extra_tools, for example recall) are declared after the camera
-tools and run in the same step, without state looking (looking is sent only
-when a camera tool is called). Each extra tool runs at most once per turn
-(MSG_ONE_CALL for more); an exception becomes MSG_TOOL_FAILED.
-
 Photos (photos, see obsilord.photos): when the chat model sees photos
-(llm.sees_images(), a local vision model), look is declared as
-LOOK_PHOTO_TOOL and runs looker.take_photo(), so the frame goes with the
-follow-up as ToolResult.image. Its note says the model looked itself and
-carries the image while Photos keeps it (the newest photos.keep). In "disk"
-mode every look's camera frame (also Qwenny's and search_image's) is saved
-after the tool step and its file name goes in the note; a failed save is
+(llm.sees_images(), a local vision model), the camera source offers the photo
+variant of look, whose result carries the frame (ToolResult.image) to the
+next request. Its note says the model looked itself and carries the image
+while Photos keeps it (the newest photos.keep). In "disk" mode the turn's
+camera frame (also Qwenny's and search_image's) is saved after its round and
+its file name goes in the note of the call that took it; a failed save is
 logged and the turn goes on.
 
 History is updated once the LLM has finished with a non-empty reply (before
@@ -90,7 +93,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, AsyncIterator, Awaitable, Callable, Sequence
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from obsilord.llm.base import (
     Done,
@@ -103,18 +106,10 @@ from obsilord.llm.base import (
     UsageUpdate,
     note_from_result,
 )
-from obsilord.look import (
-    LOOK_PHOTO_TOOL,
-    LOOK_TOOL,
-    MSG_ONE_LOOK,
-    MSG_SEARCH_OFF,
-    SEARCH_IMAGE_TOOL,
-    LookTool,
-)
 from obsilord.photos import TurnPhotos, keep_newest_photos
 from obsilord.sentences import SentenceSplitter
 from obsilord.stt.base import SAMPLE_RATE, STTClient, pcm16_duration_ms
-from obsilord.tools import Tool
+from obsilord.tools.registry import Registry, TurnContext, TurnInfo, TurnTools
 from obsilord.tts.base import TTSClient
 from obsilord.tts.text import clean_for_speech
 from obsilord.usage import CapExceeded, UsageTracker
@@ -126,8 +121,8 @@ Send = Callable[[dict[str, Any] | bytes], Awaitable[None]]
 # Called once per finished turn with (user text, reply, tool notes).
 OnTurn = Callable[[str, str, tuple[ToolNote, ...]], Awaitable[None]]
 
-MSG_ONE_CALL = "Only one call to this tool per turn."
-MSG_TOOL_FAILED = "The tool failed."
+# Tool rounds per turn when the caller does not say ([tools] max_rounds).
+DEFAULT_MAX_ROUNDS = 3
 # History note of a look whose photo the chat model saw itself.
 PHOTO_NOTE_TEXT = "A photo was taken and you looked at it yourself."
 
@@ -369,17 +364,17 @@ async def run_text_turn(
     max_output_tokens: int = 200,
     turn_timeout_s: float = 60.0,
     tts: TTSClient | None = None,
-    looker: LookTool | None = None,
     *,
-    extra_tools: Sequence[Tool] = (),
+    tools: Registry | None = None,
+    max_rounds: int = DEFAULT_MAX_ROUNDS,
     on_turn: OnTurn | None = None,
     photos: TurnPhotos | None = None,
 ) -> str | None:
     """Run one turn. Returns the reply text, or None if the turn failed.
 
     tts: speak the reply sentence by sentence; None keeps text-only behavior.
-    looker: declares look() and runs it; None offers no camera tools.
-    extra_tools: other tools to declare (see the module docstring).
+    tools: the tools the model may call (see the module docstring); None
+    offers none. max_rounds: tool rounds per turn.
     on_turn: awaited once the turn has a reply, to store it.
     photos: the Photos setting (see obsilord.photos); None is "off".
 
@@ -399,10 +394,10 @@ async def run_text_turn(
             history_turns,
             max_output_tokens,
             tts,
-            looker,
             t0=t0,
             deadline=deadline,
-            extra_tools=extra_tools,
+            tools=tools,
+            max_rounds=max_rounds,
             on_turn=on_turn,
             photos=photos,
         )
@@ -428,9 +423,9 @@ async def run_voice_turn(
     max_output_tokens: int = 200,
     turn_timeout_s: float = 60.0,
     tts: TTSClient | None = None,
-    looker: LookTool | None = None,
     *,
-    extra_tools: Sequence[Tool] = (),
+    tools: Registry | None = None,
+    max_rounds: int = DEFAULT_MAX_ROUNDS,
     on_turn: OnTurn | None = None,
     photos: TurnPhotos | None = None,
 ) -> str | None:
@@ -456,8 +451,8 @@ async def run_voice_turn(
             max_output_tokens,
             turn_timeout_s,
             tts,
-            looker,
-            extra_tools=extra_tools,
+            tools=tools,
+            max_rounds=max_rounds,
             on_turn=on_turn,
             photos=photos,
         )
@@ -488,6 +483,11 @@ def _counts_toward_cap(llm: LLMClient) -> bool:
     return getattr(llm, "counts_toward_cap", True) is not False
 
 
+def _is_cloud(llm: LLMClient) -> bool:
+    """Whether the client's requests leave the PC; unknown counts as yes."""
+    return getattr(llm, "cloud", True) is not False
+
+
 def _cap_reached(usage: UsageTracker, llm: LLMClient) -> bool:
     if not _counts_toward_cap(llm):
         return False
@@ -509,6 +509,16 @@ async def _cap_allows(usage: UsageTracker, llm: LLMClient, send: Send) -> bool:
     return True
 
 
+def cloud_history(history: list[Message], visible: Callable[[str], bool]) -> list[Message]:
+    """history for a cloud model: tool notes of tools whose results may not go
+    to it (private data, or a tool not offered now) are left out."""
+    out: list[Message] = []
+    for m in history:
+        kept = tuple(n for n in m.tools if visible(n.name))
+        out.append(m if len(kept) == len(m.tools) else replace(m, tools=kept))
+    return out
+
+
 @dataclass(frozen=True)
 class _VoiceTiming:
     stt_ms: int
@@ -528,9 +538,9 @@ async def _run_voice_turn(
     max_output_tokens: int,
     turn_timeout_s: float,
     tts: TTSClient | None,
-    looker: LookTool | None,
     *,
-    extra_tools: Sequence[Tool] = (),
+    tools: Registry | None,
+    max_rounds: int,
     on_turn: OnTurn | None = None,
     photos: TurnPhotos | None = None,
 ) -> str | None:
@@ -589,11 +599,11 @@ async def _run_voice_turn(
         history_turns,
         max_output_tokens,
         tts,
-        looker,
         t0=t0,
         deadline=deadline,
         voice=_VoiceTiming(stt_ms, audio_ms),
-        extra_tools=extra_tools,
+        tools=tools,
+        max_rounds=max_rounds,
         on_turn=on_turn,
         photos=photos,
     )
@@ -608,12 +618,12 @@ async def _run_turn(
     history_turns: int,
     max_output_tokens: int,
     tts: TTSClient | None,
-    looker: LookTool | None = None,
     *,
     t0: float,
     deadline: float,
     voice: _VoiceTiming | None = None,
-    extra_tools: Sequence[Tool] = (),
+    tools: Registry | None,
+    max_rounds: int,
     on_turn: OnTurn | None = None,
     photos: TurnPhotos | None = None,
 ) -> str | None:
@@ -631,31 +641,42 @@ async def _run_turn(
         # Photos is "off" (maybe switched while an earlier turn ran): no
         # earlier photo goes with this request.
         keep_newest_photos(history, 0)
-    messages = [*history, Message(role="user", text=text)]
-    camera_tools = list(looker.tools) if looker is not None else []
-    # A model that sees photos gets the frame from look() instead of Qwenny's text.
-    sees = any(t.name == LOOK_TOOL.name for t in camera_tools) and await _sees_images(llm)
-    if sees:
-        camera_tools = [LOOK_PHOTO_TOOL if t.name == LOOK_TOOL.name else t for t in camera_tools]
-    camera_names = {tool.name for tool in camera_tools}
-    extra = {t.spec.name: t for t in extra_tools if t.spec.name not in camera_names}
-    tools = [*camera_tools, *(t.spec for t in extra.values())]
-    tool_names = {tool.name for tool in tools}
-    turn_results: list[ToolResult] = []
+    cloud = _is_cloud(llm)
+
+    async def sees_images() -> bool:
+        return await _sees_images(llm)
+
+    turn_tools: TurnTools | None = None
+    if tools is not None:
+        try:
+            turn_tools = await tools.for_turn(TurnInfo(cloud, sees_images))
+        except Exception as exc:  # noqa: BLE001 - a broken source must not end the turn
+            # The turn goes on without tools (and a cloud model gets no notes).
+            log.error("turn tools failed, answering without tools: %s", type(exc).__name__)
+    specs = turn_tools.specs if turn_tools is not None else []
+    sent_history = history
+    if cloud:
+        sent_history = cloud_history(history, turn_tools.cloud_visible if turn_tools else lambda name: False)
+    messages = [*sent_history, Message(role="user", text=text)]
+    rounds: list[list[ToolResult]] = []
     finished: tuple[str, tuple[ToolNote, ...]] | None = None
     frame: bytes | None = None  # the camera frame of this turn's look, for "disk"
-    camera_index: int | None = None  # which result ran the camera
+    camera_index: int | None = None  # which result of the turn ran the camera
+    running_index = 0  # the result the running tool call will be
     saved_name = ""
 
     async def snapshot(kind: str, jpeg: bytes) -> None:
         # The frame (kind "camera") or the crop about to be uploaded ("search")
         # for the page's snapshot panel. The app's send drops these unless the
         # page asked for them. Never logged.
-        nonlocal frame
+        nonlocal frame, camera_index
         if kind == "camera":
             frame = jpeg
+            camera_index = running_index
         b64 = base64.b64encode(jpeg).decode("ascii")
         await send({"type": "snapshot", "kind": kind, "jpeg_b64": b64})
+
+    context = TurnContext(snapshot=snapshot)
 
     async def save_frame() -> str:
         """"disk": write this turn's frame. A failure is logged, never fatal."""
@@ -669,7 +690,7 @@ async def _run_turn(
 
     def turn_notes() -> tuple[ToolNote, ...]:
         notes = []
-        for i, r in enumerate(turn_results):
+        for i, r in enumerate(r for results in rounds for r in results):
             note = note_from_result(r)
             if r.image is not None:
                 note = replace(note, result=PHOTO_NOTE_TEXT, image=r.image if photos.kept else None)
@@ -677,6 +698,7 @@ async def _run_turn(
                 note = replace(note, photo=saved_name)
             notes.append(note)
         return tuple(notes)
+
     splitter = SentenceSplitter()
     sentence_count = 0
     st = _TurnState()
@@ -686,7 +708,7 @@ async def _run_turn(
     capped = False
     reply: str | None = None
     llm_ms = 0
-    look_ms: int | None = None
+    tools_ms: int | None = None
     calls: list[ToolCall] = []
 
     queue: asyncio.Queue[SpeechItem] = asyncio.Queue()
@@ -701,20 +723,21 @@ async def _run_turn(
             for sentence in sentences:
                 queue.put_nowait(sentence)
 
-    async def stream_once(tool_results: list[ToolResult] | None) -> Exception | None:
-        """One LLM request. Its usage is always recorded. Returns the provider
-        error, if any. ToolCalls are collected from the first request only."""
+    async def stream_once(allow: bool) -> Exception | None:
+        """One LLM request after the rounds so far. Its usage is always
+        recorded. Returns the provider error, if any. ToolCalls are collected
+        only when calls are allowed."""
         nonlocal llm_ms
         ru = _RequestUsage()
         error: Exception | None = None
         started = False
-        extra_chars = sum(len(json.dumps(r.response)) for r in tool_results or [])
-        # The follow-up's text joins the text from before the call: keep a space.
-        gap = tool_results is not None and bool(st.parts) and not st.parts[-1][-1:].isspace()
+        extra_chars = sum(len(json.dumps(r.response)) for results in rounds for r in results)
+        # Text after a tool round joins the text from before it: keep a space.
+        gap = bool(rounds) and bool(st.parts) and not st.parts[-1][-1:].isspace()
         t_llm = time.monotonic()
         try:
             stream = llm.stream_reply(
-                messages, tools, tool_results=tool_results, allow_tool_calls=tool_results is None
+                messages, specs, rounds=[list(r) for r in rounds], allow_tool_calls=allow
             )
             started = True
             try:
@@ -751,7 +774,7 @@ async def _run_turn(
                         )
                         enqueue(splitter.feed(event.text))
                     elif isinstance(event, ToolCall):
-                        if tool_results is None:
+                        if allow:
                             calls.append(event)
                     elif isinstance(event, UsageUpdate):
                         ru.last_usage = event
@@ -772,72 +795,44 @@ async def _run_turn(
                     st.tokens_thinking += ru.done.tokens_thinking
         return error
 
-    async def run_extra(call: ToolCall, used: set[str]) -> dict[str, Any]:
-        if call.name in used:
-            return {"error": MSG_ONE_CALL}
-        used.add(call.name)
-        try:
-            return await extra[call.name].run(dict(call.args))
-        except Exception as exc:  # noqa: BLE001 - a tool error is the model's to explain
-            log.warning("tool %s failed: %s", call.name, type(exc).__name__)
-            return {"error": MSG_TOOL_FAILED}
-
-    async def run_tools() -> list[ToolResult]:
-        """Answer every call of the first request; only the first camera tool
-        call (look or search_image) runs, and each other tool once."""
-        nonlocal look_ms, camera_index
-        # Speech from before the call (including a sentence the splitter still
-        # holds) goes out first, so no speaking state lands in the tool step.
+    async def run_round(turn: TurnTools) -> list[ToolResult]:
+        """Run the calls of the last request in order. Every policy (limits,
+        groups, timeouts, the block after untrusted output) is applied by the
+        registry."""
+        nonlocal tools_ms, running_index
+        # Speech from before the calls (including a sentence the splitter
+        # still holds) goes out first, so no speaking state lands in the round.
         rest = splitter.flush()
         if rest:
             enqueue([rest])
         await _drain_speech(queue, worker)
-        if any(call.name in camera_names for call in calls):
-            await send({"type": "state", "state": "looking"})
+        state = turn.face_state(calls)
+        if state:
+            await send({"type": "state", "state": state})
         sp.speaking_sent = False
-        t_look = time.monotonic()
+        t_tools = time.monotonic()
         results: list[ToolResult] = []
-        looked = False
-        used: set[str] = set()
         for call in calls:
-            if call.name not in tool_names:
-                # The model may ask for the search although it was not offered.
-                off = call.name == SEARCH_IMAGE_TOOL.name
-                message = MSG_SEARCH_OFF if off else f"Unknown tool: {call.name}."
-                results.append(ToolResult(call, {"error": message}))
-            elif call.name in extra:
-                results.append(ToolResult(call, await run_extra(call, used)))
-            elif looked or looker is None:
-                results.append(ToolResult(call, {"error": MSG_ONE_LOOK}))
-            elif call.name == SEARCH_IMAGE_TOOL.name:
-                looked = True
-                camera_index = len(results)
-                response = await looker.search_image(call.args.get("target"), snapshot)
-                results.append(ToolResult(call, response))
-            elif sees:
-                looked = True
-                camera_index = len(results)
-                response, image = await looker.take_photo(snapshot)
-                results.append(ToolResult(call, response, image=image))
-            else:
-                looked = True
-                camera_index = len(results)
-                response = await looker.look(call.args.get("question"), snapshot)
-                results.append(ToolResult(call, response))
-        look_ms = int((time.monotonic() - t_look) * 1000)
+            running_index = sum(len(r) for r in rounds) + len(results)
+            results.append(await turn.run(call, context))
+        tools_ms = (tools_ms or 0) + int((time.monotonic() - t_tools) * 1000)
         await send({"type": "state", "state": "thinking"})
         return results
 
     try:
         async with asyncio.timeout_at(deadline):
-            failed = await stream_once(None)
-            if failed is None and calls and tools:
-                turn_results = await run_tools()
-                saved_name = await save_frame()
-                if _cap_reached(usage, llm):
+            for request in range(max_rounds + 1):
+                allow = bool(specs) and request < max_rounds
+                if request > 0 and _cap_reached(usage, llm):
                     capped = True
-                else:
-                    failed = await stream_once(turn_results)
+                    break
+                calls.clear()
+                failed = await stream_once(allow)
+                if failed is not None or not calls or turn_tools is None:
+                    break
+                rounds.append(await run_round(turn_tools))
+                if frame is not None and not saved_name:
+                    saved_name = await save_frame()
 
             if failed is None and not capped:
                 rest = splitter.flush()
@@ -904,22 +899,23 @@ async def _run_turn(
 
     log.info(
         "turn latency: stt_ms=%s audio_ms=%s llm_ttft_ms=%s llm_done_ms=%s "
-        "tts_first_chunk_ms=%s look_ms=%s total_ms=%d sentences=%d spoken=%d tts_failures=%d",
+        "tts_first_chunk_ms=%s tools_ms=%s total_ms=%d sentences=%d spoken=%d tts_failures=%d",
         voice.stt_ms if voice is not None else "n/a",
         voice.audio_ms if voice is not None else "n/a",
         st.ttft_ms if st.ttft_ms is not None else "-",
         st.done_ms if st.done_ms is not None else "-",
         sp.first_audio_ms if sp.first_audio_ms is not None else "-",
-        look_ms if look_ms is not None else "-",
+        tools_ms if tools_ms is not None else "-",
         total_ms,
         sentence_count,
         sp.sentence_id,
         sp.failures,
     )
     log.info(
-        "turn usage: llm_ms=%d requests=%d tokens_in=%d tokens_out=%d tokens_thinking=%d",
+        "turn usage: llm_ms=%d requests=%d rounds=%d tokens_in=%d tokens_out=%d tokens_thinking=%d",
         llm_ms,
         st.requests,
+        len(rounds),
         st.tokens_in,
         st.tokens_out,
         st.tokens_thinking,

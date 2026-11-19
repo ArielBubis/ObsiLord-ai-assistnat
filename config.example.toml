@@ -252,6 +252,13 @@ retention_days = 0
 # Conversations shown in the Settings list.
 list_limit = 50
 
+[tools]
+# Optional section. Tool rounds per turn (1..6): the model may call a tool,
+# read the result and call again (for example recall, then calculate), up to
+# this many times before it has to answer. Each round is one more model
+# request and counts against the daily token cap.
+max_rounds = 3
+
 [debug]
 # Optional section. true prints every Gemini and llama-server request and reply
 # to the console: system prompt, conversation, tool calls and results, vision

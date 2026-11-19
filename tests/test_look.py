@@ -189,10 +189,10 @@ def test_take_photo_reports_a_camera_failure() -> None:
 
 
 def test_the_photo_look_tool_keeps_the_name_and_drops_qwenny() -> None:
-    assert LOOK_PHOTO_TOOL.name == LOOK_TOOL.name
-    assert LOOK_PHOTO_TOOL.parameters == LOOK_TOOL.parameters
-    assert "Qwenny" not in LOOK_PHOTO_TOOL.description
-    assert "Take one photo" in LOOK_PHOTO_TOOL.description
+    assert LOOK_PHOTO_TOOL.spec.name == LOOK_TOOL.spec.name
+    assert LOOK_PHOTO_TOOL.spec.parameters == LOOK_TOOL.spec.parameters
+    assert "Qwenny" not in LOOK_PHOTO_TOOL.spec.description
+    assert "Take one photo" in LOOK_PHOTO_TOOL.spec.description
 
 
 def test_camera_and_model_load_run_at_the_same_time() -> None:

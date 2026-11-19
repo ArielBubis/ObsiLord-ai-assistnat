@@ -74,14 +74,14 @@ def test_look_round_trip_with_thought_signatures() -> None:
         parts: list[str] = []
         done: Done | None = None
         try:
-            async for ev in client.stream_reply(history, [LOOK_TOOL]):
+            async for ev in client.stream_reply(history, [LOOK_TOOL.spec]):
                 if isinstance(ev, ToolCall):
                     calls.append(ev)
             if not calls:
                 return calls, "", None
             results = [ToolResult(calls[0], {"output": "The user is holding a red coffee mug."})]
             async for ev in client.stream_reply(
-                history, [LOOK_TOOL], tool_results=results, allow_tool_calls=False
+                history, [LOOK_TOOL.spec], rounds=[results], allow_tool_calls=False
             ):
                 if isinstance(ev, TextDelta):
                     parts.append(ev.text)

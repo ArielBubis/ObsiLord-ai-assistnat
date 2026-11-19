@@ -8,19 +8,21 @@ import dataclasses
 import json
 import struct
 import threading
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Sequence
 
 from obsilord.config import Settings
-from obsilord.look import LOOK_TOOL, SEARCH_IMAGE_TOOL
+from obsilord.look import camera_source
 from obsilord.llm.base import (
     Done,
     LLMEvent,
     Message,
     TextDelta,
     ToolResult,
+    ToolRound,
     ToolSpec,
     UsageUpdate,
 )
+from obsilord.tools.registry import Registry, Tool, ToolSource, static_source
 
 
 def text_only(settings: Settings) -> Settings:
@@ -72,8 +74,10 @@ class FakeLLM:
         gate: threading.Event | None = None,
         usage: UsageUpdate | None = None,
         hang_s: float | None = None,
+        cloud: bool = False,
     ) -> None:
         self.model = "fake-model"
+        self.cloud = cloud
         self.deltas = deltas
         self.done = done
         self.fail_after = fail_after
@@ -89,7 +93,7 @@ class FakeLLM:
         self,
         history: list[Message],
         tools: list[ToolSpec],
-        tool_results: list[ToolResult] | None = None,
+        rounds: Sequence[ToolRound] = (),
         allow_tool_calls: bool = True,
     ) -> AsyncIterator[LLMEvent]:
         self.calls.append(list(history))
@@ -121,19 +125,26 @@ class FakeLLM:
 class LLMRequest:
     history: list[Message]
     tools: list[ToolSpec]
-    tool_results: list[ToolResult] | None
+    rounds: list[list[ToolResult]]
     allow_tool_calls: bool
+
+    @property
+    def tool_results(self) -> list[ToolResult] | None:
+        """The results of the last round (None before any round)."""
+        return self.rounds[-1] if self.rounds else None
 
 
 class FakeToolLLM:
     """Scripted per request: rounds[i] holds the events of request i, in order.
 
     An Exception in a round is raised at that point instead of yielded.
-    requests records what each request was called with.
+    requests records what each request was called with. cloud: what the
+    pipeline sees as llm.cloud (a cloud model is not offered private tools).
     """
 
-    def __init__(self, rounds: list[list[Any]]) -> None:
+    def __init__(self, rounds: list[list[Any]], cloud: bool = False) -> None:
         self.model = "fake-model"
+        self.cloud = cloud
         self.rounds = rounds
         self.requests: list[LLMRequest] = []
 
@@ -141,11 +152,13 @@ class FakeToolLLM:
         self,
         history: list[Message],
         tools: list[ToolSpec],
-        tool_results: list[ToolResult] | None = None,
+        rounds: Sequence[ToolRound] = (),
         allow_tool_calls: bool = True,
     ) -> AsyncIterator[LLMEvent]:
         i = len(self.requests)
-        self.requests.append(LLMRequest(list(history), list(tools), tool_results, allow_tool_calls))
+        self.requests.append(
+            LLMRequest(list(history), list(tools), [list(r) for r in rounds], allow_tool_calls)
+        )
         for event in self.rounds[i]:
             if isinstance(event, Exception):
                 raise event
@@ -167,7 +180,7 @@ class SeeingToolLLM(FakeToolLLM):
 
 class FakeLooker:
     """Returns `response` for every look or search; questions and targets
-    record the arguments. search: also declare search_image().
+    record the arguments. search: search_image() is on.
 
     delay_s: sleep before answering (lets other tasks run).
     """
@@ -182,7 +195,7 @@ class FakeLooker:
         self.delay_s = delay_s
         self.questions: list[Any] = []
         self.targets: list[Any] = []
-        self.tools = [LOOK_TOOL, SEARCH_IMAGE_TOOL] if search else [LOOK_TOOL]
+        self.search_on = search
         # Sent through the snapshot callback of each call, as (kind, jpeg).
         self.snapshots: list[tuple[str, bytes]] = []
         # take_photo(): the frame it returns and how often it ran.
@@ -300,3 +313,15 @@ class FakeSTT:
         if self.fail:
             raise RuntimeError("stt boom with secret words")
         return self.text
+
+
+def registry(looker: Any = None, *tools: Tool, sources: Sequence[ToolSource] = ()) -> Registry:
+    """A registry with the camera tools of looker (if given), the given tools
+    and sources."""
+    srcs: list[ToolSource] = []
+    if looker is not None:
+        srcs.append(camera_source(looker))
+    if tools:
+        srcs.append(static_source(*tools))
+    srcs.extend(sources)
+    return Registry(srcs)

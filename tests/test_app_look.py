@@ -14,6 +14,7 @@ from obsilord.app import _default_looker, create_app
 from obsilord.config import REPO_ROOT, Settings, load_settings
 from obsilord.llm.base import Done, TextDelta, ToolCall
 from obsilord.look import LOOK_TOOL, Looker
+from obsilord.tools.calculate import calculate
 from obsilord.usage import UsageTracker
 
 
@@ -57,7 +58,7 @@ def test_ws_turn_with_a_look(tmp_path: Path) -> None:
     ]
     assert msgs[-2] == {"type": "transcript", "role": "assistant", "text": "A red mug.", "final": True}
     assert looker.questions == ["What am I holding?"]
-    assert llm.requests[0].tools == [LOOK_TOOL]
+    assert llm.requests[0].tools == [LOOK_TOOL.spec, calculate.spec]
 
 
 def test_vision_off_declares_no_tool(tmp_path: Path) -> None:

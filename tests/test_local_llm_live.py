@@ -37,13 +37,13 @@ def test_local_tool_choice_and_reply_live(mode: str) -> None:
             seconds, _ = await server.warm_up(model)
             print(f"\n{model} ({mode}): warm-up {seconds:.1f} s")
             client = server.client(model, tool_mode=mode)
-            tools = [LOOK_TOOL, SEARCH_IMAGE_TOOL]
+            tools = [LOOK_TOOL.spec, SEARCH_IMAGE_TOOL.spec]
             look = [e async for e in client.stream_reply(ask, tools)]
             calls = [e for e in look if isinstance(e, ToolCall)]
             results = [ToolResult(c, {"output": "A red mug with a chipped handle."}) for c in calls]
             follow = [
                 e
-                async for e in client.stream_reply(ask, tools, tool_results=results, allow_tool_calls=False)
+                async for e in client.stream_reply(ask, tools, rounds=[results], allow_tool_calls=False)
             ] if calls else []
             joke = [e async for e in client.stream_reply([Message("user", "Tell me a short joke.")], tools)]
             return look, follow, joke, model
@@ -83,7 +83,7 @@ def test_earlier_tool_result_answers_a_follow_up_live(mode: str) -> None:
         try:
             model = os.environ.get("OBSILORD_LOCAL_MODEL", "") or await server.default_model()
             client = server.client(model, tool_mode=mode)
-            return [e async for e in client.stream_reply(history, [LOOK_TOOL, SEARCH_IMAGE_TOOL])]
+            return [e async for e in client.stream_reply(history, [LOOK_TOOL.spec, SEARCH_IMAGE_TOOL.spec])]
         finally:
             await server.aclose()
 
@@ -110,12 +110,12 @@ def test_recall_by_date_live(mode: str, tmp_path: Path) -> None:
             model = os.environ.get("OBSILORD_LOCAL_MODEL", "") or await server.default_model()
             client = server.client(model, tool_mode=mode)
             recall = RecallTool(store)
-            tools = [LOOK_TOOL, recall.tool().spec]
+            tools = [LOOK_TOOL.spec, RECALL_TOOL.spec]
             first = [e async for e in client.stream_reply(ask, tools)]
             calls = [e for e in first if isinstance(e, ToolCall)]
             results = [ToolResult(c, await recall.run(c.args)) for c in calls if c.name == "recall"]
             follow = [
-                e async for e in client.stream_reply(ask, tools, tool_results=results, allow_tool_calls=False)
+                e async for e in client.stream_reply(ask, tools, rounds=[results], allow_tool_calls=False)
             ] if results else []
             return calls, _text(first), _text(follow)
         finally:
@@ -168,7 +168,7 @@ def test_a_vision_model_sees_the_look_photo_live(mode: str) -> None:
             result = ToolResult(call, {"output": MSG_PHOTO_TAKEN}, image=photo)
             t0 = time.perf_counter()
             follow = [
-                e async for e in client.stream_reply(ask, [LOOK_PHOTO_TOOL], tool_results=[result], allow_tool_calls=False)
+                e async for e in client.stream_reply(ask, [LOOK_PHOTO_TOOL.spec], rounds=[[result]], allow_tool_calls=False)
             ]
             ms = (time.perf_counter() - t0) * 1000
             note = ToolNote("look", "What am I holding?", PHOTO_NOTE_TEXT, image=photo)
@@ -177,7 +177,7 @@ def test_a_vision_model_sees_the_look_photo_live(mode: str) -> None:
                 Message("assistant", _text(follow), tools=(note,)),
                 Message("user", "What color is the flower? One word."),
             ]
-            later = [e async for e in client.stream_reply(history, [LOOK_PHOTO_TOOL])]
+            later = [e async for e in client.stream_reply(history, [LOOK_PHOTO_TOOL.spec])]
             return True, _text(follow), _text(later), ms
         finally:
             await server.aclose()
@@ -202,13 +202,13 @@ def test_recall_of_demo_history_live(mode: str, tmp_path: Path) -> None:
         try:
             model = os.environ.get("OBSILORD_LOCAL_MODEL", "") or await server.default_model()
             client = server.client(model, tool_mode=mode)
-            tools = [LOOK_TOOL, RECALL_TOOL]
+            tools = [LOOK_TOOL.spec, RECALL_TOOL.spec]
             first = [e async for e in client.stream_reply(ask, tools)]
             calls = [e for e in first if isinstance(e, ToolCall)]
             recall = RecallTool(store)
             results = [ToolResult(c, await recall.run(c.args)) for c in calls if c.name == "recall"]
             follow = [
-                e async for e in client.stream_reply(ask, tools, tool_results=results, allow_tool_calls=False)
+                e async for e in client.stream_reply(ask, tools, rounds=[results], allow_tool_calls=False)
             ] if results else []
             return first, follow
         finally:

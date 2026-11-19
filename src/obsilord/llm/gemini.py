@@ -50,7 +50,7 @@ import itertools
 import json
 import logging
 import time
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable, Sequence
 
 from google import genai
 from google.genai import types
@@ -63,11 +63,16 @@ from obsilord.llm.base import (
     Message,
     TextDelta,
     ToolCall,
-    ToolResult,
+    ToolRound,
     ToolSpec,
     UsageUpdate,
 )
-from obsilord.llm.prompt import SYSTEM_PROMPT_PATH, load_system_prompt  # noqa: F401 - re-exported
+from obsilord.llm.prompt import (  # noqa: F401 - SYSTEM_PROMPT_PATH re-exported
+    NOW_LINE_CHARS,
+    SYSTEM_PROMPT_PATH,
+    load_system_prompt,
+    now_line,
+)
 
 log = logging.getLogger(__name__)
 
@@ -94,14 +99,14 @@ def _counts(usage: types.GenerateContentResponseUsageMetadata) -> tuple[int, int
     )
 
 
-def _to_contents(
-    history: list[Message], tool_results: list[ToolResult] | None = None
-) -> list[types.Content]:
-    """History as Contents, then the model's tool call and the results, if any.
+def _to_contents(history: list[Message], rounds: Sequence[ToolRound] = ()) -> list[types.Content]:
+    """History as Contents, then per tool round the model's calls and the
+    results (Gemini checks the thought signatures of every step of the turn).
 
-    All results answer calls from one model response, so they share one raw
-    parts list (the response as received). Without raw (calls not made by this
-    client) the call parts are rebuilt from name and args, with no signature.
+    The results of one round answer calls from one model response, so they
+    share one raw parts list (the response as received). Without raw (calls
+    not made by this client) the call parts are rebuilt from name and args,
+    with no signature.
     """
     contents = [
         types.Content(
@@ -110,8 +115,16 @@ def _to_contents(
         )
         for m in history
     ]
-    if not tool_results:
-        return contents
+    for tool_results in rounds:
+        if tool_results:
+            contents.extend(_round_contents(tool_results))
+    return contents
+
+
+def _round_contents(tool_results: ToolRound) -> list[types.Content]:
+    """The model Content of one round (its parts as received) and the user
+    Content with one function response per result."""
+    contents: list[types.Content] = []
     raw = tool_results[0].call.raw
     if raw is not None and any(r.call.raw is not raw for r in tool_results):
         raise ValueError("tool results must answer calls from one model response")
@@ -243,6 +256,7 @@ class GeminiClient:
         llm: LLMSettings,
         api_key: str | None,
         system_prompt: str | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         if not api_key:
             raise MissingApiKey("GEMINI_API_KEY is not set in .env")
@@ -257,8 +271,10 @@ class GeminiClient:
             raise ValueError(f"config: llm.temperature must be in 0..2, got {llm.temperature:g}")
         self.model = llm.model
         prompt = system_prompt if system_prompt is not None else load_system_prompt()
+        self._prompt = prompt
+        self._clock = clock
         # Sent with every request; used for the usage estimate on failed streams.
-        self.prompt_overhead_chars = len(prompt)
+        self.prompt_overhead_chars = len(prompt) + NOW_LINE_CHARS
         thinking = (
             types.ThinkingConfig(thinking_level=_THINKING_LEVELS[level]) if level else None
         )
@@ -276,19 +292,25 @@ class GeminiClient:
         )
         self._request_ids = itertools.count(1)  # numbers requests in the prompt log
 
+    # Requests go to Google.
+    cloud = True
+
     async def stream_reply(
         self,
         history: list[Message],
         tools: list[ToolSpec],
-        tool_results: list[ToolResult] | None = None,
+        rounds: Sequence[ToolRound] = (),
         allow_tool_calls: bool = True,
     ) -> AsyncIterator[LLMEvent]:
         counts: tuple[int, int, int] | None = None
         # Every part of the response as received, for ToolCall.raw.
         received: list[types.Part] = []
         calls: list[types.FunctionCall] = []
-        contents = _to_contents(history, tool_results)
-        config = _tool_config(self._config, tools, allow_tool_calls)
+        contents = _to_contents(history, rounds)
+        base = self._config.model_copy(
+            update={"system_instruction": self._prompt + now_line(self._clock())}
+        )
+        config = _tool_config(base, tools, allow_tool_calls)
         n = next(self._request_ids)
         promptlog.emit(_format_request, n, self.model, contents, config)
         t0 = time.perf_counter()

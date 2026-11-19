@@ -18,6 +18,11 @@ crop is under MIN_CROP_EDGE_PX. The search has its own caps (SearchBudget),
 checked before the camera opens and again, with the upload recorded, right
 before it is sent. A search also counts as a look for the camera limiter.
 
+The tools themselves (LOOK_TOOL, LOOK_PHOTO_TOOL, SEARCH_IMAGE_TOOL, at the
+end of this module) are registry tools around a Looker; camera_source() gives
+the right ones per turn. They share the "camera" group: one camera call per
+turn.
+
 Snapshots: both tools take an optional async snapshot(kind, jpeg) callback and
 call it with "camera" (the frame) and "search" (the crop, right before the
 upload). The app forwards them to the page only while its Snapshots switch is
@@ -43,7 +48,8 @@ import math
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Protocol
+from dataclasses import replace
+from typing import Any, Callable, Protocol, Sequence
 
 from obsilord.camera import CameraError, crop_jpeg
 from obsilord.imagesearch.base import (
@@ -53,7 +59,16 @@ from obsilord.imagesearch.base import (
     format_matches,
 )
 from obsilord.imagesearch.budget import SearchBudget
-from obsilord.llm.base import ToolSpec
+from obsilord.tools.registry import (
+    Snapshot,
+    Tool,
+    ToolOutput,
+    ToolPolicy,
+    ToolSource,
+    TurnContext,
+    TurnInfo,
+    tool,
+)
 from obsilord.vision.base import Box, VisionClient, VisionError
 
 log = logging.getLogger(__name__)
@@ -62,7 +77,6 @@ HOUR_S = 3600.0
 DEFAULT_QUESTION = "What is in front of the camera?"
 MAX_QUESTION_CHARS = 1200
 
-MSG_ONE_LOOK = "Only one look per turn."
 # Passed on by the assistant: the usual causes are on the user's side.
 MSG_CAMERA_FAILED = (
     "The camera could not take a photo. Ask the user to check that the camera is "
@@ -90,73 +104,9 @@ def target_question(target: str) -> str:
     web matches."""
     return f"Describe {target} in one or two sentences. Quote any text on it."
 
-LOOK_TOOL = ToolSpec(
-    name="look",
-    description=(
-        "Take one photo with the user's webcam. Qwenny, a small vision model on "
-        "this computer, answers the question about it and you get Qwenny's text "
-        "answer, not the photo."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "question": {
-                "type": "string",
-                "description": (
-                    "What to find out about the view, for example "
-                    "'What am I holding?' or 'Read the label.'"
-                ),
-            }
-        },
-        "required": ["question"],
-    },
-)
-
-
-# look() for a chat model that sees photos (a local vision model): the photo
-# goes to the model itself and Qwenny is not used. Same name and argument.
-LOOK_PHOTO_TOOL = ToolSpec(
-    name=LOOK_TOOL.name,
-    description=(
-        "Take one photo with the user's webcam. Pass what you want to find out about the view, if the request came with any question or ask for more info, oblige if you can"
-    ),
-    parameters=LOOK_TOOL.parameters,
-)
 MSG_PHOTO_TAKEN = "Photo taken. It is attached: look at it and answer from what you see."
 
 
-SEARCH_IMAGE_TOOL = ToolSpec(
-    name="search_image",
-    description=(
-        "Take one photo with the user's webcam and identify one thing in it with "
-        "an online lookup. Qwenny cuts the target out of the photo and only "
-        "that cut-out is uploaded. You get the identification and Qwenny's own "
-        "description as text, not the photo. Use it instead of look() when the "
-        "user asks what exactly something is and a description would not be "
-        "enough: an album cover, a book, a product, a logo, a poster. It uploads "
-        "part of a photo, so use it only when the user asks to identify "
-        "something, never on your own, and use look() for everything else. One "
-        "camera tool per turn: look() or search_image(), not both. The "
-        "identification is a best guess: say what it most likely is, and say so "
-        "when it is unsure or nothing was identified."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "target": {
-                "type": "string",
-                "description": (
-                    "The one thing to cut out and search for, as a short noun "
-                    "phrase, for example 'the album cover' or 'the box in my hand'."
-                ),
-            }
-        },
-        "required": ["target"],
-    },
-)
-
-# kind is "camera" (the frame) or "search" (the crop about to be uploaded).
-Snapshot = Callable[[str, bytes], Awaitable[None]]
 
 
 class Camera(Protocol):
@@ -164,8 +114,8 @@ class Camera(Protocol):
 
 
 class LookTool(Protocol):
-    # The tools to declare: look(), and search_image() when it is on.
-    tools: list[ToolSpec]
+    # Whether search_image() is on ([image_search] enabled with a key).
+    search_on: bool
 
     async def look(self, question: Any, snapshot: Snapshot | None = None) -> dict[str, Any]: ...
 
@@ -289,7 +239,7 @@ class Looker:
         self._vision = vision
         self._limiter = limiter
         self._search = search
-        self.tools = [LOOK_TOOL] if search is None else [LOOK_TOOL, SEARCH_IMAGE_TOOL]
+        self.search_on = search is not None
 
     async def look(self, question: Any, snapshot: Snapshot | None = None) -> dict[str, Any]:
         refusal = self._limiter.refusal()
@@ -450,3 +400,86 @@ class Looker:
                 log.warning("search_image: local description failed: %s", exc)
                 description = ""
             return crop, description
+
+
+# --- the tools ---------------------------------------------------------------
+
+# One camera call per turn (look or search_image); the face narrows its eyes
+# while it runs. Private (the camera), but a cloud model may use it: it only
+# ever gets Qwenny's text. The text read from the view is untrusted.
+CAMERA_POLICY = ToolPolicy(
+    group="camera",
+    face_state="looking",
+    untrusted=True,
+    private_data=True,
+    cloud=True,
+    timeout_s=45.0,
+)
+
+
+async def _look(question: str, *, looker: LookTool, ctx: TurnContext) -> dict[str, Any]:
+    """Take one photo with the user's webcam. Qwenny, a small vision model on
+    this computer, answers the question about it and you get Qwenny's text
+    answer, not the photo.
+
+    Args:
+        question: What to find out about the view, for example 'What am I
+            holding?' or 'Read the label.'
+    """
+    return await looker.look(question, ctx.snapshot)
+
+
+async def _look_photo(question: str, *, looker: LookTool, ctx: TurnContext) -> ToolOutput:
+    """Take one photo with the user's webcam. Pass what you want to find out
+    about the view, if the request came with any question or ask for more
+    info, oblige if you can
+
+    Args:
+        question: What to find out about the view, for example 'What am I
+            holding?' or 'Read the label.'
+    """
+    response, image = await looker.take_photo(ctx.snapshot)
+    return ToolOutput(response, image)
+
+
+async def _search_image(target: str, *, looker: LookTool, ctx: TurnContext) -> dict[str, Any]:
+    """Take one photo with the user's webcam and identify one thing in it with
+    an online lookup. Qwenny cuts the target out of the photo and only that
+    cut-out is uploaded. You get the identification and Qwenny's own
+    description as text, not the photo. Use it instead of look() when the user
+    asks what exactly something is and a description would not be enough: an
+    album cover, a book, a product, a logo, a poster. It uploads part of a
+    photo, so use it only when the user asks to identify something, never on
+    your own, and use look() for everything else. One camera tool per turn:
+    look() or search_image(), not both. The identification is a best guess:
+    say what it most likely is, and say so when it is unsure or nothing was
+    identified.
+
+    Args:
+        target: The one thing to cut out and search for, as a short noun
+            phrase, for example 'the album cover' or 'the box in my hand'.
+    """
+    return await looker.search_image(target, ctx.snapshot)
+
+
+LOOK_TOOL = tool(CAMERA_POLICY, name="look")(_look)
+# look() for a chat model that sees photos (a local vision model): the photo
+# goes to the model itself and Qwenny is not used. Same name and argument.
+LOOK_PHOTO_TOOL = tool(CAMERA_POLICY, name="look")(_look_photo)
+SEARCH_IMAGE_TOOL = tool(replace(CAMERA_POLICY, leaves_pc=True), name="search_image")(_search_image)
+
+
+def camera_source(looker: LookTool) -> ToolSource:
+    """The camera tools of a turn: look (the photo variant for a model that
+    sees photos), and search_image when it is on."""
+    look = LOOK_TOOL.bind(looker=looker)
+    look_photo = LOOK_PHOTO_TOOL.bind(looker=looker)
+    search = SEARCH_IMAGE_TOOL.bind(looker=looker)
+
+    async def source(info: TurnInfo) -> Sequence[Tool]:
+        tools = [look_photo if await info.sees_images() else look]
+        if looker.search_on:
+            tools.append(search)
+        return tools
+
+    return source

@@ -20,7 +20,6 @@ from obsilord.app import (
     MSG_UNKNOWN_CONVERSATION,
     _memory_from_settings,
     create_app,
-    turn_tools,
 )
 from obsilord.config import DEMO_DB_PATH, REPO_ROOT, Settings, load_settings
 from obsilord.llm.base import Message
@@ -210,19 +209,22 @@ def test_store_that_fails_to_open_leaves_the_app_working(tmp_path: Path) -> None
     assert client.get("/conversations").json()["enabled"] is False
 
 
-def test_turn_tools_offer_recall_to_the_local_model_only() -> None:
-    recall = object()
-    assert turn_tools("local", recall) == [recall]  # type: ignore[comparison-overlap]
-    assert turn_tools("gemini", recall) == []
-    assert turn_tools("local", None) == []
+def test_cloud_turn_declares_no_recall(tmp_path: Path) -> None:
+    client, llm = _client(tmp_path, llm=FakeLLM(["Hi."], cloud=True))
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        _turn(ws, "hi")
+    names = [t.name for t in llm.tools[-1]]
+    assert RECALL_TOOL.name not in names and "calculate" in names
 
 
-def test_gemini_turn_declares_no_recall(tmp_path: Path) -> None:
+def test_local_turn_declares_recall_and_calculate(tmp_path: Path) -> None:
     client, llm = _client(tmp_path)
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
         _turn(ws, "hi")
-    assert all(t.name != RECALL_TOOL.name for t in llm.tools[-1])
+    names = [t.name for t in llm.tools[-1]]
+    assert RECALL_TOOL.name in names and "calculate" in names
 
 
 def test_memory_checks_404_without_demo(tmp_path: Path) -> None:

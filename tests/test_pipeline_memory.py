@@ -6,21 +6,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fakes import FakeLooker, FakeToolLLM
-from obsilord.llm.base import Done, Message, TextDelta, ToolCall, ToolNote, ToolSpec, note_from_result
+from fakes import FakeLooker, FakeToolLLM, registry
+from obsilord.llm.base import Done, Message, TextDelta, ToolCall, ToolNote, note_from_result
 from obsilord.llm.base import ToolResult
-from obsilord.pipeline import MSG_ONE_CALL, run_text_turn
-from obsilord.tools import Tool
+from obsilord.pipeline import run_text_turn
+from obsilord.tools.registry import Tool, ToolPolicy, msg_limit, tool
 from obsilord.usage import UsageTracker
 
 NOW = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
 LOOKING = {"type": "state", "state": "looking"}
 
-RECALL_SPEC = ToolSpec(
-    "recall",
-    "Search earlier conversations.",
-    {"type": "object", "properties": {"query": {"type": "string"}}},
-)
+async def _fake_recall(query: str, *, fake: Any) -> dict[str, Any]:
+    """Search earlier conversations.
+
+    Args:
+        query: Keywords.
+    """
+    return await fake.run({"query": query})
+
+
+RECALL_POLICY = ToolPolicy(private_data=True, untrusted=True)
+FAKE_RECALL_TOOL = tool(RECALL_POLICY, name="recall")(_fake_recall)
 
 
 class FakeRecall:
@@ -36,7 +42,7 @@ class FakeRecall:
         return dict(self.response)
 
     def tool(self) -> Tool:
-        return Tool(RECALL_SPEC, self.run)
+        return FAKE_RECALL_TOOL.bind(fake=self)
 
 
 def _usage(tmp_path: Path) -> UsageTracker:
@@ -63,8 +69,7 @@ def _run(
             llm,
             _usage(tmp_path),
             send,
-            looker=looker,
-            extra_tools=extra_tools or [],
+            tools=registry(looker, *(extra_tools or [])),
             on_turn=on_turn,
         )
     )
@@ -140,7 +145,7 @@ def test_second_call_to_the_same_extra_tool_gets_an_error(tmp_path: Path) -> Non
     assert recall.args == [{"query": "a"}]
     results = llm.requests[1].tool_results
     assert results is not None
-    assert results[1].response == {"error": MSG_ONE_CALL}
+    assert results[1].response == {"error": msg_limit("recall", 1)}
 
 
 def test_look_and_recall_in_one_turn_both_run(tmp_path: Path) -> None:

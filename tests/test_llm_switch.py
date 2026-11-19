@@ -59,9 +59,16 @@ class Rig:
         gemini: FakeLLM | None = None,
         looker: Any = None,
         cap: int | None = None,
+        local_tool_mode: str = "native",
         **llm: Any,
     ) -> None:
         self.settings = _settings(tmp_path, **llm)
+        # Every turn declares calculate. Native mode keeps a local turn at one
+        # request (no /models lookup for the mode, no routing request).
+        self.settings = dataclasses.replace(
+            self.settings,
+            llm_local=dataclasses.replace(self.settings.llm_local, tool_mode=local_tool_mode),
+        )
         self.script = script
         self.usage = UsageTracker(
             tmp_path / "usage.jsonl", cap if cap is not None else self.settings.llm.daily_token_cap
@@ -134,7 +141,7 @@ def test_config_llm_lists_tool_support(tmp_path: Path) -> None:
 def test_switch_notice_follows_the_model_tool_support(tmp_path: Path) -> None:
     # The page loads /config/llm first, so the server knows each model's mode.
     script = Script(httpx.Response(200, json=LMSTUDIO_MODELS_TOOLS), WARM, WARM)
-    rig = Rig(tmp_path, script, looker=FakeLooker())
+    rig = Rig(tmp_path, script, looker=FakeLooker(), local_tool_mode="auto")
     rig.client.get("/config/llm")
     with rig.client.websocket_connect("/ws") as ws:
         native_notice = _switch_local(ws, "qwen3-14b")[0]
@@ -340,7 +347,7 @@ def test_router_look_runs_the_camera_and_the_reply_uses_the_result(tmp_path: Pat
         sse(delta("A red mug, how dull."), usage_chunk()),
     )
     looker = FakeLooker({"output": "A red mug."})
-    rig = Rig(tmp_path, script, looker=looker, provider="local")
+    rig = Rig(tmp_path, script, looker=looker, provider="local", local_tool_mode="auto")
     with rig.client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "text", "text": "What am I holding?"})
         msgs = _turn(ws)

@@ -1,15 +1,16 @@
 """recall(): the model searches earlier conversations in the local store.
 
-Offered to the local model only (app.py), so old conversations never go to a
-cloud provider through it. The spec is rebuilt every turn with today's date in
-its description (recall_spec), so the model can turn "on the 5th of November"
-or "yesterday" into a date before it calls. date (YYYY-MM-DD) limits the
-search to that day, days_back to the last N days; without either, a day
-named in query ("5th of November", "yesterday": the router passes one
-argument only) is used as the date. Words that match nothing
-inside such a window fall back to listing the window, since a small model
-often puts the date itself in query. The result is plain text with dates,
-capped, and starts with today's date too.
+A private-data tool (RECALL_TOOL, registry policy): it is not offered to a
+cloud model unless the user allows it (T2), so old conversations do not go
+to Google through it. The current date is in every system prompt
+(llm.prompt.now_line), so the model can turn "on the 5th of November" or
+"yesterday" into a date before it calls. date (YYYY-MM-DD) limits the search
+to that day, days_back to the last N days; without either, a day named in
+query ("5th of November", "yesterday": the router passes one argument only)
+is used as the date. Words that match nothing inside such a window fall back
+to listing the window, since a small model often puts the date itself in
+query. The result is plain text with dates, capped, and starts with today's
+date. Its output is untrusted: old turns hold old tool results.
 """
 
 from __future__ import annotations
@@ -21,10 +22,10 @@ from datetime import date as Date
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from obsilord.llm.base import ToolNote, ToolSpec
+from obsilord.llm.base import ToolNote
 from obsilord.memory.base import Hit, SearchSource
 from obsilord.memory.store import fts_query
-from obsilord.tools import Tool
+from obsilord.tools.registry import ToolPolicy, tool
 
 log = logging.getLogger(__name__)
 
@@ -34,41 +35,7 @@ TEXT_MAX_CHARS = 300
 MSG_RECALL_FAILED = "The conversation store could not be searched."
 CUT = "(more results cut)"
 
-_DESCRIPTION = (
-    "Search earlier conversations with the user, kept on this computer. Use it when "
-    "the user refers to something from an earlier conversation or asks what you "
-    "talked about before (for example yesterday, last week, or on a date). You may "
-    "also use it on your own, now and then, when something the user said in an "
-    "earlier conversation would help you make a point, tease them, or call back to "
-    "it. Do not use it for the recent messages of this conversation, which you "
-    "already have. For a "
-    "question about a day, pass date and leave query empty. Returns the matching turns "
-    "with their dates."
-)
-_PARAMETERS: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "query": {
-            "type": "string",
-            "description": "A few keywords from what was said, for example 'dentist "
-            "appointment'. Never a date. Empty to list the turns of the date or the days.",
-        },
-        "date": {
-            "type": "string",
-            "description": "Only that day, as YYYY-MM-DD (work it out from today's date "
-            "above, for example 'the 5th' is this month unless that is still ahead).",
-        },
-        "days_back": {
-            "type": "integer",
-            "description": "Only the last N days (1 is today and yesterday). Leave out "
-            "date and days_back to search everything.",
-        },
-    },
-    "required": ["query"],
-}
-
-# Without a date: the declaration for routecheck and tests. Turns use recall_spec.
-RECALL_TOOL = ToolSpec(name="recall", description=_DESCRIPTION, parameters=_PARAMETERS)
+RECALL_NAME = "recall"
 
 
 def _today(now: float) -> str:
@@ -76,16 +43,11 @@ def _today(now: float) -> str:
     return f"Today is {day:%Y-%m-%d} ({day:%A})."
 
 
-def recall_spec(now: float) -> ToolSpec:
-    """The declaration for one turn, with today's date in the description."""
-    return ToolSpec(name=RECALL_TOOL.name, description=f"{_today(now)} {_DESCRIPTION}", parameters=_PARAMETERS)
-
-
 def notes_to_store(notes: tuple[ToolNote, ...]) -> tuple[ToolNote, ...]:
     """The notes worth keeping in the store: all but recall's own results,
     which hold older turns and would come back as nested copies in the next
     search. They stay in the inline history of the session."""
-    return tuple(n for n in notes if n.name != RECALL_TOOL.name)
+    return tuple(n for n in notes if n.name != RECALL_NAME)
 
 
 def _flat(text: str) -> str:
@@ -188,17 +150,10 @@ class RecallTool:
         self._max_chars = max_chars
         self._clock = clock
 
-    def tool(self, skip: tuple[str, int] | None = None) -> Tool:
-        """The tool for one turn (today's date in its description). skip:
-        (conversation id, n), its last n turns are in the prompt already and
-        are left out of the results, or they echo the model's own misses."""
-
-        async def run(args: dict[str, Any]) -> dict[str, Any]:
-            return await self.run(args, skip=skip)
-
-        return Tool(recall_spec(self._clock()), run)
-
     async def run(self, args: dict[str, Any], skip: tuple[str, int] | None = None) -> dict[str, Any]:
+        """One search. skip: (conversation id, n), its last n turns are in the
+        prompt already and are left out of the results, or they echo the
+        model's own misses."""
         query = args.get("query")
         query = query.strip() if isinstance(query, str) else ""
         now = self._clock()
@@ -255,3 +210,36 @@ class RecallTool:
                 break
             out += block
         return out[: self._max_chars]
+
+
+async def _recall(
+    query: str,
+    date: str = "",
+    days_back: int | None = None,
+    *,
+    recall: RecallTool,
+    skip: tuple[str, int] | None = None,
+) -> dict[str, Any]:
+    """Search earlier conversations with the user, kept on this computer. Use
+    it when the user refers to something from an earlier conversation or asks
+    what you talked about before (for example yesterday, last week, or on a
+    date). You may also use it on your own, now and then, when something the
+    user said in an earlier conversation would help you make a point, tease
+    them, or call back to it. Do not use it for the recent messages of this
+    conversation, which you already have. For a question about a day, pass
+    date and leave query empty. Returns the matching turns with their dates.
+
+    Args:
+        query: A few keywords from what was said, for example 'dentist
+            appointment'. Never a date. Empty to list the turns of the date or
+            the days.
+        date: Only that day, as YYYY-MM-DD (work it out from the current date,
+            for example 'the 5th' is this month unless that is still ahead).
+        days_back: Only the last N days (1 is today and yesterday). Leave out
+            date and days_back to search everything.
+    """
+    return await recall.run({"query": query, "date": date, "days_back": days_back}, skip=skip)
+
+
+# Private data, never to a cloud model by default; untrusted output.
+RECALL_TOOL = tool(ToolPolicy(private_data=True, untrusted=True, timeout_s=10.0), name=RECALL_NAME)(_recall)

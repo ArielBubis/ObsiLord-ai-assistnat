@@ -19,7 +19,7 @@ import numpy
 import pytest
 from fastapi.testclient import TestClient
 
-from fakes import FakeLooker, FakeToolLLM, text_only
+from fakes import FakeLooker, FakeToolLLM, registry, text_only
 from obsilord.app import _default_image_search, create_app
 from obsilord.camera import crop_jpeg, encode_frame
 from obsilord.config import REPO_ROOT, ImageSearchSettings, Secrets, Settings, load_settings
@@ -49,7 +49,6 @@ from obsilord.look import (
     LOOK_TOOL,
     MAX_TARGET_CHARS,
     MSG_NOT_FOUND,
-    MSG_ONE_LOOK,
     MSG_SEARCH_FAILED,
     MSG_SEARCH_OFF,
     MSG_TOO_LARGE,
@@ -61,6 +60,7 @@ from obsilord.look import (
     clean_target,
 )
 from obsilord.pipeline import run_text_turn
+from obsilord.tools.registry import msg_limit, msg_unknown
 from obsilord.usage import UsageTracker
 from obsilord.vision.base import Box, VisionError
 from obsilord.vision.llama_server import LOCATE_PROMPT, QUESTION_PLACEHOLDER, parse_box
@@ -425,7 +425,7 @@ def test_search_uploads_only_the_crop(tmp_path: Path) -> None:
     assert rig.client.vision_open_during_upload is False and rig.vision.exited == 1
     assert rig.snaps == [("camera", rig.camera.jpeg), ("search", upload)]
     assert rig.budget.month_total() == 1
-    assert rig.looker.tools == [LOOK_TOOL, SEARCH_IMAGE_TOOL]
+    assert rig.looker.search_on is True
 
 
 @pytest.mark.parametrize(
@@ -517,7 +517,7 @@ def test_vision_failure_before_the_box(tmp_path: Path) -> None:
 
 def test_search_is_off_without_the_setup() -> None:
     looker = Looker(FakeCamera(), FakeVision(), LookLimiter(10, 30))
-    assert looker.tools == [LOOK_TOOL]
+    assert looker.search_on is False
     assert asyncio.run(looker.search_image("x")) == {"error": MSG_SEARCH_OFF}
 
 
@@ -563,7 +563,7 @@ def _run(llm: Any, looker: Any, tmp_path: Path) -> list[Any]:
         sent.append(msg)
 
     usage = UsageTracker(tmp_path / "usage.jsonl", 1000, clock=lambda: NOW)
-    asyncio.run(run_text_turn("hello", [], llm, usage, send, turn_timeout_s=60.0, looker=looker))
+    asyncio.run(run_text_turn("hello", [], llm, usage, send, turn_timeout_s=60.0, tools=registry(looker)))
     return sent
 
 
@@ -574,7 +574,7 @@ def test_pipeline_routes_search_image(tmp_path: Path) -> None:
     looker.snapshots = [("camera", b"frame"), ("search", b"crop")]
     sent = _run(llm, looker, tmp_path)
     assert looker.targets == ["the album cover"] and looker.questions == []
-    assert llm.requests[0].tools == [LOOK_TOOL, SEARCH_IMAGE_TOOL]
+    assert llm.requests[0].tools == [LOOK_TOOL.spec, SEARCH_IMAGE_TOOL.spec]
     assert llm.requests[1].tool_results == [ToolResult(call, {"output": "Best guess: demon days."})]
     snaps = [m for m in sent if isinstance(m, dict) and m["type"] == "snapshot"]
     assert snaps == [
@@ -592,7 +592,7 @@ def test_pipeline_one_camera_tool_per_turn(tmp_path: Path) -> None:
     looker = FakeLooker(search=True)
     _run(llm, looker, tmp_path)
     assert looker.targets == ["the album cover"] and looker.questions == []
-    assert llm.requests[1].tool_results[1] == ToolResult(second, {"error": MSG_ONE_LOOK})
+    assert llm.requests[1].tool_results[1] == ToolResult(second, {"error": msg_limit("camera", 1)})
 
 
 def test_system_prompt_does_not_offer_the_search() -> None:
@@ -600,7 +600,7 @@ def test_system_prompt_does_not_offer_the_search() -> None:
     # search lives in the tool description, which is only sent with the tool.
     prompt = (REPO_ROOT / "prompts" / "system.md").read_text(encoding="utf-8")
     assert "search_image" not in prompt
-    assert "only when the user asks" in SEARCH_IMAGE_TOOL.description
+    assert "only when the user asks" in SEARCH_IMAGE_TOOL.spec.description
 
 
 def test_pipeline_search_image_is_off_when_not_declared(tmp_path: Path) -> None:
@@ -610,7 +610,7 @@ def test_pipeline_search_image_is_off_when_not_declared(tmp_path: Path) -> None:
     _run(llm, looker, tmp_path)
     assert looker.targets == []
     assert llm.requests[1].tool_results == [
-        ToolResult(call, {"error": MSG_SEARCH_OFF})
+        ToolResult(call, {"error": msg_unknown("search_image")})
     ]
 
 

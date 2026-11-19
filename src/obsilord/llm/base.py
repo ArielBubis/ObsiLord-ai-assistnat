@@ -6,7 +6,7 @@ Nothing in this module may import a provider SDK.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Literal, Protocol, Union
+from typing import Any, AsyncIterator, Literal, Protocol, Sequence, Union
 
 
 NOTE_MAX_CHARS = 400
@@ -74,7 +74,7 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class ToolResult:
-    """The answer to one ToolCall, sent with the follow-up request.
+    """The answer to one ToolCall, sent with the next request of the turn.
 
     response is a JSON object: {"output": ...} on success or {"error": ...}.
     image: the photo itself (JPEG) for a model that sees photos, None
@@ -119,23 +119,32 @@ class UsageUpdate:
 
 LLMEvent = Union[TextDelta, ToolCall, UsageUpdate, Done]
 
+# The results of one tool round: the answers to the calls of one model
+# response, in the order of the calls.
+ToolRound = Sequence[ToolResult]
+
 
 class LLMClient(Protocol):
     # Model id, used for usage logging.
     model: str
+    # True when requests leave this PC (Gemini). Private-data tools are not
+    # offered to such a client unless their policy allows it. Callers read it
+    # with getattr(..., True), so a client without it counts as cloud.
+    cloud: bool
     # Characters sent with every request besides the history (system prompt,
     # fixed instructions). Used to estimate usage when a stream reports no
     # counts. Callers read it with getattr(..., 0), so it may be omitted.
     prompt_overhead_chars: int
 
-    # tool_results: answers to the ToolCalls of the previous request in this
-    # turn; the implementation appends the model's call and these results to
-    # history. allow_tool_calls=False forbids further calls (the tools stay
-    # declared). One API request per call.
+    # rounds: the tool rounds of this turn so far, oldest first; the
+    # implementation appends each round's model calls (from ToolCall.raw) and
+    # results after history, in order. allow_tool_calls=False forbids further
+    # calls (the tools stay declared). One API request per call (the local
+    # router mode may add its routing request, see openai_compat).
     def stream_reply(
         self,
         history: list[Message],
         tools: list[ToolSpec],
-        tool_results: list[ToolResult] | None = None,
+        rounds: Sequence[ToolRound] = (),
         allow_tool_calls: bool = True,
     ) -> AsyncIterator[LLMEvent]: ...

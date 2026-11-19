@@ -7,6 +7,7 @@ from typing import Any
 
 from obsilord.llm.base import ToolNote
 from obsilord.memory.base import Hit
+from obsilord.tools.registry import TurnContext
 from obsilord.memory.recall import (
     MAX_DAYS_BACK,
     MSG_RECALL_FAILED,
@@ -14,7 +15,6 @@ from obsilord.memory.recall import (
     RecallTool,
     date_in_text,
     notes_to_store,
-    recall_spec,
 )
 
 # Local time, so the dates in the output do not depend on the time zone.
@@ -59,25 +59,26 @@ def _tool(source: FakeSource, max_chars: int = 1500) -> RecallTool:
 
 
 def test_spec_declares_query_date_and_days_back() -> None:
-    assert RECALL_TOOL.name == "recall"
-    props = RECALL_TOOL.parameters["properties"]
-    assert set(props) == {"query", "date", "days_back"}
-    assert RECALL_TOOL.parameters["required"] == ["query"]
-    assert "earlier conversation" in RECALL_TOOL.description
-
-
-def test_spec_of_a_turn_carries_todays_date() -> None:
-    spec = recall_spec(NOW)
+    spec = RECALL_TOOL.spec
     assert spec.name == "recall"
-    assert "Today is 2026-11-18 (Wednesday)." in spec.description
-    assert _tool(FakeSource()).tool().spec.description == spec.description
+    props = spec.parameters["properties"]
+    assert set(props) == {"query", "date", "days_back"}
+    assert (props["date"]["type"], props["days_back"]["type"]) == ("string", "integer")
+    assert spec.parameters["required"] == ["query"]
+    assert "earlier conversation" in spec.description
+    # The date comes from the system prompt now, not the description.
+    assert "Today is" not in spec.description
+    assert RECALL_TOOL.policy.private_data and RECALL_TOOL.policy.untrusted
+    assert not RECALL_TOOL.policy.cloud
 
 
 def test_tool_of_a_turn_skips_the_inline_turns() -> None:
     source = FakeSource(hits=[], window_hits=[])
-    tool = _tool(source).tool(skip=("c" * 32, 10))
-    asyncio.run(tool.run({"query": "cat", "date": "2026-11-05"}))  # words, then the window
-    asyncio.run(_tool(source).tool().run({"query": "cat"}))
+    bound = RECALL_TOOL.bind(recall=_tool(source), skip=("c" * 32, 10))
+    ctx = TurnContext()
+    asyncio.run(bound.call(bound.arguments({"query": "cat", "date": "2026-11-05"}), ctx))  # words, then the window
+    plain = RECALL_TOOL.bind(recall=_tool(source))
+    asyncio.run(plain.call(plain.arguments({"query": "cat"}), ctx))
     assert source.skips == [("c" * 32, 10), ("c" * 32, 10), None]
 
 

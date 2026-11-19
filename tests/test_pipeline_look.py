@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fakes import FakeLLM, FakeLooker, FakeToolLLM, FakeTTS
+from fakes import FakeLLM, FakeLooker, FakeToolLLM, FakeTTS, registry
 from obsilord.llm.base import Done, Message, TextDelta, ToolCall, ToolNote, ToolResult, UsageUpdate
-from obsilord.look import LOOK_TOOL, MSG_ONE_LOOK
+from obsilord.look import LOOK_TOOL
 from obsilord.pipeline import MSG_CAP, MSG_LLM_FAILED, MSG_TIMEOUT, run_text_turn
+from obsilord.tools.registry import msg_limit, msg_unknown
 from obsilord.usage import UsageTracker
 
 NOW = datetime(2026, 10, 27, 12, 0, tzinfo=timezone.utc)
@@ -60,7 +61,7 @@ def _run(
             send,
             turn_timeout_s=timeout_s,
             tts=tts,
-            looker=looker,
+            tools=registry(looker) if looker is not None else None,
         )
     )
     return reply, sent
@@ -97,14 +98,15 @@ def test_look_then_follow_up_text_only(tmp_path: Path) -> None:
     ]
     assert looker.questions == ["What am I holding?"]
     first, second = llm.requests
-    assert first.tools == [LOOK_TOOL] and first.tool_results is None
+    assert first.tools == [LOOK_TOOL.spec] and first.rounds == []
     assert first.allow_tool_calls is True
-    assert second.tools == [LOOK_TOOL]
-    assert second.tool_results == [ToolResult(call, {"output": "A red mug."})]
+    assert second.tools == [LOOK_TOOL.spec]
+    assert second.rounds == [[ToolResult(call, {"output": "A red mug."})]]
     assert second.tool_results[0].call.raw == ["raw parts"]
-    assert second.allow_tool_calls is False
+    # Round 2 of 3: the model may still call (the camera limit says no).
+    assert second.allow_tool_calls is True
     # Both requests see the same history: the tool exchange of this turn is
-    # sent as tool_results, not in it. Afterwards the reply carries the note.
+    # sent as rounds, not in it. Afterwards the reply carries the note.
     assert first.history == second.history == [Message("user", "hello")]
     assert history == [
         Message("user", "hello"),
@@ -176,7 +178,7 @@ def test_only_first_look_runs(tmp_path: Path) -> None:
     results = llm.requests[1].tool_results
     assert results == [
         ToolResult(first, {"output": "A red mug."}),
-        ToolResult(extra, {"error": MSG_ONE_LOOK}),
+        ToolResult(extra, {"error": msg_limit("camera", 1)}),
     ]
 
 
@@ -188,7 +190,7 @@ def test_unknown_tool_gets_an_error_result(tmp_path: Path) -> None:
 
     assert reply == "I cannot."
     assert looker.questions == []
-    assert llm.requests[1].tool_results == [ToolResult(call, {"error": "Unknown tool: open_door."})]
+    assert llm.requests[1].tool_results == [ToolResult(call, {"error": msg_unknown("open_door")})]
 
 
 def test_look_refusal_goes_back_to_the_model(tmp_path: Path) -> None:
@@ -214,7 +216,7 @@ def test_plain_fake_llm_gets_the_tool_declared(tmp_path: Path) -> None:
     reply, _ = _run(llm, FakeLooker(), _usage(tmp_path))
 
     assert reply == "Hello."
-    assert llm.tools == [[LOOK_TOOL]]
+    assert llm.tools == [[LOOK_TOOL.spec]]
 
 
 def test_follow_up_failure_is_reported_and_recorded(tmp_path: Path) -> None:

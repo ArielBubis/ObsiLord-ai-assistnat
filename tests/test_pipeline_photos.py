@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fakes import FakeLooker, FakeToolLLM
+from fakes import FakeLooker, FakeToolLLM, registry
 from fakes import SeeingToolLLM as SeeingLLM
 from obsilord.llm.base import Done, Message, TextDelta, ToolCall, ToolNote
 from obsilord.look import LOOK_PHOTO_TOOL, LOOK_TOOL
@@ -50,7 +50,7 @@ def _run(
             llm,
             UsageTracker(tmp_path / "usage.jsonl", 1000, clock=lambda: NOW),
             send,
-            looker=looker,
+            tools=registry(looker),
             on_turn=on_turn,
             photos=photos,
         )
@@ -64,7 +64,7 @@ def test_a_model_that_sees_photos_gets_the_frame_and_not_qwenny(tmp_path: Path) 
     assert reply == "A red mug."
     assert looker.photos_taken == 1 and looker.questions == []  # no Qwenny look
     first, follow = llm.requests
-    assert [t.description for t in first.tools] == [LOOK_PHOTO_TOOL.description]
+    assert [t.description for t in first.tools] == [LOOK_PHOTO_TOOL.spec.description]
     assert follow.tool_results is not None and follow.tool_results[0].image == FRAME
 
 
@@ -144,7 +144,7 @@ def test_a_model_that_does_not_see_photos_keeps_qwenny(tmp_path: Path) -> None:
     llm, looker = SeeingLLM(_rounds(), sees=False), FakeLooker()
     _, history, _ = _run(tmp_path, llm, looker, TurnPhotos("followup"))
     assert looker.questions == ["What am I holding?"] and looker.photos_taken == 0
-    assert [t.description for t in llm.requests[0].tools] == [LOOK_TOOL.description]
+    assert [t.description for t in llm.requests[0].tools] == [LOOK_TOOL.spec.description]
     assert history[-1].tools[0].image is None
 
 

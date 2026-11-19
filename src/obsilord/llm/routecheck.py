@@ -1,11 +1,11 @@
-"""Score a local model on picking the tools (camera and recall).
+"""Score a local model on picking the tools (camera, recall, calculate).
 
     python -m obsilord.llm.routecheck [--model ID] [--no-search] [--no-recall]
                                       [--repeat N] [--mode auto|native|router]
 
 Sends a fixed set of labelled messages (some need look(), some
-search_image(), some recall(), most need no tool, a few are follow-ups, one
-answered by an earlier tool result in history) against the
+search_image(), some recall(), some calculate(), most need no tool, a few are
+follow-ups, one answered by an earlier tool result in history) against the
 [llm_local] server in config.toml, the way the app would: in native mode one
 request with the tools declared and the app's system prompt, in router mode
 the routing request. Prints the misses, the accuracy per expected tool, how
@@ -17,7 +17,13 @@ Nothing is logged to the usage file and no camera is used.
 messages that ask to identify something then expect look().
 --no-recall: recall() is not offered (as in Gemini mode or with [memory]
 recall off); messages about earlier conversations then expect no tool. No
-store is searched either way: only the decision is scored.
+store is searched either way: only the decision is scored. calculate() is
+always offered, as in the app.
+
+Multi-step cases (native mode only; the app sends no routing request after a
+tool round) give the model a finished round (a recall result) and expect the
+next call. Cases added in T1 are marked; "old set" in the report is the
+accuracy without them, to compare with the runs before T1.
 """
 
 from __future__ import annotations
@@ -30,14 +36,16 @@ import time
 from dataclasses import dataclass
 
 from obsilord.config import TOOL_MODES, load_settings
-from obsilord.llm.base import Message, ToolNote, ToolSpec
+from obsilord.llm.base import Message, ToolCall, ToolNote, ToolResult, ToolRound, ToolSpec
 from obsilord.llm.openai_compat import NO_TOOL, LocalClient, LocalLLMError, OpenAICompatServer
 from obsilord.look import LOOK_TOOL, SEARCH_IMAGE_TOOL
 from obsilord.memory.recall import RECALL_TOOL
+from obsilord.tools.calculate import calculate
 
 LOOK = LOOK_TOOL.name
 SEARCH = SEARCH_IMAGE_TOOL.name
 RECALL = RECALL_TOOL.name
+CALC = calculate.name
 
 _MUG = (Message("user", "What am I holding?"), Message("assistant", "A red mug. Thrilling."))
 _CAT = (Message("user", "Look at my cat."), Message("assistant", "A fat grey cat, asleep on a chair."))
@@ -55,11 +63,23 @@ _JOKE = (
 )
 
 
+def _recalled(query: str, output: str) -> tuple[ToolRound, ...]:
+    """One finished round: a recall call and its result."""
+    return ((ToolResult(ToolCall(RECALL, {"query": query}, call_id="call_1"), {"output": output}),),)
+
+
+_BIKE = _recalled("bike price", "Today is 2026-11-19 (Thursday). 2026-11-02 14:10 user: I paid 2400 shekels for the new bike.")
+_RUN = _recalled("run distance", "Today is 2026-11-19 (Thursday). 2026-11-15 08:30 user: Ran 12 km this morning in 61 minutes.")
+_DENTIST = _recalled("dentist", "Today is 2026-11-19 (Thursday). 2026-11-10 18:00 user: Dentist on the 24th at 9.")
+
+
 @dataclass(frozen=True)
 class Case:
     text: str
     expected: str
     history: tuple[Message, ...] = ()
+    rounds: tuple[ToolRound, ...] = ()  # finished rounds of this turn (native only)
+    new: bool = False  # added in T1, not in the old set
 
 
 CASES: tuple[Case, ...] = (
@@ -104,6 +124,21 @@ CASES: tuple[Case, ...] = (
     Case("Pita knocked over my plant again.", RECALL),
     Case("I am so tired today.", NO_TOOL),
     Case("I just made coffee.", NO_TOOL),
+    # T1: calculate, and when not to.
+    Case("What is 17% of 2400?", CALC, new=True),
+    Case("What is 387 times 42?", CALC, new=True),
+    Case("Convert 70 kilograms to pounds.", CALC, new=True),
+    Case("How many feet is 3.5 meters?", CALC, new=True),
+    Case("We are four people and the bill is 230 shekels, how much each?", CALC, new=True),
+    Case("Who invented calculus?", NO_TOOL, new=True),
+    Case("Is a kilo heavier than a pound?", NO_TOOL, new=True),
+    Case("I hate doing my taxes.", NO_TOOL, new=True),
+    # T1: multi-step. Without a round the first step is recall; with the
+    # recall result in hand the next step is calculate, or the answer.
+    Case("What is 17% of what I paid for my bike?", RECALL, new=True),
+    Case("What is 17% of what I paid for my bike?", CALC, rounds=_BIKE, new=True),
+    Case("What was my pace per km on that 12 km run?", CALC, rounds=_RUN, new=True),
+    Case("When is my dentist appointment?", NO_TOOL, rounds=_DENTIST, new=True),
 )
 
 
@@ -140,6 +175,8 @@ async def check(
     search = any(t.name == SEARCH for t in tools)
     recall = any(t.name == RECALL for t in tools)
     results: list[Result] = []
+    if mode != "native":
+        cases = tuple(c for c in cases if not c.rounds)
     for _ in range(repeat):
         for case in cases:
             expected = expected_for(case, search, recall)
@@ -147,7 +184,7 @@ async def check(
             t0 = time.perf_counter()
             as_text = False
             if mode == "native":
-                route, _, as_text = await client.native_route(history, tools)
+                route, _, as_text = await client.native_route(history, tools, rounds=case.rounds)
             else:
                 route, _ = await client.route(history, tools)
             ms = (time.perf_counter() - t0) * 1000
@@ -159,7 +196,12 @@ async def check(
 async def _run(model: str, search: bool, recall: bool, repeat: int, mode: str) -> int:
     settings = load_settings()
     server = OpenAICompatServer(settings.llm_local)
-    tools = [LOOK_TOOL, *([SEARCH_IMAGE_TOOL] if search else []), *([RECALL_TOOL] if recall else [])]
+    tools = [
+        LOOK_TOOL.spec,
+        *([SEARCH_IMAGE_TOOL.spec] if search else []),
+        *([RECALL_TOOL.spec] if recall else []),
+        calculate.spec,
+    ]
     try:
         try:
             resolved = model or await server.default_model()
@@ -185,10 +227,10 @@ def _report(results: list[Result]) -> None:
     if misses:
         print("\nmisses:")
         for r in misses:
-            context = " (follow-up)" if r.case.history else ""
+            context = " (follow-up)" if r.case.history else " (after a round)" if r.case.rounds else ""
             print(f"  expected {r.expected:<12} got {r.got:<12} {r.case.text!r}{context}")
     print("\nby expected tool:")
-    for name in (LOOK, SEARCH, RECALL, NO_TOOL):
+    for name in (LOOK, SEARCH, RECALL, CALC, NO_TOOL):
         group = [r for r in results if r.expected == name]
         if group:
             ok = sum(r.got == r.expected for r in group)
@@ -198,8 +240,16 @@ def _report(results: list[Result]) -> None:
     p90 = times[min(len(times) - 1, int(len(times) * 0.9))]
     ok = len(results) - len(misses)
     as_text = sum(r.as_text for r in results)
+    old = [r for r in results if not r.case.new]
+    old_ok = sum(r.got == r.expected for r in old)
+    steps = [r for r in results if r.case.rounds]
     print(f"\naccuracy {ok}/{len(results)} ({100 * ok / len(results):.0f}%), "
           f"unusable answers {unusable}, calls written as text {as_text}")
+    if old:
+        print(f"old set (before T1) {old_ok}/{len(old)} ({100 * old_ok / len(old):.0f}%)")
+    if steps:
+        steps_ok = sum(r.got == r.expected for r in steps)
+        print(f"multi-step {steps_ok}/{len(steps)}")
     print(f"latency: median {statistics.median(times):.0f} ms, p90 {p90:.0f} ms")
     if unusable:
         print("Unusable answers: the model may spend its tokens thinking before the JSON, "
@@ -210,7 +260,7 @@ def _report(results: list[Result]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m obsilord.llm.routecheck",
-        description="Score a local model on picking the tools (camera and recall).",
+        description="Score a local model on picking the tools (camera, recall, calculate).",
     )
     parser.add_argument("--model", default="", help="model id (default: [llm_local] model, "
                         "or the first model the server lists)")

@@ -92,7 +92,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Coroutine, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Callable, Coroutine
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
@@ -105,16 +105,17 @@ from obsilord.face_character import check_character
 from obsilord.llm.base import LLMClient, Message, ToolNote
 from obsilord.llm.openai_compat import LocalLLMError, OpenAICompatServer
 from obsilord.llm_switch import GEMINI, LOCAL, clean_model, switch_notice
-from obsilord.look import SEARCH_IMAGE_TOOL, ImageSearch, LookTool
+from obsilord.look import ImageSearch, LookTool, camera_source
 from obsilord.memory.base import ConversationInfo, MemoryStore, TurnRecord
 from obsilord.memory.demo import demo_checks, reset_demo_db, seed_demo
-from obsilord.memory.recall import RecallTool, notes_to_store
+from obsilord.memory.recall import RECALL_TOOL, RecallTool, notes_to_store
 from obsilord.memory.store import SqliteStore
 from obsilord.photos import PHOTO_MODES, PhotoStore, TurnPhotos, attach_photos, keep_newest_photos
 from obsilord.pipeline import MSG_NOT_CAUGHT, run_text_turn, run_voice_turn
-from obsilord.tools import Tool
 from obsilord.stt.base import SAMPLE_RATE as STT_SAMPLE_RATE
 from obsilord.stt.base import STTClient, pcm16_bytes_for_ms
+from obsilord.tools.calculate import calculate
+from obsilord.tools.registry import Registry, Tool, ToolSource, TurnInfo, static_source
 from obsilord.tts.base import TTSClient
 from obsilord.usage import UsageTracker
 
@@ -150,7 +151,6 @@ MSG_BAD_PHOTOS = "Unknown Photos setting."
 CHANNEL = "web"
 _CONVERSATION_ID = re.compile(r"[0-9a-f]{32}")
 
-T = TypeVar("T")
 
 # Extra time after max_utterance_s before the server closes a recording that
 # never got its audio_end.
@@ -371,10 +371,11 @@ def _memory_from_settings(settings: Settings) -> SqliteStore | None:
 _default_memory = _memory_from_settings
 
 
-def turn_tools(provider: str, recall: T | None) -> list[T]:
-    """The tools besides the camera for a turn: recall for the local model
-    only, so earlier conversations never go to a cloud provider through it."""
-    return [recall] if provider == LOCAL and recall is not None else []
+def build_registry(sources: list[ToolSource]) -> Registry:
+    """The registry of one connection: the camera tools (when there is a
+    camera), recall (when memory is on) and calculate. Which of them a turn
+    offers is decided per turn by the registry (cloud model, photos)."""
+    return Registry([*sources, static_source(calculate)])
 
 
 CONVERSATION_REASONS = ("start", "resume", "switch", "new", "saved", "edited")
@@ -513,8 +514,7 @@ def create_app(
     app.state.local = local
 
     def search_declared() -> bool:
-        tools = getattr(app.state.looker, "tools", None) or []
-        return any(t.name == SEARCH_IMAGE_TOOL.name for t in tools)
+        return bool(getattr(app.state.looker, "search_on", False))
 
     stt_cfg = settings.stt
     max_audio_bytes = pcm16_bytes_for_ms(stt_cfg.max_utterance_s * 1000, STT_SAMPLE_RATE)
@@ -744,13 +744,19 @@ def create_app(
                     keep_newest_photos(history, 0)
                 await send({"type": "photos", "mode": photo_mode})
 
-        def recall_tool() -> Tool | None:
-            # Built per turn: its description carries today's date, and the
-            # turns of this conversation already in history are skipped.
+        async def recall_source(info: TurnInfo) -> list[Tool]:
+            # Per turn: the turns of this conversation already in history are
+            # skipped. A cloud model does not get it (private data, registry).
             if recall is None:
-                return None
+                return []
             skip = (conv_id, settings.llm.history_turns) if conv_id is not None else None
-            return recall.tool(skip=skip)
+            return [RECALL_TOOL.bind(recall=recall, skip=skip)]
+
+        def turn_registry() -> Registry:
+            sources: list[ToolSource] = [recall_source]
+            if app.state.looker is not None:
+                sources.insert(0, camera_source(app.state.looker))
+            return build_registry(sources)
 
         async def send(msg: dict[str, Any] | bytes) -> None:
             if isinstance(msg, dict) and msg.get("type") == "snapshot" and not snapshots_on:
@@ -1078,8 +1084,8 @@ def create_app(
                     max_output_tokens=current_max_output_tokens(),
                     turn_timeout_s=settings.llm.turn_timeout_s,
                     tts=app.state.tts,
-                    looker=app.state.looker,
-                    extra_tools=turn_tools(provider, recall_tool()),
+                    tools=turn_registry(),
+                    max_rounds=settings.tools.max_rounds,
                     on_turn=store_turn(provider, llm),
                     photos=turn_photos(),
                 )
@@ -1199,8 +1205,8 @@ def create_app(
                     max_output_tokens=current_max_output_tokens(),
                     turn_timeout_s=settings.llm.turn_timeout_s,
                     tts=app.state.tts,
-                    looker=app.state.looker,
-                    extra_tools=turn_tools(provider, recall_tool()),
+                    tools=turn_registry(),
+                    max_rounds=settings.tools.max_rounds,
                     on_turn=store_turn(provider, llm),
                     photos=turn_photos(),
                 )

@@ -312,6 +312,19 @@ class MemorySettings:
     list_limit: int = 50
 
 
+MAX_ROUNDS_MAX = 6
+
+
+@dataclass(frozen=True, kw_only=True)
+class ToolsSettings:
+    """[tools], optional. How the model uses its tools."""
+
+    # Tool rounds per turn: the model may call tools, read the results and
+    # call again, up to this many times before it must answer (1..6). Each
+    # round is one more model request, checked against the daily token cap.
+    max_rounds: int = 3
+
+
 @dataclass(frozen=True, kw_only=True)
 class DebugSettings:
     """[debug], optional."""
@@ -342,6 +355,7 @@ class Settings:
     image_search: ImageSearchSettings = field(default_factory=ImageSearchSettings)
     llm_local: LocalLLMSettings = field(default_factory=LocalLLMSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
+    tools: ToolsSettings = field(default_factory=ToolsSettings)
     debug: DebugSettings = field(default_factory=DebugSettings)
     secrets: Secrets = field(default_factory=Secrets, repr=False)
     repo_root: Path = REPO_ROOT
@@ -747,7 +761,7 @@ def default_config_path() -> Path:
 # Every top-level table config.toml may have.
 SECTIONS = (
     "server", "llm", "stt", "tts", "camera", "face", "vision", "image_search",
-    "llm_local", "memory", "debug",
+    "llm_local", "memory", "tools", "debug",
 )
 
 
@@ -778,6 +792,7 @@ def load_settings(
         ),
         llm_local=_build(LocalLLMSettings, "llm_local", data, defaulted, optional=True),
         memory=_build(MemorySettings, "memory", data, defaulted, optional=True),
+        tools=_build(ToolsSettings, "tools", data, defaulted, optional=True),
         debug=_build(DebugSettings, "debug", data, defaulted, optional=True),
         secrets=load_secrets(env_path, environ),
     )
@@ -807,6 +822,11 @@ def load_settings(
     _check_image_search(settings.image_search, settings.vision)
     _check_llm_local(settings.llm, settings.llm_local)
     _check_memory(settings.memory)
+    if not 1 <= settings.tools.max_rounds <= MAX_ROUNDS_MAX:
+        raise ValueError(
+            f"config: tools.max_rounds must be in 1..{MAX_ROUNDS_MAX}, "
+            f"got {settings.tools.max_rounds}"
+        )
     if defaulted:
         log.info(
             "config: %s not set in %s, using defaults (copy them from "

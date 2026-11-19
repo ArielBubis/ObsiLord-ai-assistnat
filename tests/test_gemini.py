@@ -10,8 +10,23 @@ from typing import Any
 import pytest
 
 from obsilord.config import REPO_ROOT, LLMSettings, load_settings
-from obsilord.llm.base import Done, Message, TextDelta, ToolCall, ToolResult, UsageUpdate
+from obsilord.llm.base import Done, Message, TextDelta, ToolCall, ToolResult, ToolSpec, UsageUpdate
 from obsilord.llm.gemini import GeminiClient, MissingApiKey, load_system_prompt
+from obsilord.llm.prompt import NOW_LINE_CHARS
+
+
+# A made-up declaration; the client only passes it through.
+LOOK = ToolSpec(
+    "look",
+    "Take one photo with the webcam.",
+    {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]},
+)
+CALC = ToolSpec(
+    "calculate",
+    "Work out arithmetic.",
+    {"type": "object", "properties": {"expression": {"type": "string"}}, "required": ["expression"]},
+)
+NOW = 1_763_550_000.0  # a fixed clock for the date line
 
 
 def _llm(tmp_path: Path) -> LLMSettings:
@@ -134,7 +149,7 @@ def _client_with_stream(tmp_path: Path, stream: _FakeSdkStream) -> GeminiClient:
 
 def test_prompt_overhead_chars(tmp_path: Path) -> None:
     client = GeminiClient(_llm(tmp_path), "dummy-key-for-test", system_prompt="sys prompt")
-    assert client.prompt_overhead_chars == len("sys prompt")
+    assert client.prompt_overhead_chars == len("sys prompt") + NOW_LINE_CHARS
 
 
 def test_stream_events_and_close(tmp_path: Path) -> None:
@@ -221,12 +236,11 @@ def _look_call_stream() -> _FakeSdkStream:
 
 
 def test_tool_call_comes_after_text_with_the_raw_parts(tmp_path: Path) -> None:
-    from obsilord.look import LOOK_TOOL
 
     client, seen = _capturing_client(tmp_path, _look_call_stream())
 
     async def go() -> list[Any]:
-        return [ev async for ev in client.stream_reply([Message("user", "hi")], [LOOK_TOOL])]
+        return [ev async for ev in client.stream_reply([Message("user", "hi")], [LOOK])]
 
     events = asyncio.run(go())
     text, usage, call, done = events
@@ -245,15 +259,14 @@ def test_tool_call_comes_after_text_with_the_raw_parts(tmp_path: Path) -> None:
     config = seen[0]["config"]
     declaration = config.tools[0].function_declarations[0]
     assert declaration.name == "look"
-    assert declaration.parameters_json_schema == LOOK_TOOL.parameters
+    assert declaration.parameters_json_schema == LOOK.parameters
     assert config.tool_config is None  # calls allowed
-    assert config.system_instruction == "sys prompt"
+    assert config.system_instruction.startswith("sys prompt\n\nCurrent date and time: ")
 
 
 def test_follow_up_sends_the_parts_back_with_the_result(tmp_path: Path) -> None:
     from google.genai import types
 
-    from obsilord.look import LOOK_TOOL
 
     raw = [types.Part(text="Let me look. "), types.Part(
         function_call=types.FunctionCall(id="call-1", name="look", args={"question": "q"}),
@@ -267,8 +280,8 @@ def test_follow_up_sends_the_parts_back_with_the_result(tmp_path: Path) -> None:
             ev
             async for ev in client.stream_reply(
                 [Message("user", "hi")],
-                [LOOK_TOOL],
-                tool_results=[ToolResult(call, {"output": "A red mug."})],
+                [LOOK],
+                rounds=[[ToolResult(call, {"output": "A red mug."})]],
                 allow_tool_calls=False,
             )
         ]
@@ -293,7 +306,7 @@ def test_results_without_raw_rebuild_the_call() -> None:
     from obsilord.llm.gemini import _to_contents
 
     call = ToolCall("look", {"question": "q"}, call_id="")
-    contents = _to_contents([Message("user", "hi")], [ToolResult(call, {"error": "busy"})])
+    contents = _to_contents([Message("user", "hi")], [[ToolResult(call, {"error": "busy"})]])
     fc = contents[1].parts[0].function_call
     assert (fc.id, fc.name, fc.args) == (None, "look", {"question": "q"})
     assert contents[2].parts[0].function_response.response == {"error": "busy"}
@@ -305,7 +318,7 @@ def test_results_from_two_responses_are_rejected() -> None:
     a = ToolCall("look", {}, raw=["a"])
     b = ToolCall("look", {}, raw=["b"])
     with pytest.raises(ValueError, match="one model response"):
-        _to_contents([], [ToolResult(a, {}), ToolResult(b, {})])
+        _to_contents([], [[ToolResult(a, {}), ToolResult(b, {})]])
 
 
 def test_no_tools_keeps_the_base_config(tmp_path: Path) -> None:
@@ -316,8 +329,76 @@ def test_no_tools_keeps_the_base_config(tmp_path: Path) -> None:
             pass
 
     asyncio.run(go())
-    assert seen[0]["config"] is client._config
-    assert seen[0]["config"].tools is None
+    config = seen[0]["config"]
+    assert config.tools is None and config.tool_config is None
+    assert config.system_instruction.startswith("sys prompt\n\nCurrent date and time: ")
+
+
+def test_system_instruction_ends_with_the_date_and_time(tmp_path: Path) -> None:
+    from datetime import datetime
+
+    client, seen = _capturing_client(tmp_path, _FakeSdkStream([_chunk("Hi.")]))
+    client._clock = lambda: NOW
+
+    async def go() -> None:
+        async for _ in client.stream_reply([Message("user", "hi")], []):
+            pass
+
+    asyncio.run(go())
+    day = datetime.fromtimestamp(NOW)
+    assert seen[0]["config"].system_instruction == (
+        f"sys prompt\n\nCurrent date and time: {day:%A} {day:%Y-%m-%d}, {day:%H:%M}."
+    )
+    assert client._config.system_instruction == "sys prompt"
+
+
+def test_two_rounds_send_every_step_with_its_signatures(tmp_path: Path) -> None:
+    from google.genai import types
+
+    raw1 = [types.Part(
+        function_call=types.FunctionCall(id="c1", name="look", args={"question": "q"}),
+        thought_signature=b"sig-1",
+    )]
+    # Two parallel calls: only the first carries a signature.
+    raw2 = [
+        types.Part(
+            function_call=types.FunctionCall(id="c2", name="calculate", args={"expression": "2+2"}),
+            thought_signature=b"sig-2",
+        ),
+        types.Part(function_call=types.FunctionCall(id="c3", name="calculate", args={"expression": "3+3"})),
+    ]
+    look = ToolCall("look", {"question": "q"}, call_id="c1", raw=raw1)
+    calc_a = ToolCall("calculate", {"expression": "2+2"}, call_id="c2", raw=raw2)
+    calc_b = ToolCall("calculate", {"expression": "3+3"}, call_id="c3", raw=raw2)
+    client, seen = _capturing_client(tmp_path, _FakeSdkStream([_chunk("Done.", (9, 4, 0))]))
+
+    async def go() -> None:
+        async for _ in client.stream_reply(
+            [Message("user", "hi")],
+            [LOOK, CALC],
+            rounds=[
+                [ToolResult(look, {"output": "A mug."})],
+                [ToolResult(calc_a, {"output": "4"}), ToolResult(calc_b, {"error": "busy"})],
+            ],
+            allow_tool_calls=True,
+        ):
+            pass
+
+    asyncio.run(go())
+    contents = seen[0]["contents"]
+    assert [c.role for c in contents] == ["user", "model", "user", "model", "user"]
+    assert contents[1].parts == raw1 and contents[3].parts == raw2
+    assert [p.function_response.id for p in contents[2].parts] == ["c1"]
+    assert [(p.function_response.id, p.function_response.response) for p in contents[4].parts] == [
+        ("c2", {"output": "4"}),
+        ("c3", {"error": "busy"}),
+    ]
+    # Calls are still allowed: no NONE mode.
+    assert seen[0]["config"].tool_config is None
+
+
+def test_cloud_flag() -> None:
+    assert GeminiClient.cloud is True
 
 
 def test_stream_closed_on_error(tmp_path: Path) -> None:
@@ -342,7 +423,6 @@ def test_prompt_log_prints_the_request_and_the_response(
 ) -> None:
     from google.genai import types
 
-    from obsilord.look import LOOK_TOOL
 
     caplog.set_level(logging.INFO, logger="obsilord.prompts")
     raw = [
@@ -358,8 +438,8 @@ def test_prompt_log_prints_the_request_and_the_response(
     async def go() -> None:
         async for _ in client.stream_reply(
             [Message("user", "what am I holding?")],
-            [LOOK_TOOL],
-            tool_results=[ToolResult(call, {"output": "The user holds a red mug."})],
+            [LOOK],
+            rounds=[[ToolResult(call, {"output": "The user holds a red mug."})]],
             allow_tool_calls=False,
         ):
             pass
