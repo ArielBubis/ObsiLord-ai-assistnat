@@ -3,15 +3,14 @@
 // with the conversation (in memory) for a local model that sees photos.
 // "disk": as followup, and every look's photo is saved on this PC.
 //
-// The choice is remembered in this browser (localStorage) and sent as
-// {"type": "photos", "mode": ...} on every connect and change; the server
-// answers with the same message. Without a stored choice the page shows the
-// server's default (/config/photos) and sends nothing, so the server keeps it.
+// The server owns the choice. It sends {"type": "photos", "mode"} on connect
+// and to every open page after a change; the page shows that and sends
+// {"type": "photos", "mode"} only when the user picks one. Nothing is kept
+// in this browser.
 //
 // The pure helpers at the top are tested with node --test.
 
 export const MODES = ["off", "followup", "disk"];
-export const STORAGE_KEY = "obsilord.photos";
 
 export function photosMessage(mode) {
   return MODES.includes(mode) ? JSON.stringify({ type: "photos", mode }) : null;
@@ -23,29 +22,9 @@ export function modeFrom(msg) {
   return MODES.includes(msg.mode) ? msg.mode : null;
 }
 
-export function readPreference(storage) {
-  try {
-    const value = storage ? storage.getItem(STORAGE_KEY) : null;
-    return MODES.includes(value) ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-export function writePreference(storage, mode) {
-  try {
-    if (storage) storage.setItem(STORAGE_KEY, mode);
-  } catch {
-    // Not remembered.
-  }
-}
-
 // el: { radios } (one radio input per mode, value = the mode). send(text)
-// sends a JSON text frame if the socket is open.
-// Returns { announce, setDefault, show }.
-export function initPhotos(el, storage, send) {
-  let chosen = readPreference(storage);
-
+// sends a JSON text frame if the socket is open. Returns { show }.
+export function initPhotos(el, send) {
   function check(mode) {
     for (const r of el.radios) r.checked = r.value === mode;
   }
@@ -53,25 +32,14 @@ export function initPhotos(el, storage, send) {
   for (const r of el.radios) {
     r.addEventListener("change", () => {
       if (!r.checked) return;
-      chosen = r.value;
-      writePreference(storage, chosen);
-      const text = photosMessage(chosen);
+      const text = photosMessage(r.value);
       if (text) send(text);
     });
   }
 
-  check(chosen || "off");
+  check("off");
 
   return {
-    // Tell a newly opened socket the stored choice (none: the server default stays).
-    announce() {
-      const text = chosen ? photosMessage(chosen) : null;
-      if (text) send(text);
-    },
-    // The server's default, shown while the page has no choice of its own.
-    setDefault(mode) {
-      if (!chosen && MODES.includes(mode)) check(mode);
-    },
     show(msg) {
       const mode = modeFrom(msg);
       if (mode) check(mode);

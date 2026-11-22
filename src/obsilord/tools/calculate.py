@@ -258,7 +258,7 @@ def convert(text: str) -> str | None:
     return f"{amount_text} {src.symbol} = {format_number(value)} {dst.symbol}"
 
 
-@tool(ToolPolicy(per_turn=3, timeout_s=2.0))
+@tool(ToolPolicy(per_turn=3, timeout_s=2.0, label="Calculator", ask="Use the calculator?"))
 async def calculate(expression: str, action: Literal["math", "convert"] = "math") -> str:
     """Work out arithmetic or convert units exactly, instead of doing it in your
     head. Use it for any sum, percentage or unit conversion with numbers, for

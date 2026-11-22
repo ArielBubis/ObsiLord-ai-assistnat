@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   busyAfterMessage, stateAction, drainTimeoutMs, textDrivesMouth, closesOpenSentence, DRAIN_GRACE_MS,
   WATCHDOG_MS, WATCHDOG_MESSAGE, pressAction, recordingAction, controlsDisabled, orphanAction,
-  ACK_TIMEOUT_MS, BUSY_FLASH_MS, ORPHAN_HOLD_MS,
+  ACK_TIMEOUT_MS, BUSY_FLASH_MS, ORPHAN_HOLD_MS, turnStartsOnState,
 } from "../../web/turn.js";
 
 const state = (s) => ({ type: "state", state: s });
@@ -229,4 +229,32 @@ test("ack timeout then the slow server's answers: listening swallowed, error sho
     seen.push(a);
   }
   assert.deepEqual(seen, ["swallow", "none", "clear"]);
+});
+
+// Confirm card (T2): the turn runs while the server waits for an answer.
+
+test("a press during a confirm answers instead of being busy", () => {
+  const base = { connected: true, busy: true, pendingIdle: false, recording: false };
+  assert.equal(pressAction({ ...base, confirming: true }), "answer");
+  assert.equal(pressAction(base), "busy");
+  assert.equal(pressAction({ ...base, confirming: true, connected: false }), "offline");
+  assert.equal(pressAction({ ...base, confirming: true, recording: true }), "ignore");
+  assert.equal(pressAction({ ...base, confirming: true, orphan: true }), "busy");
+});
+
+test("text and Send stay enabled during a confirm, but not while recording", () => {
+  assert.equal(controlsDisabled(true, false, false, true), false);
+  assert.equal(controlsDisabled(true, false, false, false), true);
+  assert.equal(controlsDisabled(true, true, false, true), true);
+  assert.equal(controlsDisabled(true, false, true, true), true);
+});
+
+test("a state that is not idle or listening starts a turn the page did not send", () => {
+  assert.equal(turnStartsOnState(false, state("thinking")), true);
+  assert.equal(turnStartsOnState(false, state("speaking")), true);
+  assert.equal(turnStartsOnState(false, state("idle")), false);
+  assert.equal(turnStartsOnState(false, state("listening")), false);
+  assert.equal(turnStartsOnState(true, state("thinking")), false);
+  assert.equal(turnStartsOnState(false, delta), false);
+  assert.equal(turnStartsOnState(false, null), false);
 });

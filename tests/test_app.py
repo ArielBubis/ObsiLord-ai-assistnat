@@ -8,9 +8,8 @@ from typing import Any
 
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
 
-from fakes import FakeLLM, FakeTTS, text_only
+from fakes import AppClient, FakeLLM, FakeTTS, text_only
 from obsilord.app import (
     MAX_TEXT_CHARS,
     MSG_BUSY,
@@ -35,14 +34,14 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
-def _make(tmp_path: Path, llm: FakeLLM | None) -> TestClient:
+def _make(tmp_path: Path, llm: FakeLLM | None) -> AppClient:
     settings = _settings(tmp_path)
     usage = UsageTracker(tmp_path / "usage.jsonl", settings.llm.daily_token_cap)
-    return TestClient(create_app(settings, llm=llm, usage=usage))
+    return AppClient(create_app(settings, llm=llm, usage=usage))
 
 
 @pytest.fixture()
-def client(tmp_path: Path) -> TestClient:
+def client(tmp_path: Path) -> AppClient:
     return _make(tmp_path, FakeLLM(["Hello ", "you."]))
 
 
@@ -55,20 +54,20 @@ def _collect_turn(ws: Any) -> list[dict[str, Any]]:
             return msgs
 
 
-def test_index_serves_html(client: TestClient) -> None:
+def test_index_serves_html(client: AppClient) -> None:
     resp = client.get("/")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     assert "<html" in resp.text.lower()
 
 
-def test_static_js_served(client: TestClient) -> None:
+def test_static_js_served(client: AppClient) -> None:
     resp = client.get("/static/ws.js")
     assert resp.status_code == 200
     assert "WebSocket" in resp.text
 
 
-def test_ws_text_turn_sequence(client: TestClient) -> None:
+def test_ws_text_turn_sequence(client: AppClient) -> None:
     with client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "text", "text": "  hi  "})
         assert _collect_turn(ws) == [
@@ -112,7 +111,7 @@ def test_ws_busy_rejection(tmp_path: Path) -> None:
         }
 
 
-def test_ws_ping_gets_no_reply(client: TestClient) -> None:
+def test_ws_ping_gets_no_reply(client: AppClient) -> None:
     with client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "ping"})
         ws.send_json({"type": "bogus"})
@@ -121,19 +120,19 @@ def test_ws_ping_gets_no_reply(client: TestClient) -> None:
 
 
 @pytest.mark.parametrize("text", ["", "   ", None, 5])
-def test_ws_empty_text_rejected(client: TestClient, text: Any) -> None:
+def test_ws_empty_text_rejected(client: AppClient, text: Any) -> None:
     with client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "text", "text": text})
         assert ws.receive_json() == {"type": "error", "message": MSG_EMPTY}
 
 
-def test_ws_too_long_text_rejected(client: TestClient) -> None:
+def test_ws_too_long_text_rejected(client: AppClient) -> None:
     with client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "text", "text": "a" * (MAX_TEXT_CHARS + 1)})
         assert ws.receive_json() == {"type": "error", "message": MSG_TOO_LONG}
 
 
-def test_ws_voice_not_available(client: TestClient) -> None:
+def test_ws_voice_not_available(client: AppClient) -> None:
     # text_only settings: [stt] model is empty, so voice input is disabled.
     with client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "audio_start"})
@@ -144,13 +143,13 @@ def test_ws_voice_not_available(client: TestClient) -> None:
         assert ws.receive_json() == {"type": "error", "message": MSG_NOT_RECORDING}
 
 
-def test_ws_non_object_json_is_unknown(client: TestClient) -> None:
+def test_ws_non_object_json_is_unknown(client: AppClient) -> None:
     with client.websocket_connect("/ws") as ws:
         ws.send_text("[1, 2]")
         assert ws.receive_json() == {"type": "error", "message": MSG_UNKNOWN}
 
 
-def test_ws_invalid_json_returns_error_and_stays_open(client: TestClient) -> None:
+def test_ws_invalid_json_returns_error_and_stays_open(client: AppClient) -> None:
     with client.websocket_connect("/ws") as ws:
         ws.send_text("{not json")
         msg = ws.receive_json()
@@ -165,7 +164,7 @@ def test_ws_disconnect_cancels_turn_and_records_usage(tmp_path: Path) -> None:
     llm = FakeLLM(["First ", "reply."], gate=gate, usage=UsageUpdate(12, 3, 0))
     settings = _settings(tmp_path)
     usage = UsageTracker(tmp_path / "usage.jsonl", settings.llm.daily_token_cap)
-    client = TestClient(create_app(settings, llm=llm, usage=usage))
+    client = AppClient(create_app(settings, llm=llm, usage=usage))
     with client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "text", "text": "one"})
         assert ws.receive_json() == {"type": "state", "state": "thinking"}
@@ -200,7 +199,7 @@ def test_ws_turn_with_tts_sends_binary_frames(tmp_path: Path) -> None:
     usage = UsageTracker(tmp_path / "usage.jsonl", settings.llm.daily_token_cap)
     tts = FakeTTS(frames=2)
     app = create_app(settings, llm=FakeLLM(["Hello ", "you."]), usage=usage, tts=tts)
-    with TestClient(app).websocket_connect("/ws") as ws:
+    with AppClient(app).websocket_connect("/ws") as ws:
         ws.send_json({"type": "text", "text": "hi"})
         msgs = _collect_turn_raw(ws)
     assert msgs == [
@@ -235,7 +234,7 @@ def test_bad_voice_stops_startup(tmp_path: Path) -> None:
         create_app(settings, llm=FakeLLM(["x"]))
 
 
-def test_face_config_endpoint(client: TestClient) -> None:
+def test_face_config_endpoint(client: AppClient) -> None:
     resp = client.get("/config/face")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/json")
@@ -254,7 +253,7 @@ def test_face_config_follows_settings(tmp_path: Path) -> None:
         base,
         face=dataclasses.replace(base.face, mouth_thresholds=(0.1, 0.2, 0.4), skin="code"),
     )
-    client = TestClient(create_app(settings, llm=FakeLLM(["x"])))
+    client = AppClient(create_app(settings, llm=FakeLLM(["x"])))
     body = client.get("/config/face").json()
     assert body["mouth_thresholds"] == [0.1, 0.2, 0.4]
     assert body["skin"] == "code"
@@ -262,7 +261,7 @@ def test_face_config_follows_settings(tmp_path: Path) -> None:
     assert set(body) == {"logical_width", "logical_height", "mouth_thresholds", "skin", "demo"}
 
 
-def test_audio_config_endpoint(client: TestClient) -> None:
+def test_audio_config_endpoint(client: AppClient) -> None:
     resp = client.get("/config/audio")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/json")
@@ -282,7 +281,7 @@ def test_audio_config_follows_settings(tmp_path: Path) -> None:
         tts=dataclasses.replace(base.tts, low_shelf_db=-3.0, high_shelf_db=2.5, pitch=1.1),
         stt=dataclasses.replace(base.stt, max_utterance_s=12.5),
     )
-    client = TestClient(create_app(settings, llm=FakeLLM(["x"])))
+    client = AppClient(create_app(settings, llm=FakeLLM(["x"])))
     body = client.get("/config/audio").json()
     # Exactly these five keys: nothing else from the settings is exposed.
     assert body == {

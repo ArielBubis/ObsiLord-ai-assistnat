@@ -42,16 +42,29 @@ Without a TTSClient, state speaking is sent on the first text delta.
 Tools (a Registry, see obsilord.tools.registry): the turn's tools come from
 the registry once per turn, from whether the model is a cloud model and
 whether it sees photos. A request that ends with ToolCalls starts a tool
-round: the speech queued so far is sent first, then state looking if a call
-uses the camera (policy face_state), then every call runs in order through
-the registry (which applies the limits, the groups, the timeouts and the
-block of acting tools after untrusted output), then state thinking. The next
+round: the speech queued so far is sent first, then every call runs in order
+through the registry (which applies the modes, the limits, the groups and
+the timeouts), with state looking right before a camera tool runs (policy
+face_state, through TurnContext.face), then state thinking. The next
 request carries every round so far. Up to max_rounds rounds; the request
 after the last allowed round forbids further calls (allow_tool_calls=False),
 so a turn makes at most max_rounds + 1 requests. Every request after the
 first is preceded by a cap check for a counted client; if the cap is reached
 then, the turn ends with the cap error. Speaking is sent again on the first
 audio frame (or text delta without TTS) after a round.
+
+Ask (a tool in mode Ask, or an acting tool after untrusted output): the
+registry calls TurnContext.confirm, which is None without confirms (no page:
+Ask counts as no). Otherwise the turn deadline is paused, the fixed question
+is spoken after the speech before the call (with TTS), the face goes back to
+thinking, and {"type": "confirm", "id", "tool", "label", "question",
+"details", "timeout_s"} goes out. The answer is a click, typed text or a
+recording (transcribed and sent as a user transcript; not caught sends an
+error and the wait goes on); yes and no words count as such, anything else
+counts as no and goes to confirms.run_next, and no answer within timeout_s is
+"timeout". {"type": "confirm_done", "id", "answer": "yes" | "no" | "timeout"}
+follows, and the deadline moves out by the time spent asking. State looking
+comes only after a yes.
 
 A cloud model gets the history without the tool notes of tools whose results
 may not go to it (TurnTools.cloud_visible): private-data tools that are off
@@ -91,6 +104,7 @@ import base64
 import json
 import logging
 import math
+import secrets
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -106,10 +120,11 @@ from obsilord.llm.base import (
     UsageUpdate,
     note_from_result,
 )
+from obsilord.permissions import answer_kind
 from obsilord.photos import TurnPhotos, keep_newest_photos
 from obsilord.sentences import SentenceSplitter
 from obsilord.stt.base import SAMPLE_RATE, STTClient, pcm16_duration_ms
-from obsilord.tools.registry import Registry, TurnContext, TurnInfo, TurnTools
+from obsilord.tools.registry import Answer, ConfirmRequest, Registry, TurnContext, TurnInfo, TurnTools
 from obsilord.tts.base import TTSClient
 from obsilord.tts.text import clean_for_speech
 from obsilord.usage import CapExceeded, UsageTracker
@@ -120,6 +135,27 @@ log = logging.getLogger(__name__)
 Send = Callable[[dict[str, Any] | bytes], Awaitable[None]]
 # Called once per finished turn with (user text, reply, tool notes).
 OnTurn = Callable[[str, str, tuple[ToolNote, ...]], Awaitable[None]]
+# The page's reply to a confirm: a click (True is Yes), typed text, or a
+# push-to-talk recording (PCM16 mono at 16 kHz).
+ConfirmReply = bool | str | bytes
+
+
+@dataclass(frozen=True)
+class Confirms:
+    """How a turn asks the user before a tool runs (the app's side).
+
+    reply(id): waits for the page's next reply to confirm id; cancelled when
+    the confirm times out or the turn ends. run_next(text): an answer that was
+    neither yes nor no; it counts as no, and the app runs it as a normal turn
+    after this one. stt and language: for spoken replies (None: a recording
+    counts as not caught).
+    """
+
+    reply: Callable[[str], Awaitable[ConfirmReply]]
+    run_next: Callable[[str], None]
+    timeout_s: float = 20.0
+    stt: STTClient | None = None
+    language: str | None = None
 
 # Tool rounds per turn when the caller does not say ([tools] max_rounds).
 DEFAULT_MAX_ROUNDS = 3
@@ -354,6 +390,25 @@ async def _stop_worker(worker: asyncio.Task[None] | None) -> None:
     await asyncio.wait([worker])
 
 
+class _FaceTrail:
+    """Wraps send: keeps the face states of a turn and logs them once, when
+    idle goes out ("turn face: thinking > looking > ..."), to check the face
+    in a manual test. States only, never content."""
+
+    def __init__(self, send: Send) -> None:
+        self._send = send
+        self._states: list[str] = []
+
+    async def __call__(self, msg: dict[str, Any] | bytes) -> None:
+        if isinstance(msg, dict) and msg.get("type") == "state":
+            state = str(msg.get("state"))
+            self._states.append(state)
+            if state == "idle":
+                log.info("turn face: %s", " > ".join(self._states))
+                self._states = []
+        await self._send(msg)
+
+
 async def run_text_turn(
     text: str,
     history: list[Message],
@@ -369,6 +424,7 @@ async def run_text_turn(
     max_rounds: int = DEFAULT_MAX_ROUNDS,
     on_turn: OnTurn | None = None,
     photos: TurnPhotos | None = None,
+    confirms: Confirms | None = None,
 ) -> str | None:
     """Run one turn. Returns the reply text, or None if the turn failed.
 
@@ -381,6 +437,7 @@ async def run_text_turn(
     Never raises except CancelledError. Unexpected errors are logged (type name
     only) and reported to the client as a generic error, best effort.
     """
+    send = _FaceTrail(send)
     try:
         t0 = time.monotonic()
         deadline = asyncio.get_running_loop().time() + turn_timeout_s
@@ -400,6 +457,7 @@ async def run_text_turn(
             max_rounds=max_rounds,
             on_turn=on_turn,
             photos=photos,
+            confirms=confirms,
         )
     except asyncio.CancelledError:
         raise
@@ -428,6 +486,7 @@ async def run_voice_turn(
     max_rounds: int = DEFAULT_MAX_ROUNDS,
     on_turn: OnTurn | None = None,
     photos: TurnPhotos | None = None,
+    confirms: Confirms | None = None,
 ) -> str | None:
     """Run one spoken turn: STT, then the text turn body with the transcript.
 
@@ -437,6 +496,7 @@ async def run_voice_turn(
 
     Never raises except CancelledError, like run_text_turn.
     """
+    send = _FaceTrail(send)
     try:
         return await _run_voice_turn(
             pcm16,
@@ -455,6 +515,7 @@ async def run_voice_turn(
             max_rounds=max_rounds,
             on_turn=on_turn,
             photos=photos,
+            confirms=confirms,
         )
     except asyncio.CancelledError:
         raise
@@ -543,6 +604,7 @@ async def _run_voice_turn(
     max_rounds: int,
     on_turn: OnTurn | None = None,
     photos: TurnPhotos | None = None,
+    confirms: Confirms | None = None,
 ) -> str | None:
     t0 = time.monotonic()
     # One deadline for STT and the rest of the turn.
@@ -606,6 +668,7 @@ async def _run_voice_turn(
         max_rounds=max_rounds,
         on_turn=on_turn,
         photos=photos,
+        confirms=confirms,
     )
 
 
@@ -626,6 +689,7 @@ async def _run_turn(
     max_rounds: int,
     on_turn: OnTurn | None = None,
     photos: TurnPhotos | None = None,
+    confirms: Confirms | None = None,
 ) -> str | None:
     """The shared turn body after state thinking has been sent.
 
@@ -676,8 +740,6 @@ async def _run_turn(
         b64 = base64.b64encode(jpeg).decode("ascii")
         await send({"type": "snapshot", "kind": kind, "jpeg_b64": b64})
 
-    context = TurnContext(snapshot=snapshot)
-
     async def save_frame() -> str:
         """"disk": write this turn's frame. A failure is logged, never fatal."""
         if photos.mode != "disk" or photos.save is None or frame is None:
@@ -709,6 +771,7 @@ async def _run_turn(
     reply: str | None = None
     llm_ms = 0
     tools_ms: int | None = None
+    ask_ms = 0  # time spent asking the user (confirms), apart from tools_ms
     calls: list[ToolCall] = []
 
     queue: asyncio.Queue[SpeechItem] = asyncio.Queue()
@@ -795,32 +858,132 @@ async def _run_turn(
                     st.tokens_thinking += ru.done.tokens_thinking
         return error
 
+    async def face(state: str) -> None:
+        # The state a tool runs in, sent right before it runs: after any
+        # confirm, so an asked look shows "looking" only after the yes.
+        sp.speaking_sent = False
+        await send({"type": "state", "state": state})
+
+    async def hear(pcm16: bytes, tool: str) -> str:
+        """A spoken confirm reply as text; "" (after an error message) when
+        nothing was caught. Never logged."""
+        assert confirms is not None
+        heard: Any = ""
+        if confirms.stt is not None:
+            try:
+                async with asyncio.timeout(confirms.timeout_s):
+                    heard = await confirms.stt.transcribe(pcm16, SAMPLE_RATE, confirms.language)
+            except Exception as exc:  # noqa: BLE001 - the user can answer again
+                log.error("STT failed for a confirm answer: %s", type(exc).__name__)
+                await send({"type": "error", "message": MSG_STT_FAILED})
+                return ""
+        heard = heard.strip() if isinstance(heard, str) else ""
+        if not heard:
+            log.info("confirm %s: a spoken answer was not caught, still waiting", tool)
+            await send({"type": "error", "message": MSG_NOT_CAUGHT})
+            return ""
+        await send({"type": "transcript", "role": "user", "text": heard, "final": True})
+        return heard
+
+    async def wait_answer(confirm_id: str, tool: str) -> tuple[Answer, str]:
+        """The user's answer within confirms.timeout_s, and how it came (for
+        the log). A reply that was not caught keeps the wait going; one that
+        is neither yes nor no counts as no and goes to run_next."""
+        assert confirms is not None
+        end = asyncio.get_running_loop().time() + confirms.timeout_s
+        while True:
+            try:
+                async with asyncio.timeout_at(end):
+                    got = await confirms.reply(confirm_id)
+            except TimeoutError:
+                return "timeout", "no reply"
+            if isinstance(got, bool):
+                return ("yes" if got else "no"), "click"
+            how = "spoken" if isinstance(got, bytes) else "typed"
+            said = await hear(got, tool) if isinstance(got, bytes) else got.strip()
+            if not said:
+                continue
+            kind = answer_kind(said)
+            if kind == "other":
+                confirms.run_next(said)
+                return "no", f"{how}, other words, run next"
+            return kind, how
+
+    async def confirm(request: ConfirmRequest) -> Answer:
+        """Ask the user (TurnContext.confirm). The turn deadline is paused
+        meanwhile and then moved out by the time spent asking."""
+        nonlocal ask_ms
+        assert confirms is not None and turn_timeout is not None
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        resume = turn_timeout.when()
+        turn_timeout.reschedule(None)
+        try:
+            if worker is not None:
+                # A fixed question, spoken after the speech before the call.
+                queue.put_nowait(request.question)
+                await _drain_speech(queue, worker)
+            if sp.speaking_sent:
+                # The face waits in thinking.
+                sp.speaking_sent = False
+                await send({"type": "state", "state": "thinking"})
+            confirm_id = secrets.token_hex(8)
+            log.info("confirm %s: asked (timeout %s s)", request.tool, confirms.timeout_s)
+            await send(
+                {
+                    "type": "confirm",
+                    "id": confirm_id,
+                    "tool": request.tool,
+                    "label": request.label,
+                    "question": request.question,
+                    "details": request.details,
+                    "timeout_s": confirms.timeout_s,
+                }
+            )
+            answer, how = await wait_answer(confirm_id, request.tool)
+            log.info(
+                "confirm %s: %s (%s) after %d ms",
+                request.tool,
+                answer,
+                how,
+                (loop.time() - started) * 1000,
+            )
+            await send({"type": "confirm_done", "id": confirm_id, "answer": answer})
+            return answer
+        finally:
+            waited = loop.time() - started
+            ask_ms += int(waited * 1000)
+            if resume is not None:
+                turn_timeout.reschedule(resume + waited)
+
+    context = TurnContext(snapshot=snapshot, confirm=confirm if confirms is not None else None, face=face)
+    turn_timeout: asyncio.Timeout | None = None
+
     async def run_round(turn: TurnTools) -> list[ToolResult]:
-        """Run the calls of the last request in order. Every policy (limits,
-        groups, timeouts, the block after untrusted output) is applied by the
-        registry."""
+        """Run the calls of the last request in order. Every policy (modes,
+        limits, groups, timeouts, asking) is applied by the registry."""
         nonlocal tools_ms, running_index
         # Speech from before the calls (including a sentence the splitter
-        # still holds) goes out first, so no speaking state lands in the round.
+        # still holds) goes out first; only a confirm question speaks in the
+        # round.
         rest = splitter.flush()
         if rest:
             enqueue([rest])
         await _drain_speech(queue, worker)
-        state = turn.face_state(calls)
-        if state:
-            await send({"type": "state", "state": state})
-        sp.speaking_sent = False
         t_tools = time.monotonic()
+        asked_before = ask_ms
         results: list[ToolResult] = []
         for call in calls:
             running_index = sum(len(r) for r in rounds) + len(results)
             results.append(await turn.run(call, context))
-        tools_ms = (tools_ms or 0) + int((time.monotonic() - t_tools) * 1000)
+        spent = int((time.monotonic() - t_tools) * 1000) - (ask_ms - asked_before)
+        tools_ms = (tools_ms or 0) + max(spent, 0)
+        sp.speaking_sent = False
         await send({"type": "state", "state": "thinking"})
         return results
 
     try:
-        async with asyncio.timeout_at(deadline):
+        async with asyncio.timeout_at(deadline) as turn_timeout:
             for request in range(max_rounds + 1):
                 allow = bool(specs) and request < max_rounds
                 if request > 0 and _cap_reached(usage, llm):
@@ -899,13 +1062,14 @@ async def _run_turn(
 
     log.info(
         "turn latency: stt_ms=%s audio_ms=%s llm_ttft_ms=%s llm_done_ms=%s "
-        "tts_first_chunk_ms=%s tools_ms=%s total_ms=%d sentences=%d spoken=%d tts_failures=%d",
+        "tts_first_chunk_ms=%s tools_ms=%s ask_ms=%d total_ms=%d sentences=%d spoken=%d tts_failures=%d",
         voice.stt_ms if voice is not None else "n/a",
         voice.audio_ms if voice is not None else "n/a",
         st.ttft_ms if st.ttft_ms is not None else "-",
         st.done_ms if st.done_ms is not None else "-",
         sp.first_audio_ms if sp.first_audio_ms is not None else "-",
         tools_ms if tools_ms is not None else "-",
+        ask_ms,
         total_ms,
         sentence_count,
         sp.sentence_id,

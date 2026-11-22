@@ -164,10 +164,53 @@ def test_cloud_model_gets_no_private_tool_and_no_private_notes(tmp_path: Path) -
     _run(llm, tmp_path, _recall([]), calculate, looker=FakeLooker(), history=earlier)
 
     (request,) = llm.requests
-    assert [t.name for t in request.tools] == ["look", "calculate"]
-    assert request.history[1].tools == (ToolNote("look", "q", "A mug."),)
+    # Private tools are off with a cloud model until the user allows them.
+    assert [t.name for t in request.tools] == ["calculate"]
+    assert request.history[1].tools == ()
     # The kept history is unchanged; only what went to the cloud is filtered.
     assert len(earlier[1].tools) == 2
+
+
+async def _ignore(msg: Any) -> None:
+    return None
+
+
+class _CloudFor:
+    """Permissions: every tool On; the named ones allowed with a cloud model."""
+
+    def __init__(self, *names: str) -> None:
+        self.names = set(names)
+
+    def mode(self, name: str) -> str:
+        return "on"
+
+    def cloud(self, name: str) -> bool | None:
+        return True if name in self.names else None
+
+
+def test_a_private_tool_the_user_allows_reaches_a_cloud_model_with_its_notes(tmp_path: Path) -> None:
+    earlier = [
+        Message("user", "what did we say?"),
+        Message(
+            "assistant",
+            "We said bikes.",
+            tools=(ToolNote("recall", "bike", "old turn"), ToolNote("look", "q", "A mug.")),
+        ),
+    ]
+    llm = FakeToolLLM([[TextDelta("Hi."), Done(1, 1, 0)]], cloud=True)
+    asyncio.run(
+        run_text_turn(
+            "Hi.",
+            earlier,
+            llm,
+            UsageTracker(tmp_path / "usage.jsonl", 1000, clock=lambda: NOW),
+            _ignore,
+            tools=registry(FakeLooker(), _recall([]), calculate, permissions=_CloudFor("look")),
+        )
+    )
+    (request,) = llm.requests
+    assert [t.name for t in request.tools] == ["look", "calculate"]
+    assert request.history[1].tools == (ToolNote("look", "q", "A mug."),)
 
 
 def test_local_model_gets_recall_and_its_notes(tmp_path: Path) -> None:

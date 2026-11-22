@@ -29,6 +29,10 @@
         </label>
       </fieldset>
       <fieldset class="settings-group">
+        <legend>Permissions</legend>
+        <ul id="perm-list"></ul>
+      </fieldset>
+      <fieldset class="settings-group">
         <legend>Photos</legend>
         <label class="settings-choice">
           <input type="radio" name="photos-mode" value="off">
@@ -43,6 +47,11 @@
           <span>Save to disk <span class="settings-dim">(data/photos on this PC)</span></span>
         </label>
         <p class="settings-dim">Follow-ups see a photo again only with a local model that sees photos. Other models get Qwenny's description, as before.</p>
+      </fieldset>
+      <fieldset class="settings-group">
+        <legend>Activity</legend>
+        <p id="act-note" class="settings-dim" aria-live="polite"></p>
+        <ul id="act-list"></ul>
       </fieldset>
       <fieldset id="conv-group" class="settings-group" hidden>
         <legend>Conversations</legend>
@@ -81,6 +90,15 @@
     <section id="subtitles" aria-live="polite">
       <p id="user-line"></p>
       <p id="subtitle" tabindex="0" role="region" aria-label="Reply"></p>
+    </section>
+    <section id="confirm-card" role="alertdialog" aria-labelledby="confirm-question" hidden>
+      <p id="confirm-question"></p>
+      <p id="confirm-details"></p>
+      <div class="confirm-row">
+        <button id="confirm-yes" type="button">Yes</button>
+        <button id="confirm-no" type="button">No</button>
+        <span id="confirm-countdown" aria-hidden="true"></span>
+      </div>
     </section>
     <form id="chat" autocomplete="off">
       <div class="input-wrapper">

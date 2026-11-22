@@ -73,15 +73,19 @@ export const BUSY_FLASH_MS = 1200;
 //   "start"     start recording
 //   "barge-in"  the server is done and only local playback is draining: stop
 //               it, apply idle, then start recording
+//   "answer"    a confirm card is up: the turn is running but the server
+//               takes a spoken answer; start recording without clearing the
+//               reply
 //   "busy"      the server turn is still running, or the server has not
 //               answered for an abandoned recording yet: ignore, flash "Busy"
 //   "offline"   no connection
 //   "ignore"    a recording is already open (held, or released and waiting
 //               for the server or the last frame)
-export function pressAction({ connected, busy, pendingIdle, recording, orphan = false }) {
+export function pressAction({ connected, busy, pendingIdle, recording, orphan = false, confirming = false }) {
   if (recording) return "ignore";
   if (!connected) return "offline";
   if (orphan) return "busy";
+  if (busy && confirming) return "answer";
   if (busy) return pendingIdle ? "barge-in" : "busy";
   return "start";
 }
@@ -114,8 +118,19 @@ export function recordingAction(ack, msg) {
 
 // Text input and Send are off during a turn, while recording, and while
 // an orphan recording waits for the server.
-export function controlsDisabled(busy, recording, orphan = false) {
-  return Boolean(busy || recording || orphan);
+// While a confirm card is up the turn is running but the server takes typed
+// text as the answer, so the input stays on.
+export function controlsDisabled(busy, recording, orphan = false, confirming = false) {
+  return Boolean((busy && !confirming) || recording || orphan);
+}
+
+// A turn can start without the page sending it: a reply to a confirm that
+// was neither yes nor no runs as the next turn right after the first one.
+// True for a state message that is not idle or listening while the page
+// thinks no turn is running.
+export function turnStartsOnState(busy, msg) {
+  if (busy || !msg || typeof msg !== "object" || msg.type !== "state") return false;
+  return msg.state !== "idle" && msg.state !== "listening";
 }
 
 // A recording dropped locally while its audio_start was unanswered (ack

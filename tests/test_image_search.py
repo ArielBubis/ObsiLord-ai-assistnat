@@ -17,9 +17,8 @@ from typing import Any, AsyncIterator
 import cv2
 import numpy
 import pytest
-from fastapi.testclient import TestClient
 
-from fakes import FakeLooker, FakeToolLLM, registry, text_only
+from fakes import AppClient, FakeLooker, FakeToolLLM, registry, text_only
 from obsilord.app import _default_image_search, create_app
 from obsilord.camera import crop_jpeg, encode_frame
 from obsilord.config import REPO_ROOT, ImageSearchSettings, Secrets, Settings, load_settings
@@ -641,7 +640,7 @@ def test_ws_snapshots_only_when_the_page_asked(tmp_path: Path, switch: Any) -> N
     looker.snapshots = [("camera", b"frame")]
     usage = UsageTracker(tmp_path / "usage.jsonl", settings.llm.daily_token_cap)
     app = create_app(settings, llm=llm, usage=usage, looker=looker)
-    with TestClient(app).websocket_connect("/ws") as ws:
+    with AppClient(app).websocket_connect("/ws") as ws:
         if switch is not None:
             ws.send_json({"type": "snapshots", "on": switch})
         ws.send_json({"type": "text", "text": "look"})
@@ -663,7 +662,7 @@ def test_ws_snapshots_can_be_switched_off_again(tmp_path: Path) -> None:
     looker.snapshots = [("camera", b"frame")]
     usage = UsageTracker(tmp_path / "usage.jsonl", settings.llm.daily_token_cap)
     app = create_app(settings, llm=llm, usage=usage, looker=looker)
-    with TestClient(app).websocket_connect("/ws") as ws:
+    with AppClient(app).websocket_connect("/ws") as ws:
         ws.send_json({"type": "snapshots", "on": True})
         ws.send_json({"type": "snapshots", "on": False})
         ws.send_json({"type": "text", "text": "look"})

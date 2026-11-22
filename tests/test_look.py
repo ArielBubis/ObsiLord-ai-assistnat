@@ -15,15 +15,20 @@ from obsilord.look import (
     MAX_QUESTION_CHARS,
     MSG_CAMERA_FAILED,
     MSG_NO_ANSWER,
+    MSG_NO_VISION,
+    MSG_SEARCH_OFF,
     MSG_PHOTO_TAKEN,
     MSG_VISION_FAILED,
+    ImageSearch,
     LookLimiter,
     Looker,
     _cause,
+    camera_source,
     clean_question,
     msg_cooldown,
     msg_hourly,
 )
+from obsilord.tools.registry import TurnInfo
 from obsilord.vision.base import VisionError
 
 
@@ -306,3 +311,69 @@ def test_question_and_answer_are_not_logged(caplog: pytest.LogCaptureFixture) ->
     asyncio.run(_looker(FakeCamera(), vision).look("SECRET-QUESTION about the label"))
     assert "SECRET" not in caplog.text
     assert "look: answered" in caplog.text
+
+
+# --- the vision path rule: Looker without Qwenny, and which tools a turn gets ----------
+
+
+def _dummy_search() -> ImageSearch:
+    return ImageSearch(client=None, budget=None, max_crop_fraction=0.9)  # type: ignore[arg-type]
+
+
+async def _yes() -> bool:
+    return True
+
+
+async def _no() -> bool:
+    return False
+
+
+def _offered(looker: Any, sees: bool) -> list[str]:
+    """Tool names and variants camera_source gives for a chat model that sees
+    images (or not)."""
+    info = TurnInfo(cloud=False, sees_images=_yes if sees else _no)
+    tools = asyncio.run(camera_source(looker)(info))
+    return [
+        "look_photo" if t is not None and t.name == "look" and "Qwenny" not in t.spec.description
+        else t.name
+        for t in tools
+    ]
+
+
+def test_a_looker_without_vision_takes_photos_only() -> None:
+    camera = FakeCamera()
+    looker = Looker(camera, None, LookLimiter(0, 30), _dummy_search())
+    assert looker.vision_on is False
+    assert looker.search_on is False  # search_image needs Qwenny
+    response, image = asyncio.run(looker.take_photo())
+    assert response == {"output": MSG_PHOTO_TAKEN} and image == b"jpeg-bytes"
+
+
+def test_look_and_search_without_vision_give_an_error_and_do_not_use_the_camera() -> None:
+    camera = FakeCamera()
+    looker = Looker(camera, None, LookLimiter(0, 30), _dummy_search())
+    assert asyncio.run(looker.look("q")) == {"error": MSG_NO_VISION}
+    assert asyncio.run(looker.search_image("x")) == {"error": MSG_SEARCH_OFF}
+    assert camera.calls == 0
+
+
+def test_vision_chat_model_without_qwenny_gets_look_photo_only() -> None:
+    assert _offered(Looker(FakeCamera(), None, LookLimiter(0, 30)), sees=True) == ["look_photo"]
+
+
+def test_vision_chat_model_with_qwenny_gets_look_photo_and_search_when_on() -> None:
+    plain = Looker(FakeCamera(), FakeVision(), LookLimiter(0, 30))
+    assert _offered(plain, sees=True) == ["look_photo"]
+    with_search = Looker(FakeCamera(), FakeVision(), LookLimiter(0, 30), _dummy_search())
+    assert _offered(with_search, sees=True) == ["look_photo", "search_image"]
+
+
+def test_text_model_with_qwenny_gets_look_and_search_when_on() -> None:
+    plain = Looker(FakeCamera(), FakeVision(), LookLimiter(0, 30))
+    assert _offered(plain, sees=False) == ["look"]
+    with_search = Looker(FakeCamera(), FakeVision(), LookLimiter(0, 30), _dummy_search())
+    assert _offered(with_search, sees=False) == ["look", "search_image"]
+
+
+def test_text_model_without_qwenny_gets_no_camera_tool() -> None:
+    assert _offered(Looker(FakeCamera(), None, LookLimiter(0, 30), _dummy_search()), sees=False) == []

@@ -36,12 +36,14 @@ import { createMic, micErrorMessage } from "./audio_in.js";
 import { loadAudioSettings, MAX_UTTERANCE_DEFAULT_S } from "./config.js";
 import { initSnapshots } from "./snapshots.js";
 import { initPhotos } from "./photos.js";
+import { initPermissions } from "./permissions.js";
+import { initConfirm } from "./confirm.js";
 import { initSettings } from "./settings.js";
 import { initConversations } from "./conversations.js";
 import { initMemoryEditor } from "./memory_editor.js";
 import {
   busyAfterMessage, stateAction, drainTimeoutMs, textDrivesMouth, closesOpenSentence,
-  pressAction, recordingAction, controlsDisabled, orphanAction,
+  pressAction, recordingAction, controlsDisabled, orphanAction, turnStartsOnState,
   WATCHDOG_MS, WATCHDOG_MESSAGE, ACK_TIMEOUT_MS, BUSY_FLASH_MS, ORPHAN_HOLD_MS,
 } from "./turn.js";
 import {
@@ -115,19 +117,46 @@ const settings = initSettings(
 
 const photos = initPhotos(
   { radios: [...document.querySelectorAll('input[name="photos-mode"]')] },
-  safeStorage(),
   (text) => {
     if (isOpen()) ws.send(text);
   },
 );
-fetch("/config/photos", { cache: "no-store" })
-  .then((resp) => (resp.ok ? resp.json() : null))
-  .then((cfg) => {
-    if (cfg) photos.setDefault(cfg.default);
-  })
-  .catch(() => {
-    // The radios show "off" until the server says otherwise.
-  });
+
+const permissions = initPermissions(
+  {
+    list: document.getElementById("perm-list"),
+    activity: document.getElementById("act-list"),
+    activityNote: document.getElementById("act-note"),
+  },
+  (text) => {
+    if (isOpen()) ws.send(text);
+  },
+  async () => {
+    const resp = await fetch("/activity", { cache: "no-store" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.json();
+  },
+);
+// The activity list is fetched when Settings is opened.
+document.getElementById("settings").addEventListener("toggle", (event) => {
+  if (event.target.open) permissions.refreshActivity();
+});
+
+// The confirm card. While it is up the turn is running but the server takes
+// typed and spoken answers, so the input and push-to-talk work.
+const confirmCard = initConfirm(
+  {
+    card: document.getElementById("confirm-card"),
+    question: document.getElementById("confirm-question"),
+    details: document.getElementById("confirm-details"),
+    countdown: document.getElementById("confirm-countdown"),
+    yes: document.getElementById("confirm-yes"),
+    no: document.getElementById("confirm-no"),
+  },
+  (text) => {
+    if (isOpen()) ws.send(text);
+  },
+);
 
 const conversations = initConversations(
   {
@@ -265,6 +294,8 @@ function clearWatchdog() {
 
 function armWatchdog() {
   clearWatchdog();
+  // The server may wait up to confirm_timeout_s for an answer.
+  if (confirmCard.active()) return;
   watchdog = setTimeout(() => {
     watchdog = null;
     if (!busy) return;
@@ -292,7 +323,7 @@ function updateHint() {
     recording: rec !== null,
     released: rec !== null && rec.released,
     live: recordingLive(),
-    serverBusy: busy && !pendingIdle,
+    serverBusy: busy && !pendingIdle && !confirmCard.active(),
     inputFocused: document.activeElement === input,
     flash,
   });
@@ -301,7 +332,7 @@ function updateHint() {
 }
 
 function updateControls() {
-  const off = controlsDisabled(busy, rec !== null, orphan !== null);
+  const off = controlsDisabled(busy, rec !== null, orphan !== null, confirmCard.active());
   input.disabled = off;
   sendBtn.disabled = off;
   settings.setDisabled(off);
@@ -406,7 +437,8 @@ function maybeSendEnd(r) {
   setBusy(true);
 }
 
-async function startRecording() {
+// answering: a spoken answer to a confirm card, so the running reply stays.
+async function startRecording(answering = false) {
   const r = {
     handle: null, ack: "none", released: false, flushed: false, audioFlowing: false, queue: [],
     holdTimer: null, ackTimer: null, t0: performance.now(),
@@ -414,7 +446,7 @@ async function startRecording() {
   rec = r;
   errorLine.textContent = "";
   clearFlash();
-  beginExchange("");
+  if (!answering) beginExchange("");
   // Listening face right away; the hint says "Opening mic..." until audio
   // flows and the server's listening state came.
   setState("listening");
@@ -503,6 +535,7 @@ function press(source) {
   if (holdSource !== null) return;
   const action = pressAction({
     connected: isOpen(), busy, pendingIdle, recording: rec !== null, orphan: orphan !== null,
+    confirming: confirmCard.active(),
   });
   if (action === "offline") {
     showError(NOT_CONNECTED);
@@ -522,7 +555,7 @@ function press(source) {
     player.stopAll();
     finishPendingIdle();
   }
-  startRecording();
+  startRecording(action === "answer");
 }
 
 // Ends the hold: release, blur, hidden tab, the length limit, or a server
@@ -638,6 +671,14 @@ function handleMessage(event) {
     deferIdle();
     return;
   }
+  if (turnStartsOnState(busy, msg)) {
+    // The next turn after an answer that was neither yes nor no.
+    refocusInput = false;
+    setBusy(true);
+  } else if (busy && pendingIdle && msg.type === "state" && msg.state !== "idle") {
+    // A new turn began while the last reply's audio is still draining.
+    cancelPendingIdle();
+  }
   const nextBusy = busyAfterMessage(busy, msg, getState());
   switch (msg.type) {
     case "state":
@@ -664,6 +705,14 @@ function handleMessage(event) {
       break;
     case "photos":
       photos.show(msg);
+      break;
+    case "permissions":
+      permissions.show(msg);
+      break;
+    case "confirm":
+    case "confirm_done":
+      confirmCard.handle(msg);
+      updateControls();
       break;
     case "notice":
       settings.showNotice(msg);
@@ -698,7 +747,6 @@ function connect() {
     if (errorLine.textContent === NOT_CONNECTED) errorLine.textContent = "";
     sock.send(JSON.stringify({ type: "ping" }));
     snapshots.announce();
-    photos.announce();
     settings.announce();
     conversations.announce();
     updateHint();
@@ -711,6 +759,7 @@ function connect() {
     connected = false;
     statusEl.textContent = "disconnected";
     memoryEditor.onDisconnect();
+    confirmCard.clear();
     // Drop any recording; the server forgets it with the connection.
     if (rec !== null) dropRecording(rec);
     clearOrphan();
@@ -729,7 +778,8 @@ function connect() {
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (busy || rec !== null || orphan !== null) return;
+  const answering = busy && confirmCard.active();
+  if ((busy && !answering) || rec !== null || orphan !== null) return;
   const text = input.value.trim();
   if (!text) return;
   errorLine.textContent = "";
@@ -739,6 +789,13 @@ form.addEventListener("submit", (event) => {
   }
   if (text.length > MAX_TEXT) {
     showError(`Message too long (max ${MAX_TEXT} characters)`);
+    return;
+  }
+  if (answering) {
+    // A typed answer to the confirm card: the turn is already running.
+    userLine.textContent = text;
+    input.value = "";
+    ws.send(JSON.stringify({ type: "text", text }));
     return;
   }
   // Inside the submit gesture, so autoplay rules let the context run.

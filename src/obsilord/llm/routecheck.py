@@ -1,16 +1,16 @@
 """Score a local model on picking the tools (camera, recall, calculate).
 
     python -m obsilord.llm.routecheck [--model ID] [--no-search] [--no-recall]
-                                      [--repeat N] [--mode auto|native|router]
+                                      [--repeat N]
 
 Sends a fixed set of labelled messages (some need look(), some
 search_image(), some recall(), some calculate(), most need no tool, a few are
 follow-ups, one answered by an earlier tool result in history) against the
-[llm_local] server in config.toml, the way the app would: in native mode one
-request with the tools declared and the app's system prompt, in router mode
-the routing request. Prints the misses, the accuracy per expected tool, how
-many calls came back written as text, and the latency. Run it per model and
-mode to compare them; --repeat matters, small models vary from run to run.
+[llm_local] server in config.toml, the way the app would: one request with
+the tools declared and the app's system prompt. Prints the misses, the
+accuracy per expected tool, how many calls came back written as text, and the
+latency. Run it per model to compare them; --repeat matters, small models vary
+from run to run. A model without tool support fails with the server's error.
 Nothing is logged to the usage file and no camera is used.
 
 --no-search: search_image() is not offered (as with [image_search] off);
@@ -20,9 +20,8 @@ recall off); messages about earlier conversations then expect no tool. No
 store is searched either way: only the decision is scored. calculate() is
 always offered, as in the app.
 
-Multi-step cases (native mode only; the app sends no routing request after a
-tool round) give the model a finished round (a recall result) and expect the
-next call. Cases added in T1 are marked; "old set" in the report is the
+Multi-step cases give the model a finished round (a recall result) and
+expect the next call. Cases added in T1 are marked; "old set" in the report is the
 accuracy without them, to compare with the runs before T1.
 """
 
@@ -35,13 +34,15 @@ import sys
 import time
 from dataclasses import dataclass
 
-from obsilord.config import TOOL_MODES, load_settings
+from obsilord.config import load_settings
 from obsilord.llm.base import Message, ToolCall, ToolNote, ToolResult, ToolRound, ToolSpec
-from obsilord.llm.openai_compat import NO_TOOL, LocalClient, LocalLLMError, OpenAICompatServer
+from obsilord.llm.openai_compat import LocalClient, LocalLLMError, OpenAICompatServer
 from obsilord.look import LOOK_TOOL, SEARCH_IMAGE_TOOL
 from obsilord.memory.recall import RECALL_TOOL
 from obsilord.tools.calculate import calculate
 
+# The expected "tool" of a message that needs none.
+NO_TOOL = "none"
 LOOK = LOOK_TOOL.name
 SEARCH = SEARCH_IMAGE_TOOL.name
 RECALL = RECALL_TOOL.name
@@ -155,45 +156,36 @@ def expected_for(case: Case, search: bool, recall: bool) -> str:
 class Result:
     case: Case
     expected: str
-    got: str  # a tool name, NO_TOOL, or "unusable"
+    got: str  # a tool name or NO_TOOL
     arg: str
     ms: float
-    # Native mode: the call came back written as text, not as a tool call.
+    # The call came back written as text, not as a tool call.
     as_text: bool = False
 
 
 async def check(
     client: LocalClient,
-    mode: str,
     tools: list[ToolSpec],
     cases: tuple[Case, ...],
     repeat: int,
 ) -> list[Result]:
-    """Runs every case repeat times in mode ("native" or "router"). Raises
-    LocalLLMError when a request itself fails (server down, unknown model, no
-    json_schema support); an unparsable router answer counts as "unusable"."""
+    """Runs every case repeat times. Raises LocalLLMError when a request
+    itself fails (server down, unknown model, a model without tool support)."""
     search = any(t.name == SEARCH for t in tools)
     recall = any(t.name == RECALL for t in tools)
     results: list[Result] = []
-    if mode != "native":
-        cases = tuple(c for c in cases if not c.rounds)
     for _ in range(repeat):
         for case in cases:
             expected = expected_for(case, search, recall)
             history = [*case.history, Message("user", case.text)]
             t0 = time.perf_counter()
-            as_text = False
-            if mode == "native":
-                route, _, as_text = await client.native_route(history, tools, rounds=case.rounds)
-            else:
-                route, _ = await client.route(history, tools)
+            (name, arg), _, as_text = await client.native_route(history, tools, rounds=case.rounds)
             ms = (time.perf_counter() - t0) * 1000
-            got, arg = route if route is not None else ("unusable", "")
-            results.append(Result(case, expected, got, arg, ms, as_text))
+            results.append(Result(case, expected, name or NO_TOOL, arg, ms, as_text))
     return results
 
 
-async def _run(model: str, search: bool, recall: bool, repeat: int, mode: str) -> int:
+async def _run(model: str, search: bool, recall: bool, repeat: int) -> int:
     settings = load_settings()
     server = OpenAICompatServer(settings.llm_local)
     tools = [
@@ -205,14 +197,11 @@ async def _run(model: str, search: bool, recall: bool, repeat: int, mode: str) -
     try:
         try:
             resolved = model or await server.default_model()
-            if mode == "auto":
-                mode = await server.tool_mode(resolved)
-            # Native mode sends the app's system prompt, as the app does; the
-            # router request never uses it.
-            client = server.client(resolved, tool_mode=mode)
-            print(f"tool check: {resolved} at {settings.llm_local.base_url}, mode {mode}, "
+            # The app's system prompt, as the app sends it.
+            client = server.client(resolved)
+            print(f"tool check: {resolved} at {settings.llm_local.base_url}, "
                   f"tools {', '.join(t.name for t in tools)}, {len(CASES)} messages x {repeat}")
-            results = await check(client, mode, tools, CASES, repeat)
+            results = await check(client, tools, CASES, repeat)
         except LocalLLMError as exc:
             print(f"error: {exc}")
             return 2
@@ -235,7 +224,6 @@ def _report(results: list[Result]) -> None:
         if group:
             ok = sum(r.got == r.expected for r in group)
             print(f"  {name:<12} {ok}/{len(group)}")
-    unusable = sum(r.got == "unusable" for r in results)
     times = sorted(r.ms for r in results)
     p90 = times[min(len(times) - 1, int(len(times) * 0.9))]
     ok = len(results) - len(misses)
@@ -244,17 +232,13 @@ def _report(results: list[Result]) -> None:
     old_ok = sum(r.got == r.expected for r in old)
     steps = [r for r in results if r.case.rounds]
     print(f"\naccuracy {ok}/{len(results)} ({100 * ok / len(results):.0f}%), "
-          f"unusable answers {unusable}, calls written as text {as_text}")
+          f"calls written as text {as_text}")
     if old:
         print(f"old set (before T1) {old_ok}/{len(old)} ({100 * old_ok / len(old):.0f}%)")
     if steps:
         steps_ok = sum(r.got == r.expected for r in steps)
         print(f"multi-step {steps_ok}/{len(steps)}")
     print(f"latency: median {statistics.median(times):.0f} ms, p90 {p90:.0f} ms")
-    if unusable:
-        print("Unusable answers: the model may spend its tokens thinking before the JSON, "
-              "or the server may not support response_format json_schema. A model without "
-              "thinking (or with thinking turned off in the server) usually fixes it.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -267,14 +251,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-search", action="store_true", help="do not offer search_image()")
     parser.add_argument("--no-recall", action="store_true", help="do not offer recall()")
     parser.add_argument("--repeat", type=int, default=1, help="run the set N times (1 to 10)")
-    parser.add_argument("--mode", choices=TOOL_MODES, default="auto",
-                        help="native: tools declared; router: the routing request; "
-                        "auto: as the app picks it for the model")
     args = parser.parse_args(argv)
     if not 1 <= args.repeat <= 10:
         parser.error("--repeat must be 1 to 10")
     return asyncio.run(
-        _run(args.model.strip(), not args.no_search, not args.no_recall, args.repeat, args.mode)
+        _run(args.model.strip(), not args.no_search, not args.no_recall, args.repeat)
     )
 
 

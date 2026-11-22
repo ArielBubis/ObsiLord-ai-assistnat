@@ -1,18 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  MODES, STORAGE_KEY, photosMessage, readPreference, writePreference, modeFrom, initPhotos,
-} from "../../web/photos.js";
+import * as photosModule from "../../web/photos.js";
 
-function memoryStorage(initial = {}) {
-  const data = { ...initial };
-  return {
-    getItem: (k) => (k in data ? data[k] : null),
-    setItem: (k, v) => { data[k] = String(v); },
-    data,
-  };
-}
+const { MODES, photosMessage, modeFrom, initPhotos } = photosModule;
 
 function radios() {
   return MODES.map((value) => {
@@ -44,49 +35,32 @@ test("modeFrom reads a photos message", () => {
   }
 });
 
-test("the preference is remembered and a broken storage is ignored", () => {
-  const storage = memoryStorage();
-  assert.equal(readPreference(storage), null);
-  writePreference(storage, "disk");
-  assert.equal(storage.data[STORAGE_KEY], "disk");
-  assert.equal(readPreference(storage), "disk");
-  assert.equal(readPreference(memoryStorage({ [STORAGE_KEY]: "bogus" })), null);
-  const broken = { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); } };
-  assert.equal(readPreference(broken), null);
-  writePreference(broken, "off"); // does not throw
-  assert.equal(readPreference(null), null);
+test("the page keeps no choice of its own", () => {
+  assert.equal(photosModule.STORAGE_KEY, undefined);
+  assert.equal(photosModule.readPreference, undefined);
+  assert.equal(photosModule.writePreference, undefined);
 });
 
-test("without a stored choice the server default shows and nothing is announced", () => {
+test("nothing is sent until the user picks, and the server's message sets the radios", () => {
   const rs = radios();
   const sent = [];
-  const photos = initPhotos({ radios: rs }, memoryStorage(), (t) => sent.push(t));
+  const photos = initPhotos({ radios: rs }, (t) => sent.push(t));
   assert.deepEqual(checked(rs), ["off"]);
-  photos.setDefault("followup");
-  assert.deepEqual(checked(rs), ["followup"]);
-  photos.announce();
+  assert.equal(photos.announce, undefined);
+  photos.show({ type: "photos", mode: "disk" });
+  assert.deepEqual(checked(rs), ["disk"]);
+  photos.show({ type: "photos", mode: "bogus" });
+  assert.deepEqual(checked(rs), ["disk"]);
   assert.deepEqual(sent, []);
 });
 
-test("a stored choice wins over the default and is announced on connect", () => {
+test("picking a mode sends it; the server's answer decides what shows", () => {
   const rs = radios();
   const sent = [];
-  const photos = initPhotos({ radios: rs }, memoryStorage({ [STORAGE_KEY]: "disk" }), (t) => sent.push(t));
-  photos.setDefault("off");
-  assert.deepEqual(checked(rs), ["disk"]);
-  photos.announce();
-  assert.deepEqual(sent, [photosMessage("disk")]);
-});
-
-test("picking a mode stores and sends it, and the server's answer shows", () => {
-  const rs = radios();
-  const sent = [];
-  const storage = memoryStorage();
-  const photos = initPhotos({ radios: rs }, storage, (t) => sent.push(t));
+  const photos = initPhotos({ radios: rs }, (t) => sent.push(t));
   rs[1].checked = true;
   rs[1].fire();
-  assert.equal(storage.data[STORAGE_KEY], "followup");
   assert.deepEqual(sent, [photosMessage("followup")]);
-  photos.show({ type: "photos", mode: "disk" });
-  assert.deepEqual(checked(rs), ["disk"]);
+  photos.show({ type: "photos", mode: "off" });
+  assert.deepEqual(checked(rs), ["off"]);
 });

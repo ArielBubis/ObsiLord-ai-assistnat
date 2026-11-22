@@ -10,6 +10,8 @@ import struct
 import threading
 from typing import Any, AsyncIterator, Sequence
 
+from fastapi.testclient import TestClient
+
 from obsilord.config import Settings
 from obsilord.look import camera_source
 from obsilord.llm.base import (
@@ -180,7 +182,8 @@ class SeeingToolLLM(FakeToolLLM):
 
 class FakeLooker:
     """Returns `response` for every look or search; questions and targets
-    record the arguments. search: search_image() is on.
+    record the arguments. search: search_image() is on. vision: Qwenny is set
+    up (without it only take_photo() is offered, to a chat model that sees).
 
     delay_s: sleep before answering (lets other tasks run).
     """
@@ -190,7 +193,9 @@ class FakeLooker:
         response: dict[str, Any] | None = None,
         delay_s: float = 0.0,
         search: bool = False,
+        vision: bool = True,
     ) -> None:
+        self.vision_on = vision
         self.response = response if response is not None else {"output": "A red mug."}
         self.delay_s = delay_s
         self.questions: list[Any] = []
@@ -315,13 +320,58 @@ class FakeSTT:
         return self.text
 
 
-def registry(looker: Any = None, *tools: Tool, sources: Sequence[ToolSource] = ()) -> Registry:
+class AllOn:
+    """Permissions with every tool On; the cloud choice stays the policy's.
+    Pipeline tests are about the pipeline, not the permission defaults
+    (search_image asks by default; test_tool_registry covers the defaults)."""
+
+    def mode(self, name: str) -> str:
+        return "on"
+
+    def cloud(self, name: str) -> None:
+        return None
+
+
+def registry(
+    looker: Any = None,
+    *tools: Tool,
+    sources: Sequence[ToolSource] = (),
+    permissions: Any = None,
+    on_run: Any = None,
+) -> Registry:
     """A registry with the camera tools of looker (if given), the given tools
-    and sources."""
+    and sources; every tool On unless permissions are given."""
     srcs: list[ToolSource] = []
     if looker is not None:
         srcs.append(camera_source(looker))
     if tools:
         srcs.append(static_source(*tools))
     srcs.extend(sources)
-    return Registry(srcs)
+    return Registry(srcs, permissions=permissions if permissions is not None else AllOn(), on_run=on_run)
+
+
+class _SettledSession:
+    """A /ws session entered past the two messages every page gets on
+    connect (permissions, then photos), which are checked, not returned."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    def __enter__(self) -> Any:
+        ws = self._session.__enter__()
+        first, second = ws.receive_json(), ws.receive_json()
+        assert first.get("type") == "permissions", first
+        assert second.get("type") == "photos", second
+        return ws
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._session.__exit__(*exc)
+
+
+class AppClient(TestClient):
+    """TestClient for tests about other things than the settings: /ws opens
+    past the permissions and photos messages (test_app_permissions covers
+    them)."""
+
+    def websocket_connect(self, url: str, *args: Any, **kwargs: Any) -> Any:  # type: ignore[override]
+        return _SettledSession(super().websocket_connect(url, *args, **kwargs))

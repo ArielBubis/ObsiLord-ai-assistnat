@@ -101,7 +101,7 @@ def test_check_list_has_dates_labels_and_kinds() -> None:
 
 
 def test_date_check_finds_its_day_through_recall(tmp_path: Path) -> None:
-    # The question as a router would pass it: the date inside the query.
+    # The question as a small model passes it: the date inside the query.
     question = next(c for c in demo_checks(NOW) if c["kind"] == "recall-date")["question"]
 
     async def go() -> dict:

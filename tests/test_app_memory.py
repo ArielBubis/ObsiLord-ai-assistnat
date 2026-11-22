@@ -8,9 +8,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi.testclient import TestClient
 
-from fakes import FakeLLM, text_only
+from fakes import AppClient, FakeLLM, text_only
 from obsilord.app import (
     MSG_CONVERSATION_BUSY,
     MSG_MEMORY_BAD,
@@ -40,12 +39,12 @@ def _settings(tmp_path: Path, **memory: Any) -> Settings:
 
 def _client(
     tmp_path: Path, llm: Any = None, store: Any = None, settings: Settings | None = None
-) -> tuple[TestClient, Any]:
+) -> tuple[AppClient, Any]:
     settings = settings or _settings(tmp_path)
     usage = UsageTracker(tmp_path / "usage.jsonl", settings.llm.daily_token_cap)
     llm = llm or FakeLLM(["Hi."])
     store = store if store is not None else SqliteStore(tmp_path / "m.sqlite3")
-    return TestClient(create_app(settings, llm=llm, usage=usage, memory=store)), llm
+    return AppClient(create_app(settings, llm=llm, usage=usage, memory=store)), llm
 
 
 def _turn(ws: Any, text: str) -> list[dict[str, Any]]:
@@ -192,7 +191,7 @@ def test_switch_is_refused_during_a_turn(tmp_path: Path) -> None:
 def test_memory_off(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     usage = UsageTracker(tmp_path / "usage.jsonl", settings.llm.daily_token_cap)
-    client = TestClient(create_app(settings, llm=FakeLLM(["Hi."]), usage=usage))  # conftest: no store
+    client = AppClient(create_app(settings, llm=FakeLLM(["Hi."]), usage=usage))  # conftest: no store
     assert client.get("/conversations").json() == {"enabled": False, "conversations": []}
     with client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "conversation", "id": None})
@@ -271,7 +270,7 @@ def _memory(ws: Any, **fields: Any) -> dict[str, Any]:
     return ws.receive_json()  # type: ignore[no-any-return]
 
 
-def _stored_turns(client: TestClient, cid: str) -> list[dict[str, Any]]:
+def _stored_turns(client: AppClient, cid: str) -> list[dict[str, Any]]:
     return client.get(f"/conversations/{cid}").json()["turns"]  # type: ignore[no-any-return]
 
 
@@ -460,7 +459,7 @@ def test_delete_conversation_payload_checks(tmp_path: Path) -> None:
 def test_memory_messages_with_memory_off(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     usage = UsageTracker(tmp_path / "usage.jsonl", settings.llm.daily_token_cap)
-    client = TestClient(create_app(settings, llm=FakeLLM(["Hi."]), usage=usage))
+    client = AppClient(create_app(settings, llm=FakeLLM(["Hi."]), usage=usage))
     assert client.get("/conversations/" + "0" * 32).json() == {
         "enabled": False, "id": "", "title": "", "turns": [],
     }

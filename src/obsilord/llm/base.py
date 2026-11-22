@@ -139,8 +139,7 @@ class LLMClient(Protocol):
     # rounds: the tool rounds of this turn so far, oldest first; the
     # implementation appends each round's model calls (from ToolCall.raw) and
     # results after history, in order. allow_tool_calls=False forbids further
-    # calls (the tools stay declared). One API request per call (the local
-    # router mode may add its routing request, see openai_compat).
+    # calls (the tools stay declared). One API request per call.
     def stream_reply(
         self,
         history: list[Message],

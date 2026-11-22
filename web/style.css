@@ -1071,6 +1071,193 @@ body[data-status="thinking"] .scan-line {
 
 /* Reduced motion (on Windows this follows "Animation effects"): no sweep;
    the viewport outline turns cyan instead while listening or thinking. */
+
+/* Settings: permissions and activity. */
+#perm-list,
+#act-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#act-list {
+  gap: 2px;
+  font-size: 11px;
+}
+
+#act-note:empty {
+  display: none;
+}
+
+.perm-row {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.perm-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.perm-label {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.perm-badge {
+  padding: 0 5px;
+  border: 1px solid var(--dim);
+  color: var(--dim);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.perm-badge[data-kind="internet"] {
+  border-color: var(--magenta);
+  color: var(--magenta);
+}
+
+.perm-unavailable {
+  opacity: 0.55;
+}
+
+.perm-modes {
+  display: flex;
+  gap: 4px;
+}
+
+.perm-mode {
+  flex: 1;
+  padding: 3px 6px;
+  background: var(--border-black);
+  color: var(--text);
+  border: 2px solid var(--dim);
+  font: 700 11px var(--font-mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.perm-mode[aria-pressed="true"] {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+.perm-mode:hover {
+  border-color: var(--signal);
+}
+
+.perm-mode:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+.perm-cloud-line {
+  margin-left: 22px;
+}
+
+.act-row {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.act-time {
+  color: var(--dim);
+  flex: none;
+}
+
+.act-tool {
+  flex: none;
+  color: var(--cyan);
+}
+
+.act-outcome {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Confirm card: the server asks before a tool in Ask mode runs. */
+#confirm-card {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 3px solid var(--signal);
+  box-shadow: var(--brutal-shadow);
+  contain: inline-size;
+}
+
+#confirm-card[hidden] {
+  display: none;
+}
+
+#confirm-question {
+  margin: 0;
+  color: var(--signal);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+#confirm-details {
+  margin: 4px 0 0;
+  color: var(--dim);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+#confirm-details[hidden] {
+  display: none;
+}
+
+.confirm-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.confirm-row button {
+  min-width: 72px;
+  padding: 6px 16px;
+  border: 3px solid var(--border-black);
+  box-shadow: 3px 3px 0 var(--border-black);
+  font: 700 14px var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#confirm-yes {
+  background: var(--signal);
+  color: var(--border-black);
+}
+
+#confirm-no {
+  background: var(--border-black);
+  color: var(--cyan);
+  outline: 2px solid var(--cyan);
+}
+
+.confirm-row button:hover {
+  transform: translate(-1px, -1px);
+}
+
+.confirm-row button:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+#confirm-countdown {
+  margin-left: auto;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
 @media (prefers-reduced-motion: reduce) {
   body[data-status] .scan-line {
     display: none;

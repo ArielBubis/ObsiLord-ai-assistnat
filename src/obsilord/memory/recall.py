@@ -6,7 +6,7 @@ to Google through it. The current date is in every system prompt
 (llm.prompt.now_line), so the model can turn "on the 5th of November" or
 "yesterday" into a date before it calls. date (YYYY-MM-DD) limits the search
 to that day, days_back to the last N days; without either, a day named in
-query ("5th of November", "yesterday": the router passes one argument only)
+query ("5th of November", "yesterday": small models often leave date empty)
 is used as the date. Words that match nothing inside such a window fall back
 to listing the window, since a small model often puts the date itself in
 query. The result is plain text with dates, capped, and starts with today's
@@ -159,8 +159,8 @@ class RecallTool:
         now = self._clock()
         day = _day(args.get("date"))
         if day is None:
-            # The router passes one arg, so a date may sit in the query; a
-            # day named there beats a guessed days_back.
+            # A small model often puts the date in the query; a day named
+            # there beats a guessed days_back.
             day = date_in_text(query, datetime.fromtimestamp(now).date())
         days_back = None if day is not None else _days_back(args.get("days_back"))
         since: float | None = None
@@ -242,4 +242,13 @@ async def _recall(
 
 
 # Private data, never to a cloud model by default; untrusted output.
-RECALL_TOOL = tool(ToolPolicy(private_data=True, untrusted=True, timeout_s=10.0), name=RECALL_NAME)(_recall)
+RECALL_TOOL = tool(
+    ToolPolicy(
+        private_data=True,
+        untrusted=True,
+        timeout_s=10.0,
+        label="Earlier conversations",
+        ask="Search our earlier conversations?",
+    ),
+    name=RECALL_NAME,
+)(_recall)

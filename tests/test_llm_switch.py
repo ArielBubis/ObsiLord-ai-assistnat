@@ -1,5 +1,6 @@
 """Switching the chat LLM from the page: GET /config/llm, the "llm" socket
-message, notices, local turns (router, cap), and the /ws Origin check. The
+message, notices, local turns (tools, no tool support, cap), and the /ws
+Origin check. The
 local server is OpenAICompatServer on httpx.MockTransport."""
 
 from __future__ import annotations
@@ -12,10 +13,9 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from fakes import FakeLLM, FakeLooker, text_only
+from fakes import AppClient, FakeLLM, FakeLooker, text_only
 from obsilord.app import (
     MSG_BAD_MODEL,
     MSG_BAD_PROVIDER,
@@ -24,7 +24,7 @@ from obsilord.app import (
     create_app,
 )
 from obsilord.config import REPO_ROOT, Settings, load_settings
-from obsilord.llm.openai_compat import OpenAICompatServer
+from obsilord.llm.openai_compat import NO_TOOLS_NOTE, OpenAICompatServer
 from obsilord.llm_switch import clean_model, switch_notice
 from obsilord.pipeline import MSG_CAP
 from obsilord.usage import UsageTracker
@@ -33,7 +33,7 @@ from test_openai_compat import (
     LMSTUDIO_MODELS_TOOLS,
     Script,
     delta,
-    route,
+    completion,
     sse,
     tc_delta,
     usage_chunk,
@@ -59,16 +59,10 @@ class Rig:
         gemini: FakeLLM | None = None,
         looker: Any = None,
         cap: int | None = None,
-        local_tool_mode: str = "native",
+        local_tools_known: bool = True,
         **llm: Any,
     ) -> None:
         self.settings = _settings(tmp_path, **llm)
-        # Every turn declares calculate. Native mode keeps a local turn at one
-        # request (no /models lookup for the mode, no routing request).
-        self.settings = dataclasses.replace(
-            self.settings,
-            llm_local=dataclasses.replace(self.settings.llm_local, tool_mode=local_tool_mode),
-        )
         self.script = script
         self.usage = UsageTracker(
             tmp_path / "usage.jsonl", cap if cap is not None else self.settings.llm.daily_token_cap
@@ -76,7 +70,13 @@ class Rig:
         self.local = OpenAICompatServer(
             self.settings.llm_local, transport=httpx.MockTransport(script)
         )
-        self.client = TestClient(
+        if local_tools_known:
+            # Every turn declares calculate. An empty model list on hand keeps
+            # a local turn at one request: tools declared, no /models lookup.
+            self.local._tools = {}
+            # Same for image support: the camera tools ask for it each turn.
+            self.local._vision = {}
+        self.client = AppClient(
             create_app(self.settings, llm=gemini, usage=self.usage, looker=looker, local=self.local)
         )
 
@@ -107,7 +107,7 @@ def _switch_local(ws: Any, model: str = "qwen3-14b") -> list[dict[str, Any]]:
     return [ws.receive_json() for _ in range(3)]
 
 
-WARM = route("none", usage={"prompt_tokens": 9, "completion_tokens": 1})
+WARM = completion(usage={"prompt_tokens": 9, "completion_tokens": 1})
 
 
 # --- GET /config/llm ------------------------------------------------------------
@@ -139,15 +139,16 @@ def test_config_llm_lists_tool_support(tmp_path: Path) -> None:
 
 
 def test_switch_notice_follows_the_model_tool_support(tmp_path: Path) -> None:
-    # The page loads /config/llm first, so the server knows each model's mode.
+    # The page loads /config/llm first, so the server knows each model's tools.
     script = Script(httpx.Response(200, json=LMSTUDIO_MODELS_TOOLS), WARM, WARM)
-    rig = Rig(tmp_path, script, looker=FakeLooker(), local_tool_mode="auto")
+    rig = Rig(tmp_path, script, looker=FakeLooker(), local_tools_known=False)
     rig.client.get("/config/llm")
     with rig.client.websocket_connect("/ws") as ws:
-        native_notice = _switch_local(ws, "qwen3-14b")[0]
-        router_notice = _switch_local(ws, "gemma-12b")[0]
-    assert "decides itself" in "\n".join(native_notice["lines"])
-    assert "routing step" in "\n".join(router_notice["lines"])
+        tools_notice = _switch_local(ws, "qwen3-14b")[0]
+        plain_notice = _switch_local(ws, "gemma-12b")[0]
+    assert "decides itself" in "\n".join(tools_notice["lines"])
+    assert "no tool support" in "\n".join(plain_notice["lines"])
+    assert "decides itself" not in "\n".join(plain_notice["lines"])
 
 
 def test_config_when_the_local_server_is_down(tmp_path: Path) -> None:
@@ -337,33 +338,28 @@ def test_local_turns_run_when_the_daily_cap_is_reached(tmp_path: Path) -> None:
     assert rig.usage.today_total == 10
 
 
-# --- router through the pipeline ------------------------------------------------
+# --- tools through the pipeline -------------------------------------------------
 
 
-def test_router_look_runs_the_camera_and_the_reply_uses_the_result(tmp_path: Path) -> None:
-    script = Script(
-        MODELS,
-        route("look", "what is the user holding"),
-        sse(delta("A red mug, how dull."), usage_chunk()),
-    )
+def test_a_model_without_tool_support_answers_without_the_camera(tmp_path: Path) -> None:
+    # LMSTUDIO_MODELS lists qwen3-14b without tool_use.
+    script = Script(MODELS, sse(delta("I cannot see from here."), usage_chunk()))
     looker = FakeLooker({"output": "A red mug."})
-    rig = Rig(tmp_path, script, looker=looker, provider="local", local_tool_mode="auto")
+    rig = Rig(tmp_path, script, looker=looker, provider="local", local_tools_known=False)
     with rig.client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "text", "text": "What am I holding?"})
         msgs = _turn(ws)
-    assert {"type": "state", "state": "looking"} in msgs
-    assert _final_reply(msgs) == "A red mug, how dull."
-    assert looker.questions == ["what is the user holding"]
-    router, reply = script.bodies()  # the model list GET has no body
-    assert "look" in json.dumps(router["response_format"])
-    assert reply["messages"][0]["content"].endswith(
-        'look("what is the user holding") returned: A red mug.\n```'
-    )
-    assert [x["counted"] for x in rig.usage_lines()] == [False, False]
+    assert {"type": "state", "state": "looking"} not in msgs
+    assert looker.questions == []
+    assert _final_reply(msgs) == "I cannot see from here."
+    (body,) = script.bodies()  # the model list GET has no body
+    assert "tools" not in body
+    assert NO_TOOLS_NOTE in body["messages"][0]["content"]
+    assert [x["counted"] for x in rig.usage_lines()] == [False]
 
 
 def test_native_look_runs_the_camera_and_the_follow_up_gets_a_tool_message(tmp_path: Path) -> None:
-    # The loaded model is marked tool_use: the tools are declared, no router.
+    # The loaded model is marked tool_use: the tools are declared.
     script = Script(
         httpx.Response(200, json=LMSTUDIO_MODELS_TOOLS),
         sse(delta("Let me look."), tc_delta(0, "c1", "look", '{"question": "what is in the hand"}'), usage_chunk()),
@@ -386,17 +382,6 @@ def test_native_look_runs_the_camera_and_the_follow_up_gets_a_tool_message(tmp_p
         "content": '{"output": "A red mug."}',
     }
     assert [x["counted"] for x in rig.usage_lines()] == [False, False]
-
-
-def test_router_none_does_not_open_the_camera(tmp_path: Path) -> None:
-    script = Script(MODELS, route("none"), sse(delta("Hi."), usage_chunk()))
-    looker = FakeLooker()
-    rig = Rig(tmp_path, script, looker=looker, provider="local")
-    with rig.client.websocket_connect("/ws") as ws:
-        ws.send_json({"type": "text", "text": "tell me a joke"})
-        msgs = _turn(ws)
-    assert {"type": "state", "state": "looking"} not in msgs
-    assert looker.questions == []
 
 
 # --- origin ---------------------------------------------------------------------
@@ -443,31 +428,35 @@ def _notice(tmp_path: Path, provider: str, **kw: Any) -> dict[str, Any]:
         "vision_on": True,
         "search_on": False,
         "today_tokens": 1234,
-        "tool_mode": "router",
+        "tools": True,
     }
     args.update(kw)
     return switch_notice(provider, _settings(tmp_path), **args)
 
 
 def test_local_notice_native_says_the_model_decides(tmp_path: Path) -> None:
-    text = "\n".join(_notice(tmp_path, "local", tool_mode="native", search_on=True)["lines"])
+    text = "\n".join(_notice(tmp_path, "local", search_on=True)["lines"])
     assert (
         "Camera: the model decides itself when to use look() or search_image(), but a small "
         "model can miss a request or look when not asked. If it misses, ask "
         'plainly, for example "look at me".'
     ) in text
     assert "like Gemini" not in text
-    assert "routing step" not in text
+    assert "no tool support" not in text
 
 
-def test_local_notice_router_keeps_the_routing_line(tmp_path: Path) -> None:
-    text = "\n".join(_notice(tmp_path, "local", tool_mode="router")["lines"])
-    assert "routing step" in text and "decides itself" not in text
+def test_local_notice_without_tool_support_says_the_tools_are_not_available(tmp_path: Path) -> None:
+    text = "\n".join(_notice(tmp_path, "local", tools=False, search_on=True)["lines"])
+    assert (
+        "This model has no tool support, so the camera, recall and the calculator "
+        "are not available with it."
+    ) in text
+    assert "decides itself" not in text and "search_image" not in text and "Qwenny" not in text
 
 
 def test_local_notice_lists_what_is_lost_and_what_works_worse(tmp_path: Path) -> None:
     text = "\n".join(_notice(tmp_path, "local")["lines"])
-    assert "routing step" in text and "look()" in text and "search_image" not in text
+    assert "decides itself" in text and "look()" in text and "search_image" not in text
     assert "GPU is shared with Qwenny" in text
     assert "depends on the model you load" in text and "Gemini" not in text
     assert "does not count toward the daily cap" in text
@@ -475,7 +464,7 @@ def test_local_notice_lists_what_is_lost_and_what_works_worse(tmp_path: Path) ->
 
 def test_local_notice_without_vision_skips_the_camera_lines(tmp_path: Path) -> None:
     text = "\n".join(_notice(tmp_path, "local", vision_on=False)["lines"])
-    assert "routing step" not in text and "Qwenny" not in text
+    assert "Camera:" not in text and "Qwenny" not in text
 
 
 def test_local_notice_warns_that_search_still_uploads(tmp_path: Path) -> None:

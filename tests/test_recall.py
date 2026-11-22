@@ -69,7 +69,7 @@ def test_spec_declares_query_date_and_days_back() -> None:
     # The date comes from the system prompt now, not the description.
     assert "Today is" not in spec.description
     assert RECALL_TOOL.policy.private_data and RECALL_TOOL.policy.untrusted
-    assert not RECALL_TOOL.policy.cloud
+    assert not RECALL_TOOL.policy.cloud_default
 
 
 def test_tool_of_a_turn_skips_the_inline_turns() -> None:
@@ -137,7 +137,7 @@ def test_date_in_text() -> None:
 
 
 def test_a_date_in_the_query_becomes_the_window() -> None:
-    # The router passes one arg only, so a date arrives inside query.
+    # A small model often leaves date empty and puts the day in query.
     day_hit = Hit(NOV5, "c", "My cat Pita is hiding.", "Poor Pita.")
     source = FakeSource(hits=[], window_hits=[day_hit])
     result = asyncio.run(_tool(source).run({"query": "5th of November"}))

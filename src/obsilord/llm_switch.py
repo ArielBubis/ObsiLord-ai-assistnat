@@ -24,14 +24,15 @@ def switch_notice(
     vision_on: bool,
     search_on: bool,
     today_tokens: int,
-    tool_mode: str,
+    tools: bool,
 ) -> dict[str, Any]:
     """The notice for a switch to provider ("gemini" or "local").
 
     model: the local model id ("" for the server's first model); ignored for
     Gemini. vision_on / search_on: whether look() and search_image() are
     declared. today_tokens: tokens counted toward the daily cap so far.
-    tool_mode: "native" or "router", how the local model gets its tools.
+    tools: whether the local model gets tools (False: the server lists it
+    without tool support, or it refused them).
     """
     if provider == GEMINI:
         return {
@@ -52,27 +53,25 @@ def switch_notice(
         "How well it answers and picks tools depends on the model you load: "
         "smaller models know less and miss more tool calls.",
     ]
-    if vision_on:
-        tools = "look() or search_image()" if search_on else "look()"
-        if tool_mode == "native":
-            lines.append(
-                f"Camera: the model decides itself when to use {tools}, but a small "
-                "model can miss a request or look when not asked. If it "
-                'misses, ask plainly, for example "look at me".'
-            )
-        else:
-            lines.append(
-                f"Camera: this model has no tool support, so a short routing step "
-                f"decides before each reply whether to use {tools}. It can miss a "
-                "request or look when not asked. If it misses, ask plainly, for "
-                'example "look at me".'
-            )
+    if not tools:
+        lines.append(
+            "This model has no tool support, so the camera, recall and the "
+            "calculator are not available with it. Pick a model with tool support "
+            "(the hammer badge in LM Studio) to use them."
+        )
+    if tools and vision_on:
+        camera = "look() or search_image()" if search_on else "look()"
+        lines.append(
+            f"Camera: the model decides itself when to use {camera}, but a small "
+            "model can miss a request or look when not asked. If it "
+            'misses, ask plainly, for example "look at me".'
+        )
         lines.append(
             "The GPU is shared with Qwenny, which needs about 2 to 3 GB for each "
             "look. With a large chat model loaded, look() can fail or fall back to "
             "the slower CPU build."
         )
-    if search_on:
+    if tools and search_on:
         where = (
             "Google Gemini (its tokens count toward the daily cap)"
             if settings.image_search.provider == GEMINI

@@ -11,7 +11,7 @@ Obsi-Lord is a personal prototype. You talk to it (or type), it answers out loud
 Most assistants live in the cloud, listen all the time, and forget you between sessions. Obsi-Lord tries the opposite:
 
 - **Local first.** Speech recognition, speech output, vision and the chat model all run on your machine.
-- **The camera is not a stream.** It takes one photo only during a turn: when you ask ("what am I holding?") or when the assistant decides to look, within a cooldown and an hourly cap. The photo is described by a local vision model, and the chat model only ever gets that text.
+- **The camera is not a stream.** It takes one photo only during a turn: when you ask ("what am I holding?") or when the assistant decides to look, within a cooldown and an hourly cap. A local chat model that sees images looks at the photo itself; otherwise a small local vision model describes it and the chat model only gets that text.
 - **It remembers, locally.** Conversations are kept in one SQLite file on your PC, and the assistant can search them when you refer to something from before.
 - **It has a character.** Short, spoken replies with a bit of attitude, not a wall of markdown.
 
@@ -19,9 +19,10 @@ Most assistants live in the cloud, listen all the time, and forget you between s
 
 - **Talk or type.** Hold to talk, or type in the chat box. Replies stream as subtitles and are spoken as they arrive.
 - **An animated face.** A 3D character rendered with three.js and redrawn as dots (dither, halftone or ASCII), with a backdrop of a voice ring and drifting orbs. It has idle, listening, thinking, looking and speaking states, blinks and glances, a mouth driven by the speech audio, and expressions saved in the character. Bring your own character as a .glb or .vrm file. A 64x48 8-bit face is the alternative skin, and the fallback when WebGL is not available.
-- **Pick your brain.** Any local model behind an OpenAI-compatible server (LM Studio, Ollama), picked from the page. Models with tool support call the camera themselves; for the rest, a small routing step picks the tool. Gemini can be switched on as an alternative.
-- **Looks when it matters.** `look()` takes one photo. A local chat model that sees images gets the photo itself; for Gemini and text-only models, Qwenny, a small local vision model (Qwen3-VL-2B on llama.cpp), describes it. Settings, Photos chooses whether photos are dropped after the reply, kept for follow-ups ("what color was it?"), or saved to disk.
-- **Identifies things (opt-in).** For things a description can't name, like an album cover or a product, the local model cuts the object out of the photo and only that cut-out goes to an online lookup. Off by default, with hourly and monthly caps.
+- **Pick your brain.** Any local model behind an OpenAI-compatible server (LM Studio, Ollama), picked from the page. Models with tool support use the camera, recall and the calculator themselves; a model without tool support answers without them. Gemini can be switched on as an alternative.
+- **Looks when it matters.** `look()` takes one photo. A local chat model that sees images gets the photo itself; for Gemini and text-only models, Qwenny, a small local vision model (Qwen3-VL-2B on llama.cpp), describes it. With a chat model that sees images Qwenny is optional: leave `[vision] model` empty and the chat model does the looking. Settings, Photos chooses whether photos are dropped after the reply, kept for follow-ups ("what color was it?"), or saved to disk.
+- **Identifies things (opt-in).** For things a description can't name, like an album cover or a product, the local model cuts the object out of the photo and only that cut-out goes to an online lookup. Off by default in `config.toml`, with hourly and monthly caps, and once switched on it asks before each upload until you set it to On.
+- **You decide what it may use.** Settings, Permissions has Off, Ask or On for each tool (camera, image search, recall, calculator). Ask speaks a short question and shows Yes and No: click, say or type the answer; no answer within 20 seconds counts as no, and an answer that is neither is taken as no and then as your next message. Camera Off also takes image search away. For tools that read private data, "With cloud model" decides whether Gemini may use them. Settings, Activity lists the last tool runs (tool, mode and outcome, never what was asked or found). Every open page shares the same choices.
 - **Conversation memory.** Recent turns go with every request, a reload within 30 minutes picks up where you left off (older conversations can be continued from Settings), and with a local model the assistant can search older conversations ("what did we talk about yesterday?").
 - **Does the math.** A `calculate()` tool works out arithmetic, percentages and unit conversions exactly instead of guessing. Tools can chain within one reply: recall what you paid, then work out a percentage of it (up to `[tools] max_rounds` steps, 3 by default).
 - **Editable memory.** In Settings you can edit, rename, delete or add turns in stored conversations.
@@ -47,6 +48,7 @@ One turn: you speak, the backend transcribes it, the chat model answers or calls
 - The server binds to 127.0.0.1 only. No open ports, no port forwarding.
 - Camera frames are never logged, and they are written to disk only if you set Photos to "Save to disk" in Settings (into `data/photos/`, gitignored). By default a photo is used for its reply and then dropped. The Snapshots view in the page keeps the last photo in memory only.
 - The only feature that sends part of a photo off the PC is the opt-in image lookup, and it sends only the cut-out.
+- Your choices in Settings live in `data/settings.json`, and the tool activity list in `logs/activity.jsonl` (both gitignored); the activity list holds no content.
 - Conversation memory is text only and stays in `data/` (gitignored). Older conversations are searchable by the local model only, so they are not sent to Gemini that way.
 - With Gemini picked, your messages, the replies and Qwenny's text answers go to Google. On the free tier Google may use them to improve its products.
 
@@ -56,7 +58,7 @@ Python 3.12, FastAPI, faster-whisper, Kokoro (kokoro-onnx), llama.cpp, OpenCV, S
 
 ## Running it
 
-Windows PC with a webcam and a microphone, Python 3.12, and a local LLM server: [LM Studio](https://lmstudio.ai) (start its server in the Developer tab, and turn on just-in-time model loading) or Ollama. A model with tool support works best.
+Windows PC with a webcam and a microphone, Python 3.12, and a local LLM server: [LM Studio](https://lmstudio.ai) (start its server in the Developer tab, and turn on just-in-time model loading) or Ollama. The tools need a model with tool support (LM Studio shows a hammer badge).
 
 ```
 python -m venv .venv
@@ -64,7 +66,7 @@ python -m venv .venv
 pip install -r requirements.txt
 pip install -e .
 copy config.example.toml config.toml
-python -m obsilord.vision.fetch   # downloads llama.cpp and the vision model once
+python -m obsilord.vision.fetch   # llama.cpp and the vision model, once (optional with a chat model that sees images)
 python -m obsilord
 ```
 
@@ -72,7 +74,7 @@ The voice needs two Kokoro files in `voices/kokoro/` (links in `config.example.t
 
 ### Gemini instead of a local model
 
-For people who cannot run a local chat model. Copy `.env.example` to `.env`, set `GEMINI_API_KEY`, and pick Gemini in Settings (or set `provider = "gemini"` under `[llm]` to start on it). Gemini is a paid API: usage is logged and capped per day (`daily_token_cap`). Speech, the voice and the camera's vision model still run locally; earlier conversations are not searched with Gemini.
+For people who cannot run a local chat model. Copy `.env.example` to `.env`, set `GEMINI_API_KEY`, and pick Gemini in Settings (or set `provider = "gemini"` under `[llm]` to start on it). Gemini is a paid API: usage is logged and capped per day (`daily_token_cap`). Speech, the voice and the camera's vision model still run locally. With Gemini the camera, image search and recall stay off until you tick "With cloud model" for them in Settings, Permissions; for the camera Gemini then gets Qwenny's text, never the photo.
 
 ## Roadmap
 

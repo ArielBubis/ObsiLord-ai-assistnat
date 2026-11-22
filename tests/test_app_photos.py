@@ -9,9 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi.testclient import TestClient
 
-from fakes import FakeLooker, SeeingToolLLM, text_only
+from fakes import AppClient, FakeLooker, SeeingToolLLM, text_only
 from obsilord.app import MSG_BAD_PHOTOS, create_app
 from obsilord.config import REPO_ROOT, Settings, load_settings
 from obsilord.llm.base import Done, TextDelta, ToolCall
@@ -65,27 +64,22 @@ def _saved(tmp_path: Path) -> list[Path]:
     return sorted(root.rglob("*.jpg")) if root.exists() else []
 
 
-def test_the_page_gets_the_configured_default(tmp_path: Path) -> None:
-    client = TestClient(_app(tmp_path, SeeingToolLLM([]), _settings(tmp_path, photos="followup", photos_keep=3)))
-    assert client.get("/config/photos").json() == {"default": "followup", "keep": 3}
-
-
 def test_the_switch_answers_with_the_mode(tmp_path: Path) -> None:
-    with TestClient(_app(tmp_path, SeeingToolLLM([]))).websocket_connect("/ws") as ws:
+    with AppClient(_app(tmp_path, SeeingToolLLM([]))).websocket_connect("/ws") as ws:
         ws.receive_json()  # conversation
         assert _set(ws, "disk") == {"type": "photos", "mode": "disk"}
         assert _set(ws, "nope") == {"type": "error", "message": MSG_BAD_PHOTOS}
 
 
 def test_off_saves_nothing(tmp_path: Path) -> None:
-    with TestClient(_app(tmp_path, SeeingToolLLM(_look_rounds(1)))).websocket_connect("/ws") as ws:
+    with AppClient(_app(tmp_path, SeeingToolLLM(_look_rounds(1)))).websocket_connect("/ws") as ws:
         ws.receive_json()
         _turn(ws)
     assert _saved(tmp_path) == []
 
 
 def test_disk_saves_the_photo_with_its_conversation(tmp_path: Path) -> None:
-    with TestClient(_app(tmp_path, SeeingToolLLM(_look_rounds(1)))).websocket_connect("/ws") as ws:
+    with AppClient(_app(tmp_path, SeeingToolLLM(_look_rounds(1)))).websocket_connect("/ws") as ws:
         ws.receive_json()
         _set(ws, "disk")
         msgs = _turn(ws)
@@ -103,7 +97,7 @@ def test_disk_saves_the_photo_with_its_conversation(tmp_path: Path) -> None:
 
 def test_disk_without_memory_uses_its_own_folder(tmp_path: Path) -> None:
     app = _app(tmp_path, SeeingToolLLM(_look_rounds(1)), store=False)
-    with TestClient(app).websocket_connect("/ws") as ws:
+    with AppClient(app).websocket_connect("/ws") as ws:
         _set(ws, "disk")
         _turn(ws)
     assert [p.parent.name for p in _saved(tmp_path)] == ["no-conversation"]
@@ -111,7 +105,7 @@ def test_disk_without_memory_uses_its_own_folder(tmp_path: Path) -> None:
 
 def test_a_resumed_conversation_gets_its_saved_photos_back(tmp_path: Path) -> None:
     llm = SeeingToolLLM([*_look_rounds(1), [TextDelta("Still a mug."), Done(1, 1)]])
-    client = TestClient(_app(tmp_path, llm))
+    client = AppClient(_app(tmp_path, llm))
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
         _set(ws, "disk")
@@ -136,7 +130,7 @@ def test_switching_to_disk_during_a_turn_loads_photos_for_the_next_turn(tmp_path
         memory=SqliteStore(tmp_path / "m.sqlite3"),
         photos=PhotoStore(tmp_path / "photos"),
     )
-    client = TestClient(app)
+    client = AppClient(app)
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
         _set(ws, "disk")
@@ -158,7 +152,7 @@ def test_switching_to_disk_during_a_turn_loads_photos_for_the_next_turn(tmp_path
 
 def test_followup_does_not_bring_photos_back_from_disk(tmp_path: Path) -> None:
     llm = SeeingToolLLM([*_look_rounds(1), [TextDelta("Hm."), Done(1, 1)]])
-    client = TestClient(_app(tmp_path, llm))
+    client = AppClient(_app(tmp_path, llm))
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
         _set(ws, "disk")
@@ -172,7 +166,7 @@ def test_followup_does_not_bring_photos_back_from_disk(tmp_path: Path) -> None:
 
 def test_switching_off_drops_the_kept_photos(tmp_path: Path) -> None:
     llm = SeeingToolLLM([*_look_rounds(1), [TextDelta("Hm."), Done(1, 1)]])
-    with TestClient(_app(tmp_path, llm)).websocket_connect("/ws") as ws:
+    with AppClient(_app(tmp_path, llm)).websocket_connect("/ws") as ws:
         ws.receive_json()
         _set(ws, "followup")
         _turn(ws)
@@ -188,13 +182,13 @@ def test_startup_removes_photos_past_the_retention(tmp_path: Path) -> None:
     old.parent.mkdir(parents=True)
     old.write_bytes(b"x")
     os.utime(old, (time.time() - 40 * 86400,) * 2)
-    with TestClient(_app(tmp_path, SeeingToolLLM([]), settings)):
+    with AppClient(_app(tmp_path, SeeingToolLLM([]), settings)):
         pass
     assert not old.exists()
 
 
-def _two_look_turns(tmp_path: Path) -> tuple[TestClient, str]:
-    client = TestClient(_app(tmp_path, SeeingToolLLM(_look_rounds(2))))
+def _two_look_turns(tmp_path: Path) -> tuple[AppClient, str]:
+    client = AppClient(_app(tmp_path, SeeingToolLLM(_look_rounds(2))))
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
         _set(ws, "disk")
@@ -205,7 +199,7 @@ def _two_look_turns(tmp_path: Path) -> tuple[TestClient, str]:
     return client, str(cid)
 
 
-def _memory(client: TestClient, **fields: Any) -> dict[str, Any]:
+def _memory(client: AppClient, **fields: Any) -> dict[str, Any]:
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
         ws.send_json({"type": "memory", **fields})
@@ -233,7 +227,7 @@ def test_save_removes_photos_of_deleted_turns(tmp_path: Path) -> None:
 
 
 def test_save_deleting_every_turn_removes_the_conversation_folder(tmp_path: Path) -> None:
-    client = TestClient(_app(tmp_path, SeeingToolLLM(_look_rounds(1))))
+    client = AppClient(_app(tmp_path, SeeingToolLLM(_look_rounds(1))))
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
         _set(ws, "disk")

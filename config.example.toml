@@ -52,13 +52,9 @@ model = ""
 max_output_tokens = 400    # reasoning models think inside this budget
 temperature = 0.7
 request_timeout_s = 60     # one request; loading a model counts toward it
-router_context_messages = 4  # recent messages the tool router sees
-# How the local model uses tools: "native" declares them to the model (best
-# for models LM Studio marks with the hammer badge), "router" asks a separate
-# routing request before each reply, held to a fixed JSON format (for models
-# without tool support), "auto" picks per model from LM Studio's model list
-# (native when it cannot tell).
-tool_mode = "auto"
+# Tools (camera, recall, calculator) need a model with tool support (LM Studio
+# marks them with the hammer badge). A model the server lists without it, or
+# one that refuses tools, answers without them.
 # Thinking: "none" turns it off for thinking models (replies in under a second
 # instead of several, and no reply lost to thinking that used up
 # max_output_tokens). Also "minimal", "low", "medium", "high", "xhigh", or ""
@@ -161,7 +157,9 @@ photos_dir = "data/photos"
 # about 1.5 GB). Download all of it once with:
 #   python -m obsilord.vision.fetch
 # Paths are relative to the repo root (models/ is gitignored). An empty model
-# turns look() off.
+# means no Qwenny: a local chat model that sees images still looks at the
+# photo itself, any other model (and Gemini) gets no camera tool, and
+# search_image is off.
 #
 # Model location: model and mmproj may also be absolute paths, so the files
 # can live in a folder you already keep models in (LM Studio's models folder,
@@ -258,6 +256,18 @@ list_limit = 50
 # this many times before it has to answer. Each round is one more model
 # request and counts against the daily token cap.
 max_rounds = 3
+
+[permissions]
+# Optional section. Off / Ask / On for each tool, and "with cloud model" for
+# tools that read private data, are picked in the page (Settings, Permissions)
+# and kept in settings_path on this PC, so every open page sees the same
+# choices. Ask speaks a short question and shows Yes / No; say or type yes or
+# no. No answer within confirm_timeout_s (5..120 seconds) counts as no.
+confirm_timeout_s = 20
+settings_path = "data/settings.json"
+# One line per tool call: time, tool, mode and outcome, never what was asked
+# or found. Pruned at startup with [memory] retention_days.
+activity_path = "logs/activity.jsonl"
 
 [debug]
 # Optional section. true prints every Gemini and llama-server request and reply

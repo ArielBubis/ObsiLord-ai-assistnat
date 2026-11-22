@@ -26,8 +26,7 @@ from obsilord.memory.store import SqliteStore
 pytestmark = pytest.mark.hardware
 
 
-@pytest.mark.parametrize("mode", ["router", "native"])
-def test_local_tool_choice_and_reply_live(mode: str) -> None:
+def test_local_tool_choice_and_reply_live() -> None:
     ask = [Message("user", "What am I holding?")]
 
     async def go() -> tuple[list[object], list[object], list[object], str]:
@@ -35,8 +34,8 @@ def test_local_tool_choice_and_reply_live(mode: str) -> None:
         try:
             model = os.environ.get("OBSILORD_LOCAL_MODEL", "") or await server.default_model()
             seconds, _ = await server.warm_up(model)
-            print(f"\n{model} ({mode}): warm-up {seconds:.1f} s")
-            client = server.client(model, tool_mode=mode)
+            print(f"\n{model}: warm-up {seconds:.1f} s")
+            client = server.client(model)
             tools = [LOOK_TOOL.spec, SEARCH_IMAGE_TOOL.spec]
             look = [e async for e in client.stream_reply(ask, tools)]
             calls = [e for e in look if isinstance(e, ToolCall)]
@@ -65,8 +64,7 @@ def _text(events: list[object]) -> str:
     return "".join(e.text for e in events if isinstance(e, TextDelta))
 
 
-@pytest.mark.parametrize("mode", ["router", "native"])
-def test_earlier_tool_result_answers_a_follow_up_live(mode: str) -> None:
+def test_earlier_tool_result_answers_a_follow_up_live() -> None:
     """A follow-up about an earlier look is answered from its note in history."""
     history = [
         Message("user", "Look, what do you think of this?"),
@@ -82,20 +80,19 @@ def test_earlier_tool_result_answers_a_follow_up_live(mode: str) -> None:
         server = OpenAICompatServer(load_settings().llm_local)
         try:
             model = os.environ.get("OBSILORD_LOCAL_MODEL", "") or await server.default_model()
-            client = server.client(model, tool_mode=mode)
+            client = server.client(model)
             return [e async for e in client.stream_reply(history, [LOOK_TOOL.spec, SEARCH_IMAGE_TOOL.spec])]
         finally:
             await server.aclose()
 
     events = asyncio.run(go())
     answer = _text(events)
-    print(f"\n{mode}: {answer!r} calls {[e for e in events if isinstance(e, ToolCall)]}")
+    print(f"\n{answer!r} calls {[e for e in events if isinstance(e, ToolCall)]}")
     assert not any(isinstance(e, ToolCall) for e in events), "it looked again instead"
     assert "blue" in answer.lower()
 
 
-@pytest.mark.parametrize("mode", ["router", "native"])
-def test_recall_by_date_live(mode: str, tmp_path: Path) -> None:
+def test_recall_by_date_live(tmp_path: Path) -> None:
     """A question about a date (the demo conversation 13 days ago) finds it."""
     now = time.time()
     day = next(c for c in demo_checks(now) if c["kind"] == "recall-date")["question"].split("on the ")[1]
@@ -108,7 +105,7 @@ def test_recall_by_date_live(mode: str, tmp_path: Path) -> None:
         server = OpenAICompatServer(load_settings().llm_local)
         try:
             model = os.environ.get("OBSILORD_LOCAL_MODEL", "") or await server.default_model()
-            client = server.client(model, tool_mode=mode)
+            client = server.client(model)
             recall = RecallTool(store)
             tools = [LOOK_TOOL.spec, RECALL_TOOL.spec]
             first = [e async for e in client.stream_reply(ask, tools)]
@@ -123,7 +120,7 @@ def test_recall_by_date_live(mode: str, tmp_path: Path) -> None:
             await store.close()
 
     calls, said, answer = asyncio.run(go())
-    print(f"\n{mode}: calls {calls}\nfirst: {said!r}\nanswer: {answer!r}")
+    print(f"\ncalls {calls}\nfirst: {said!r}\nanswer: {answer!r}")
     assert [c.name for c in calls] == ["recall"]
     assert "pita" in answer.lower() or "cat" in answer.lower(), answer
 
@@ -145,8 +142,7 @@ def _sample_photo() -> bytes:
     return buf.tobytes()
 
 
-@pytest.mark.parametrize("mode", ["router", "native"])
-def test_a_vision_model_sees_the_look_photo_live(mode: str) -> None:
+def test_a_vision_model_sees_the_look_photo_live() -> None:
     """Phase 5f: the photo goes to the chat model itself, and a kept photo
     answers a follow-up."""
     from dataclasses import replace
@@ -161,7 +157,7 @@ def test_a_vision_model_sees_the_look_photo_live(mode: str) -> None:
         server = OpenAICompatServer(load_settings().llm_local)
         try:
             model = os.environ.get("OBSILORD_LOCAL_MODEL", "") or await server.default_model()
-            client = server.client(model, tool_mode=mode)
+            client = server.client(model)
             if not await client.sees_images():
                 pytest.skip(f"{model} does not see photos (LM Studio type is not vlm)")
             call = ToolCall("look", {"question": "What am I holding?"}, call_id="call_1")
@@ -183,13 +179,12 @@ def test_a_vision_model_sees_the_look_photo_live(mode: str) -> None:
             await server.aclose()
 
     _, answer, color, ms = asyncio.run(go())
-    print(f"\n{mode}: {ms:.0f} ms answer {answer!r}\nfollow-up color {color!r}")
+    print(f"\n{ms:.0f} ms answer {answer!r}\nfollow-up color {color!r}")
     assert any(w in answer.lower() for w in ("bee", "flower", "cosmos")), answer
     assert any(w in color.lower() for w in ("pink", "magenta", "purple", "rose")), color
 
 
-@pytest.mark.parametrize("mode", ["router", "native"])
-def test_recall_of_demo_history_live(mode: str, tmp_path: Path) -> None:
+def test_recall_of_demo_history_live(tmp_path: Path) -> None:
     """The model calls recall() for an earlier conversation, the demo store
     answers, and the reply uses it."""
     ask = [Message("user", "When is my dentist appointment? I told you some days ago.")]
@@ -201,7 +196,7 @@ def test_recall_of_demo_history_live(mode: str, tmp_path: Path) -> None:
         server = OpenAICompatServer(load_settings().llm_local)
         try:
             model = os.environ.get("OBSILORD_LOCAL_MODEL", "") or await server.default_model()
-            client = server.client(model, tool_mode=mode)
+            client = server.client(model)
             tools = [LOOK_TOOL.spec, RECALL_TOOL.spec]
             first = [e async for e in client.stream_reply(ask, tools)]
             calls = [e for e in first if isinstance(e, ToolCall)]
@@ -218,7 +213,7 @@ def test_recall_of_demo_history_live(mode: str, tmp_path: Path) -> None:
     first, follow = asyncio.run(go())
     calls = [e for e in first if isinstance(e, ToolCall)]
     answer = _text(follow)
-    print(f"\n{mode}: calls {calls}\nanswer: {answer!r}")
+    print(f"\ncalls {calls}\nanswer: {answer!r}")
     assert [c.name for c in calls] == ["recall"]
     # Replies are spoken, so the time may be written out ("four thirty").
     spoken = answer.lower().replace("-", " ")

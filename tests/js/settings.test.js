@@ -111,8 +111,8 @@ test("modelOptions marks models without tool support", () => {
     },
   };
   assert.deepEqual(modelOptions(config, "a"), [
-    { value: "a", label: "a (loaded, routing step)" },
-    { value: "b", label: "b (routing step)" },
+    { value: "a", label: "a (loaded, no tools)" },
+    { value: "b", label: "b (no tools)" },
     { value: "c", label: "c" },
     { value: "d", label: "d" },
   ]);

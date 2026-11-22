@@ -3,7 +3,8 @@
 look(): one webcam frame, described by the local vision model. Gemini only
 ever gets text. take_photo() is look() for a local chat model that sees
 photos: the frame goes to that model itself and the vision model is not
-started (Phase 5f). Looker.look(question) returns the tool response:
+started (Phase 5f). With no vision model configured the Looker only does
+take_photo() (T2). Looker.look(question) returns the tool response:
 {"output": answer} or {"error": message}, where message is short and readable
 so the model can pass it on. It never raises except CancelledError.
 
@@ -84,6 +85,7 @@ MSG_CAMERA_FAILED = (
     "use the camera (Settings, Privacy and security, Camera)."
 )
 MSG_VISION_FAILED = "The local vision model failed."
+MSG_NO_VISION = "No local vision model is set up, so only the chat model can look at a photo."
 MSG_NO_ANSWER = "The local vision model gave no answer."
 MSG_LOOK_FAILED = "Looking failed."
 MSG_SEARCH_OFF = "Image search is turned off in the settings."
@@ -116,6 +118,8 @@ class Camera(Protocol):
 class LookTool(Protocol):
     # Whether search_image() is on ([image_search] enabled with a key).
     search_on: bool
+    # Whether Qwenny is set up ([vision]); without it only take_photo() works.
+    vision_on: bool
 
     async def look(self, question: Any, snapshot: Snapshot | None = None) -> dict[str, Any]: ...
 
@@ -231,17 +235,21 @@ class Looker:
     def __init__(
         self,
         camera: Camera,
-        vision: VisionClient,
+        vision: VisionClient | None,
         limiter: LookLimiter,
         search: ImageSearch | None = None,
     ) -> None:
         self._camera = camera
         self._vision = vision
         self._limiter = limiter
-        self._search = search
-        self.search_on = search is not None
+        # search_image() cuts the target out with Qwenny: no vision, no search.
+        self._search = search if vision is not None else None
+        self.vision_on = vision is not None
+        self.search_on = self._search is not None
 
     async def look(self, question: Any, snapshot: Snapshot | None = None) -> dict[str, Any]:
+        if self._vision is None:
+            return {"error": MSG_NO_VISION}
         refusal = self._limiter.refusal()
         if refusal is not None:
             log.info("look: refused (cooldown or hourly cap)")
@@ -311,6 +319,7 @@ class Looker:
     async def _describe(
         self, capture: asyncio.Task[bytes], question: str, snapshot: Snapshot | None
     ) -> str:
+        assert self._vision is not None  # look() checks
         async with self._vision.session() as session:
             jpeg = await capture
             await _emit(snapshot, "camera", jpeg)
@@ -320,7 +329,7 @@ class Looker:
         self, target: Any, snapshot: Snapshot | None = None
     ) -> dict[str, Any]:
         search = self._search
-        if search is None:
+        if search is None or self._vision is None:
             return {"error": MSG_SEARCH_OFF}
         refusal = (
             search.budget.refusal()
@@ -381,6 +390,7 @@ class Looker:
     ) -> tuple[bytes, str]:
         """The crop for the target and the model's description of the target.
         Raises _NoUpload when there is no usable box."""
+        assert self._vision is not None  # search_image() checks
         async with self._vision.session() as session:
             jpeg = await capture
             await _emit(snapshot, "camera", jpeg)
@@ -405,15 +415,20 @@ class Looker:
 # --- the tools ---------------------------------------------------------------
 
 # One camera call per turn (look or search_image); the face narrows its eyes
-# while it runs. Private (the camera), but a cloud model may use it: it only
-# ever gets Qwenny's text. The text read from the view is untrusted.
+# while it runs. Private (the camera): a cloud model gets it only once the
+# user allows it (it then gets Qwenny's text, never the frame). The text read
+# from the view is untrusted.
 CAMERA_POLICY = ToolPolicy(
     group="camera",
     face_state="looking",
     untrusted=True,
     private_data=True,
-    cloud=True,
     timeout_s=45.0,
+    label="Camera",
+    ask="Look through the camera?",
+    # Off with a cloud model until the user picks (decision 2026-11-18,
+    # kept by the user 2026-11-22).
+    cloud_default=False,
 )
 
 
@@ -466,19 +481,37 @@ LOOK_TOOL = tool(CAMERA_POLICY, name="look")(_look)
 # look() for a chat model that sees photos (a local vision model): the photo
 # goes to the model itself and Qwenny is not used. Same name and argument.
 LOOK_PHOTO_TOOL = tool(CAMERA_POLICY, name="look")(_look_photo)
-SEARCH_IMAGE_TOOL = tool(replace(CAMERA_POLICY, leaves_pc=True), name="search_image")(_search_image)
+SEARCH_IMAGE_TOOL = tool(
+    replace(
+        CAMERA_POLICY,
+        leaves_pc=True,
+        label="Image search",
+        ask="Send a cut-out of the camera picture to Google to identify it?",
+        # It uploads a crop: asks until the user picks On (2026-11-19).
+        default_mode="ask",
+        # Camera Off means no camera at all (user, 2026-11-22).
+        requires="look",
+    ),
+    name="search_image",
+)(_search_image)
 
 
 def camera_source(looker: LookTool) -> ToolSource:
-    """The camera tools of a turn: look (the photo variant for a model that
-    sees photos), and search_image when it is on."""
+    """The camera tools of a turn. A chat model that sees photos gets look in
+    its photo variant (no Qwenny needed). Any other model gets look only when
+    Qwenny is set up, and nothing otherwise. search_image needs Qwenny and is
+    added when it is on."""
     look = LOOK_TOOL.bind(looker=looker)
     look_photo = LOOK_PHOTO_TOOL.bind(looker=looker)
     search = SEARCH_IMAGE_TOOL.bind(looker=looker)
 
     async def source(info: TurnInfo) -> Sequence[Tool]:
-        tools = [look_photo if await info.sees_images() else look]
-        if looker.search_on:
+        tools: list[Tool] = []
+        if await info.sees_images():
+            tools.append(look_photo)
+        elif looker.vision_on:
+            tools.append(look)
+        if looker.vision_on and looker.search_on:
             tools.append(search)
         return tools
 

@@ -810,7 +810,6 @@ def test_llm_local_from_example(tmp_path: Path) -> None:
     assert s.llm.provider == "local"
     assert s.llm_local == LocalLLMSettings()
     assert s.llm_local.base_url == "http://127.0.0.1:1234/v1"
-    assert s.llm_local.tool_mode == "auto"
     assert s.llm_local.reasoning_effort == "none"
 
 
@@ -820,10 +819,12 @@ def test_llm_local_reasoning_effort_values(tmp_path: Path, effort: str) -> None:
     assert _load(path, tmp_path).llm_local.reasoning_effort == effort
 
 
-@pytest.mark.parametrize("mode", ["native", "router"])
-def test_llm_local_tool_mode_can_be_forced(tmp_path: Path, mode: str) -> None:
-    path = _write_replaced(tmp_path, 'tool_mode = "auto"', f'tool_mode = "{mode}"')
-    assert _load(path, tmp_path).llm_local.tool_mode == mode
+@pytest.mark.parametrize("line", ['tool_mode = "auto"', "router_context_messages = 4"])
+def test_llm_local_refuses_the_removed_router_keys(tmp_path: Path, line: str) -> None:
+    # Router mode was removed in T2: the keys are unknown now.
+    path = _write_replaced(tmp_path, 'reasoning_effort = "none"', f'reasoning_effort = "none"\n{line}')
+    with pytest.raises(ValueError, match=r"unknown keys in \[llm_local\]: \['" + line.split()[0]):
+        _load(path, tmp_path)
 
 
 def test_llm_local_section_is_optional(tmp_path: Path) -> None:
@@ -855,9 +856,6 @@ def test_llm_local_section_is_optional(tmp_path: Path) -> None:
         ("max_output_tokens = 400", "max_output_tokens = 0", "llm_local.max_output_tokens"),
         ("temperature = 0.7", "temperature = 2.5", "llm_local.temperature"),
         ("request_timeout_s = 60 ", "request_timeout_s = 80 ", "llm_local.request_timeout_s"),
-        ("router_context_messages = 4", "router_context_messages = 21", "router_context_messages"),
-        ("router_context_messages = 4", "router_context_messages = -1", "router_context_messages"),
-        ('tool_mode = "auto"', 'tool_mode = "sometimes"', "llm_local.tool_mode must be one of"),
         ('reasoning_effort = "none"', 'reasoning_effort = "off"', "llm_local.reasoning_effort must be one of"),
     ],
 )
@@ -946,3 +944,45 @@ def test_memory_db_path_resolves_against_the_repo(tmp_path: Path) -> None:
     assert memory_db_path(demo) == REPO_ROOT / DEMO_DB_PATH
     absolute = replace(s, memory=replace(s.memory, db_path=str(tmp_path / "m.sqlite3")))
     assert memory_db_path(absolute) == tmp_path / "m.sqlite3"
+
+
+# --- [permissions] (T2) -----------------------------------------------------------
+
+
+def test_permissions_defaults_and_optional(tmp_path: Path) -> None:
+    from obsilord.config import PermissionsSettings
+
+    s = _load(EXAMPLE, tmp_path)
+    assert s.permissions == PermissionsSettings()
+    assert s.permissions.confirm_timeout_s == 20
+    assert s.permissions.settings_path == "data/settings.json"
+    assert s.permissions.activity_path == "logs/activity.jsonl"
+    text = EXAMPLE.read_text(encoding="utf-8")
+    start = text.index("[permissions]")
+    end = text.index("\n[", start) + 1  # the next section (comments mention [memory])
+    path = tmp_path / "config.toml"
+    path.write_text(text[:start] + text[end:], encoding="utf-8")
+    assert _load(path, tmp_path).permissions == PermissionsSettings()
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ("confirm_timeout_s = 20", "confirm_timeout_s = 4", "permissions.confirm_timeout_s"),
+        ("confirm_timeout_s = 20", "confirm_timeout_s = 121", "permissions.confirm_timeout_s"),
+        ('settings_path = "data/settings.json"', 'settings_path = " "', "permissions.settings_path"),
+        ('activity_path = "logs/activity.jsonl"', 'activity_path = ""', "permissions.activity_path"),
+    ],
+)
+def test_permissions_rejects_bad_values(tmp_path: Path, old: str, new: str, message: str) -> None:
+    path = _write_replaced(tmp_path, old, new)
+    with pytest.raises(ValueError, match=message):
+        _load(path, tmp_path)
+
+
+def test_permissions_paths_resolve_against_the_repo(tmp_path: Path) -> None:
+    from obsilord.config import activity_log_path, settings_file_path
+
+    s = _load(EXAMPLE, tmp_path)
+    assert settings_file_path(s) == REPO_ROOT / "data" / "settings.json"
+    assert activity_log_path(s) == REPO_ROOT / "logs" / "activity.jsonl"

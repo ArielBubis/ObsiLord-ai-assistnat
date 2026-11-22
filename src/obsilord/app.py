@@ -100,22 +100,39 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from obsilord import promptlog
-from obsilord.config import Settings, memory_db_path, photos_dir_path
+from obsilord.activity import ActivityLog
+from obsilord.config import (
+    Settings,
+    activity_log_path,
+    memory_db_path,
+    photos_dir_path,
+    settings_file_path,
+)
 from obsilord.face_character import check_character
 from obsilord.llm.base import LLMClient, Message, ToolNote
 from obsilord.llm.openai_compat import LocalLLMError, OpenAICompatServer
 from obsilord.llm_switch import GEMINI, LOCAL, clean_model, switch_notice
-from obsilord.look import ImageSearch, LookTool, camera_source
+from obsilord.look import LOOK_TOOL, SEARCH_IMAGE_TOOL, ImageSearch, LookTool, camera_source
 from obsilord.memory.base import ConversationInfo, MemoryStore, TurnRecord
 from obsilord.memory.demo import demo_checks, reset_demo_db, seed_demo
 from obsilord.memory.recall import RECALL_TOOL, RecallTool, notes_to_store
 from obsilord.memory.store import SqliteStore
+from obsilord.permissions import Choices, SettingsStore, ToolChoice
 from obsilord.photos import PHOTO_MODES, PhotoStore, TurnPhotos, attach_photos, keep_newest_photos
-from obsilord.pipeline import MSG_NOT_CAUGHT, run_text_turn, run_voice_turn
+from obsilord.pipeline import MSG_NOT_CAUGHT, ConfirmReply, Confirms, run_text_turn, run_voice_turn
 from obsilord.stt.base import SAMPLE_RATE as STT_SAMPLE_RATE
 from obsilord.stt.base import STTClient, pcm16_bytes_for_ms
 from obsilord.tools.calculate import calculate
-from obsilord.tools.registry import Registry, Tool, ToolSource, TurnInfo, static_source
+from obsilord.tools.registry import (
+    MODES,
+    OnRun,
+    Permissions,
+    Registry,
+    Tool,
+    ToolSource,
+    TurnInfo,
+    static_source,
+)
 from obsilord.tts.base import TTSClient
 from obsilord.usage import UsageTracker
 
@@ -147,6 +164,22 @@ MAX_SAVE_DELETES = 500
 MAX_SAVE_ADDS = 50
 MSG_MEMORY_STALE = "This conversation changed since you opened it. Reopen it to edit."
 MSG_BAD_PHOTOS = "Unknown Photos setting."
+MSG_UNKNOWN_TOOL = "Unknown tool."
+MSG_BAD_PERMISSION = "That permission change was not understood."
+MSG_NO_CLOUD_CHOICE = "That tool has no cloud model choice."
+MSG_BAD_CONFIRM = "That answer was not understood."
+MSG_NOT_SAVED = "That change could not be saved, so nothing changed."
+
+# What a Permissions row says when its tool is not set up.
+MISSING_CAMERA = "needs [camera]"
+MISSING_LOOK = "needs [vision] for a chat model that cannot see images"
+MISSING_SEARCH = "needs [vision], [image_search] and its key"
+# The look row's note: which path the page's current chat model uses.
+NOTE_LOOK_SEES = "Your chat model looks at the photo itself"
+NOTE_LOOK_QWENNY = "Qwenny looks and tells your chat model"
+MISSING_RECALL = "needs [memory] with recall on"
+# GET /activity: the newest entries shown in Settings.
+ACTIVITY_LIMIT = 50
 
 CHANNEL = "web"
 _CONVERSATION_ID = re.compile(r"[0-9a-f]{32}")
@@ -316,35 +349,37 @@ def _default_usage(settings: Settings) -> UsageTracker:
 
 
 def _default_looker(settings: Settings, usage: UsageTracker | None = None) -> LookTool | None:
-    """The look() tool from [camera] and [vision], or None if [vision] model is empty."""
-    vision = settings.vision
-    if not vision.enabled:
-        log.info("look: disabled ([vision] model is empty), no camera tool")
-        return None
+    """The camera tools' Looker. The camera is always built ([camera] is
+    checked when the config loads); Qwenny only when [vision] model is set and
+    its files exist. A [vision] model whose files are missing is one log line
+    and the Looker runs without Qwenny: a chat model that sees photos still
+    gets look(). Nothing opens at startup."""
     # Imported here so OpenCV and the vision module are only loaded when used.
     from obsilord.camera import CameraService
     from obsilord.look import LookLimiter, Looker
     from obsilord.vision.llama_server import LlamaServerVision, check_files
 
-    try:
-        check_files(vision, settings.repo_root)
-    except ValueError as exc:
-        log.error(
-            '%s; run "python -m obsilord.vision.fetch", or set [vision] model = "" '
-            "to start without look()",
-            exc,
-        )
-        raise
+    vision_cfg = settings.vision
     camera = settings.camera
+    qwenny = None
+    why = "[vision] model is empty"
+    if vision_cfg.enabled:
+        try:
+            check_files(vision_cfg, settings.repo_root)
+        except ValueError as exc:
+            why = f'{exc}; run "python -m obsilord.vision.fetch" to get it'
+        else:
+            qwenny = LlamaServerVision(vision_cfg, settings.repo_root)
     looker = Looker(
         CameraService(camera),
-        LlamaServerVision(vision, settings.repo_root),
+        qwenny,
         LookLimiter(camera.cooldown_s, camera.max_per_hour),
-        _default_image_search(settings, usage),
+        _default_image_search(settings, usage) if qwenny is not None else None,
     )
     log.info(
-        "look: enabled (backend %s, camera %d via %s, cooldown %g s, %d per hour)",
-        vision.backend,
+        "camera: photo for a chat model that sees images, available; "
+        "look via Qwenny %s (camera %d via %s, cooldown %g s, %d per hour)",
+        f"on (backend {vision_cfg.backend})" if qwenny is not None else f"off ({why})",
         camera.device_index,
         camera.api,
         camera.cooldown_s,
@@ -371,11 +406,63 @@ def _memory_from_settings(settings: Settings) -> SqliteStore | None:
 _default_memory = _memory_from_settings
 
 
-def build_registry(sources: list[ToolSource]) -> Registry:
+# The Permissions panel rows, in this order. look stands for both camera
+# variants (Qwenny's and the photo one share its name and policy).
+PANEL_TOOLS: tuple[Tool, ...] = (LOOK_TOOL, SEARCH_IMAGE_TOOL, RECALL_TOOL, calculate)
+_PANEL_BY_NAME = {t.name: t for t in PANEL_TOOLS}
+
+
+def tool_defaults() -> dict[str, ToolChoice]:
+    """Every panel tool's choice until the user picks: from its policy."""
+    return {t.name: ToolChoice(t.policy.default_mode, t.policy.cloud_default) for t in PANEL_TOOLS}
+
+
+def _settings_store_from(settings: Settings) -> SettingsStore:
+    return SettingsStore(settings_file_path(settings), tool_defaults(), settings.camera.photos)
+
+
+def _activity_from(settings: Settings) -> ActivityLog:
+    return ActivityLog(activity_log_path(settings), settings.memory.retention_days)
+
+
+# Looked up at call time, so tests keep these files in their tmp_path.
+_default_settings_store = _settings_store_from
+_default_activity = _activity_from
+
+
+def permissions_message(
+    choices: Choices, missing: dict[str, str], notes: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """The Permissions panel: one row per tool. missing: why a tool is not
+    set up (no entry: it is). notes: a short line per tool, "" when none."""
+    rows = []
+    for t in PANEL_TOOLS:
+        choice = choices.tools[t.name]
+        why = missing.get(t.name, "")
+        rows.append(
+            {
+                "name": t.name,
+                "label": t.policy.label_text(t.name),
+                "mode": choice.mode,
+                "internet": t.policy.leaves_pc,
+                "private": t.policy.private_data,
+                "cloud": choice.cloud,
+                "available": not why,
+                "missing": why,
+                "note": (notes or {}).get(t.name, ""),
+            }
+        )
+    return {"type": "permissions", "tools": rows}
+
+
+def build_registry(
+    sources: list[ToolSource], permissions: Permissions | None = None, on_run: OnRun | None = None
+) -> Registry:
     """The registry of one connection: the camera tools (when there is a
     camera), recall (when memory is on) and calculate. Which of them a turn
-    offers is decided per turn by the registry (cloud model, photos)."""
-    return Registry([*sources, static_source(calculate)])
+    offers is decided per turn by the registry (the user's modes, cloud model,
+    photos)."""
+    return Registry([*sources, static_source(calculate)], permissions=permissions, on_run=on_run)
 
 
 CONVERSATION_REASONS = ("start", "resume", "switch", "new", "saved", "edited")
@@ -404,11 +491,16 @@ def create_app(
     local: OpenAICompatServer | None = None,
     memory: MemoryStore | None = None,
     photos: PhotoStore | None = None,
+    settings_store: SettingsStore | None = None,
+    activity: ActivityLog | None = None,
 ) -> FastAPI:
-    """Build the app. Pass llm, usage, tts, stt, looker, local, memory, and
-    photos to inject fakes (tests). llm is the Gemini client; local the local
-    LLM server; memory the conversation store (None builds it from [memory]);
-    photos the folder for Photos "disk" (None: [camera] photos_dir).
+    """Build the app. Pass llm, usage, tts, stt, looker, local, memory,
+    photos, settings_store and activity to inject fakes (tests). llm is the
+    Gemini client; local the local LLM server; memory the conversation store
+    (None builds it from [memory]); photos the folder for Photos "disk" (None:
+    [camera] photos_dir); settings_store the user's choices (None:
+    [permissions] settings_path); activity the tool run log (None:
+    [permissions] activity_path).
 
     tts=None loads the voice from settings (nothing is loaded when [tts] model
     is empty). stt=None loads the STT model from settings (nothing is loaded
@@ -444,6 +536,12 @@ def create_app(
     if photos is None:
         photos = PhotoStore(photos_dir_path(settings))
     photo_store = photos
+    if settings_store is None:
+        settings_store = _default_settings_store(settings)
+    choices_store = settings_store
+    if activity is None:
+        activity = _default_activity(settings)
+    activity_log = activity
     origins = allowed_origins(settings)
     # Pages start on Gemini only when it is configured and has a key; the
     # local model otherwise, so no page starts on a provider that cannot answer.
@@ -464,6 +562,8 @@ def create_app(
                 log.info("photos: deleted %d old photos", removed)
         except OSError as exc:
             log.warning("photos: could not clean up old photos (%s)", type(exc).__name__)
+        # The activity log goes with [memory] retention_days too.
+        await asyncio.to_thread(activity_log.prune)
         yield
         for client in (app.state.llm, app.state.local):
             aclose = getattr(client, "aclose", None)
@@ -512,6 +612,12 @@ def create_app(
     app.state.stt = stt
     app.state.looker = looker
     app.state.local = local
+    app.state.settings_store = choices_store
+    app.state.activity = activity_log
+
+    # One callback per open page: resend its Permissions rows when the local
+    # model list was loaded (the look row depends on it). Sends only changes.
+    row_refreshers: set[Callable[[], Awaitable[None]]] = set()
 
     def search_declared() -> bool:
         return bool(getattr(app.state.looker, "search_on", False))
@@ -574,10 +680,10 @@ def create_app(
             "max_utterance_s": settings.stt.max_utterance_s,
         }
 
-    @app.get("/config/photos", include_in_schema=False)
-    async def photos_config() -> dict[str, Any]:
-        # The Photos setting's default for a page that has not chosen one.
-        return {"default": settings.camera.photos, "keep": settings.camera.photos_keep}
+    @app.get("/activity", include_in_schema=False)
+    async def activity_entries() -> dict[str, Any]:
+        # Settings, Activity: time, tool, mode and outcome only (no content).
+        return {"entries": await asyncio.to_thread(activity_log.newest, ACTIVITY_LIMIT)}
 
     @app.get("/config/llm", include_in_schema=False)
     async def llm_config() -> dict[str, Any]:
@@ -593,6 +699,9 @@ def create_app(
             ]
         except LocalLLMError as exc:
             error = str(exc)
+        else:
+            for refresh in list(row_refreshers):
+                await refresh()
         return {
             "default_provider": start_provider,
             "gemini": {"available": app.state.llm is not None, "model": settings.llm.model},
@@ -701,10 +810,12 @@ def create_app(
         if store is not None and settings.memory.recall:
             recall = RecallTool(store, settings.memory.recall_limit, settings.memory.recall_max_chars)
 
-        # The Photos setting for this page ({"type": "photos", "mode": ...});
-        # [camera] photos until the page says.
-        photo_mode = settings.camera.photos
+        # The Photos setting, kept by the app for every page (settings store);
+        # [camera] photos until the user picks one.
         photo_keep = settings.camera.photos_keep
+
+        def photo_mode() -> str:
+            return choices_store.get().photos
 
         async def save_photo(jpeg: bytes) -> str:
             """Photos "disk": write a look's frame next to its conversation,
@@ -715,34 +826,187 @@ def create_app(
             return await photo_store.save(conv_id, jpeg)
 
         def turn_photos() -> TurnPhotos:
-            return TurnPhotos(photo_mode, photo_keep, save_photo if photo_mode == "disk" else None)  # type: ignore[arg-type]
+            mode = photo_mode()
+            return TurnPhotos(mode, photo_keep, save_photo if mode == "disk" else None)  # type: ignore[arg-type]
 
         async def load_photos() -> None:
             """Photos "disk": give the history its saved frames back (a resumed
             conversation). Called right before a turn starts, under
             recording_lock, so no turn changes history meanwhile; frames that
             are already loaded are not read again."""
-            if photo_mode != "disk" or conv_id is None:
+            if photo_mode() != "disk" or conv_id is None:
                 return
             try:
                 await attach_photos(history, photo_store, conv_id, photo_keep)
             except Exception as exc:  # noqa: BLE001 - photos are optional
                 log.warning("photos: could not load saved photos (%s)", type(exc).__name__)
 
+        # What this page was last sent, so a change from any page reaches it
+        # once (push_settings is the store's subscriber for this page).
+        shown: dict[str, Any] = {"photos": None, "permissions": None}
+
+        def chat_model_sees() -> bool:
+            """Whether this page's chat model takes photos, from the model
+            list the page loaded (never a request here). Gemini does not."""
+            if provider != LOCAL:
+                return False
+            server = app.state.local
+            known = getattr(server, "known_sees_images", None)
+            if known is None:
+                return False
+            # [llm_local] model = "" is the server's default until a turn resolves it.
+            model = getattr(local_client, "model_id", "") or getattr(server, "known_default_model", lambda: "")()
+            return known(model) is True
+
+        def rows_now(choices: Choices) -> tuple[dict[str, str], dict[str, str]]:
+            """(missing, notes) of the Permissions rows for this page now. The
+            look row depends on the page's chat model."""
+            missing: dict[str, str] = {}
+            notes: dict[str, str] = {}
+            looker = app.state.looker
+            if looker is None:
+                missing["look"] = MISSING_CAMERA
+            elif chat_model_sees():
+                notes["look"] = NOTE_LOOK_SEES
+            elif looker.vision_on:
+                notes["look"] = NOTE_LOOK_QWENNY
+            else:
+                missing["look"] = MISSING_LOOK
+            if not search_declared():
+                missing["search_image"] = MISSING_SEARCH
+            if recall is None:
+                missing["recall"] = MISSING_RECALL
+            for t in PANEL_TOOLS:
+                needed = _PANEL_BY_NAME.get(t.policy.requires)
+                if needed is not None and t.name not in missing and choices.tools[needed.name].mode == "off":
+                    missing[t.name] = f"needs {needed.policy.label_text(needed.name)} on"
+            return missing, notes
+
+        async def push_settings(
+            choices: Choices, photos_too: bool = False, permissions_too: bool = False
+        ) -> None:
+            """Sends what changed since this page was last told; *_too sends
+            it anyway (the answer to an unchanged choice)."""
+            missing, notes = rows_now(choices)
+            msg = permissions_message(choices, missing, notes)
+            if permissions_too or msg != shown["permissions"]:
+                shown["permissions"] = msg
+                await send(msg)
+            if photos_too or choices.photos != shown["photos"]:
+                # A running turn may be changing history: then the next turn
+                # drops the photos itself (pipeline), and saved ones load
+                # before the next turn (load_photos).
+                if choices.photos == "off" and shown["photos"] not in (None, "off") and not turn_running():
+                    keep_newest_photos(history, 0)
+                shown["photos"] = choices.photos
+                await send({"type": "photos", "mode": choices.photos})
+
+        async def saved(change: Awaitable[Any], photos_too: bool = False, permissions_too: bool = False) -> None:
+            """Runs a store change. A failed write (read-only file, full disk)
+            leaves the old file and choices: the page gets an error and the
+            unchanged choice, so its switch snaps back, and stays connected."""
+            try:
+                await change
+            except OSError as exc:
+                log.warning("settings: a change could not be saved (%s)", type(exc).__name__)
+                await send({"type": "error", "message": MSG_NOT_SAVED})
+                await push_settings(choices_store.get(), photos_too=photos_too, permissions_too=permissions_too)
+
         async def handle_photos(payload: dict[str, Any]) -> None:
-            nonlocal photo_mode
             async with recording_lock:
                 mode = payload.get("mode")
                 if mode not in PHOTO_MODES:
                     await send({"type": "error", "message": MSG_BAD_PHOTOS})
                     return
-                photo_mode = mode
-                # A running turn may be changing history: then the next turn
-                # drops the photos itself (pipeline), and saved ones load
-                # before the next turn (load_photos).
-                if mode == "off" and not turn_running():
-                    keep_newest_photos(history, 0)
-                await send({"type": "photos", "mode": photo_mode})
+                if mode == photo_mode():
+                    await push_settings(choices_store.get(), photos_too=True)
+                    return
+                # Every open page hears of it through push_settings.
+                await saved(choices_store.set_photos(mode), photos_too=True)
+
+        async def handle_permission(payload: dict[str, Any]) -> None:
+            async with recording_lock:
+                await _handle_permission_locked(payload)
+
+        async def _handle_permission_locked(payload: dict[str, Any]) -> None:
+            name = payload.get("tool")
+            panel_tool = _PANEL_BY_NAME.get(name) if isinstance(name, str) else None
+            if panel_tool is None:
+                await send({"type": "error", "message": MSG_UNKNOWN_TOOL})
+                return
+            current = choices_store.get().tools[panel_tool.name]
+            if "mode" in payload:
+                mode = payload["mode"]
+                if mode not in MODES:
+                    await send({"type": "error", "message": MSG_BAD_PERMISSION})
+                    return
+                if mode == current.mode:
+                    await push_settings(choices_store.get(), permissions_too=True)
+                    return
+                log.info("permissions: %s set to %s", panel_tool.name, mode)
+                await saved(choices_store.set_mode(panel_tool.name, mode), permissions_too=True)
+                return
+            if "cloud" in payload:
+                on = payload["cloud"]
+                if not isinstance(on, bool):
+                    await send({"type": "error", "message": MSG_BAD_PERMISSION})
+                    return
+                if not panel_tool.policy.private_data:
+                    await send({"type": "error", "message": MSG_NO_CLOUD_CHOICE})
+                    return
+                if on == current.cloud:
+                    await push_settings(choices_store.get(), permissions_too=True)
+                    return
+                log.info("permissions: %s with a cloud model %s", panel_tool.name, "on" if on else "off")
+                await saved(choices_store.set_cloud(panel_tool.name, on), permissions_too=True)
+                return
+            await send({"type": "error", "message": MSG_BAD_PERMISSION})
+
+        # A confirm waiting for this page's answer (pipeline.Confirms): its
+        # id and the future its reply() awaits. queued: answers that were
+        # neither yes nor no, run as turns after the current one.
+        pending: dict[str, Any] = {"id": None, "future": None}
+        queued: list[str] = []
+
+        def waiting() -> bool:
+            future = pending["future"]
+            return future is not None and not future.done()
+
+        def answer(value: ConfirmReply) -> None:
+            pending["future"].set_result(value)
+
+        async def confirm_reply(confirm_id: str) -> ConfirmReply:
+            future: asyncio.Future[ConfirmReply] = asyncio.get_running_loop().create_future()
+            pending["id"], pending["future"] = confirm_id, future
+            try:
+                return await future
+            finally:
+                if pending["future"] is future:
+                    pending["id"] = pending["future"] = None
+
+        def run_next(text: str) -> None:
+            queued.append(text)
+
+        confirms = Confirms(
+            reply=confirm_reply,
+            run_next=run_next,
+            timeout_s=settings.permissions.confirm_timeout_s,
+            stt=app.state.stt,
+            language=stt_cfg.language_or_none,
+        )
+
+        async def handle_confirm_answer(payload: dict[str, Any]) -> None:
+            async with recording_lock:
+                confirm_id = payload.get("id")
+                yes = payload.get("yes")
+                if not isinstance(confirm_id, str) or not isinstance(yes, bool):
+                    await send({"type": "error", "message": MSG_BAD_CONFIRM})
+                    return
+                if not waiting() or confirm_id != pending["id"]:
+                    # A card from an earlier question (timed out, or another turn).
+                    log.info("confirm: an answer to a question that is not waiting, ignored")
+                    return
+                answer(yes)
 
         async def recall_source(info: TurnInfo) -> list[Tool]:
             # Per turn: the turns of this conversation already in history are
@@ -756,7 +1020,7 @@ def create_app(
             sources: list[ToolSource] = [recall_source]
             if app.state.looker is not None:
                 sources.insert(0, camera_source(app.state.looker))
-            return build_registry(sources)
+            return build_registry(sources, permissions=choices_store, on_run=activity_log.add)
 
         async def send(msg: dict[str, Any] | bytes) -> None:
             if isinstance(msg, dict) and msg.get("type") == "snapshot" and not snapshots_on:
@@ -819,19 +1083,22 @@ def create_app(
                 local_client = app.state.local.client(model)
             log.info("chat LLM for this page: %s%s", provider, f" ({model})" if model else "")
             if announce:
+                await push_settings(choices_store.get())
                 return
             await send(
                 switch_notice(
                     provider,
                     settings,
                     model=model,
-                    vision_on=app.state.looker is not None,
+                    vision_on=bool(getattr(app.state.looker, "vision_on", False)),
                     search_on=search_declared(),
                     today_tokens=app.state.usage.today_total,
                     # From the model list the page loaded; never a request here.
-                    tool_mode=app.state.local.known_tool_mode(model),
+                    tools=app.state.local.known_tools(model),
                 )
             )
+            # The look row follows the model (sent only when it changed).
+            await push_settings(choices_store.get())
             if provider == LOCAL:
                 task = asyncio.create_task(warm_up(model))
                 background.add(task)
@@ -874,8 +1141,49 @@ def create_app(
 
         def start_turn(coro: Coroutine[Any, Any, str | None]) -> None:
             nonlocal turn
-            turn = asyncio.create_task(coro)
+            turn = asyncio.create_task(turn_chain(coro))
             turn.add_done_callback(on_turn_done)
+
+        async def turn_chain(first: Coroutine[Any, Any, str | None]) -> None:
+            """The turn, then each queued answer (neither yes nor no) as a text
+            turn of its own, once, in the same task, so nothing else starts
+            in between."""
+            await first
+            await settle_rows()
+            while queued:
+                text = queued.pop(0)
+                async with recording_lock:
+                    llm = current_llm()
+                    await load_photos()
+                    coro = text_turn(text, llm)
+                await coro
+                await settle_rows()
+
+        async def settle_rows() -> None:
+            # A turn may have learned whether the chat model sees images (the
+            # model list): the look row follows. Sends nothing when unchanged.
+            try:
+                await push_settings(choices_store.get())
+            except Exception as exc:  # noqa: BLE001 - the page may be gone
+                log.debug("permissions after a turn: %s", type(exc).__name__)
+
+        def text_turn(text: str, llm: LLMClient) -> Coroutine[Any, Any, str | None]:
+            return run_text_turn(
+                text,
+                history,
+                llm,
+                app.state.usage,
+                send,
+                history_turns=settings.llm.history_turns,
+                max_output_tokens=current_max_output_tokens(),
+                turn_timeout_s=settings.llm.turn_timeout_s,
+                tts=app.state.tts,
+                tools=turn_registry(),
+                max_rounds=settings.tools.max_rounds,
+                on_turn=store_turn(provider, llm),
+                photos=turn_photos(),
+                confirms=confirms,
+            )
 
         def store_turn(
             turn_provider: str, llm: LLMClient
@@ -1068,28 +1376,16 @@ def create_app(
             if len(text) > MAX_TEXT_CHARS:
                 await send({"type": "error", "message": MSG_TOO_LONG})
                 return
+            if waiting():
+                # The answer to the waiting confirm, not a turn of its own.
+                answer(text)
+                return
             if turn_running():
                 await send({"type": "error", "message": MSG_BUSY})
                 return
             llm = current_llm()
             await load_photos()
-            start_turn(
-                run_text_turn(
-                    text,
-                    history,
-                    llm,
-                    app.state.usage,
-                    send,
-                    history_turns=settings.llm.history_turns,
-                    max_output_tokens=current_max_output_tokens(),
-                    turn_timeout_s=settings.llm.turn_timeout_s,
-                    tts=app.state.tts,
-                    tools=turn_registry(),
-                    max_rounds=settings.tools.max_rounds,
-                    on_turn=store_turn(provider, llm),
-                    photos=turn_photos(),
-                )
-            )
+            start_turn(text_turn(text, llm))
 
         async def handle_audio_start() -> None:
             async with recording_lock:
@@ -1100,7 +1396,8 @@ def create_app(
             if app.state.stt is None:
                 await send({"type": "error", "message": MSG_NO_VOICE})
                 return
-            if recording is not None or turn_running():
+            # While a confirm waits, push-to-talk records the answer.
+            if recording is not None or (turn_running() and not waiting()):
                 await send({"type": "error", "message": MSG_BUSY})
                 return
             recording = bytearray()
@@ -1187,7 +1484,17 @@ def create_app(
                     stt_cfg.min_utterance_ms,
                 )
                 await send({"type": "error", "message": MSG_NOT_CAUGHT})
-                await send({"type": "state", "state": "idle"})
+                # A confirm still waits (the face goes back to it); else idle.
+                await send({"type": "state", "state": "thinking" if waiting() else "idle"})
+                return
+            if waiting():
+                # The answer to the waiting confirm (the pipeline transcribes it).
+                answer(pcm16)
+                await send({"type": "state", "state": "thinking"})
+                return
+            if turn_running():
+                # The confirm this recording was for ended before audio_end.
+                await send({"type": "error", "message": MSG_BUSY})
                 return
             llm = current_llm()
             await load_photos()
@@ -1209,6 +1516,7 @@ def create_app(
                     max_rounds=settings.tools.max_rounds,
                     on_turn=store_turn(provider, llm),
                     photos=turn_photos(),
+                    confirms=confirms,
                 )
             )
 
@@ -1234,7 +1542,11 @@ def create_app(
                 return
             await send(conversation_message(info, "resume" if info is not None else "start"))
 
+        leave_settings = None
         try:
+            await push_settings(choices_store.get())
+            leave_settings = choices_store.subscribe(push_settings)
+            row_refreshers.add(settle_rows)
             await greet()
             while True:
                 message = await websocket.receive()
@@ -1261,6 +1573,10 @@ def create_app(
                     snapshots_on = payload.get("on") is True
                 elif kind == "photos":
                     await handle_photos(payload)
+                elif kind == "permission":
+                    await handle_permission(payload)
+                elif kind == "confirm_answer":
+                    await handle_confirm_answer(payload)
                 elif kind == "llm":
                     await handle_llm(payload)
                 elif kind == "conversation":
@@ -1276,6 +1592,9 @@ def create_app(
         except WebSocketDisconnect:
             pass
         finally:
+            if leave_settings is not None:
+                leave_settings()
+            row_refreshers.discard(settle_rows)
             # An open recording is dropped with the connection (never transcribed).
             recording = None
             for task in [*timers, *background]:

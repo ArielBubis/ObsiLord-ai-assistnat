@@ -10,10 +10,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 import obsilord.stt.faster_whisper as fw
-from fakes import FakeLLM, FakeSTT, FakeTTS, text_only
+from fakes import AppClient, FakeLLM, FakeSTT, FakeTTS, text_only
 from obsilord.app import (
     MSG_BUSY,
     MSG_NO_VOICE,
@@ -49,11 +48,11 @@ def _client(
     llm: FakeLLM | None = None,
     tts: FakeTTS | None = None,
     **stt_settings: Any,
-) -> TestClient:
+) -> AppClient:
     settings = _settings(tmp_path, **stt_settings)
     usage = UsageTracker(tmp_path / "usage.jsonl", settings.llm.daily_token_cap)
     llm = llm if llm is not None else FakeLLM(["Paris."])
-    return TestClient(create_app(settings, llm=llm, usage=usage, tts=tts, stt=stt))
+    return AppClient(create_app(settings, llm=llm, usage=usage, tts=tts, stt=stt))
 
 
 def _collect(ws: Any) -> list[dict[str, Any] | bytes]:

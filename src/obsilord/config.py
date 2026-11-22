@@ -40,7 +40,6 @@ class ServerSettings:
 
 # kw_only lets fields with defaults (optional in the TOML) sit anywhere.
 LLM_PROVIDERS = ("gemini", "local")
-TOOL_MODES = ("auto", "native", "router")
 # OpenAI-style reasoning_effort values; LM Studio listed these in its 400 for
 # "off" (checked 2026-11-18). "" means the field is not sent.
 REASONING_EFFORTS = ("", "none", "minimal", "low", "medium", "high", "xhigh")
@@ -258,9 +257,6 @@ class ImageSearchSettings:
     timeout_s: float = 15.0
 
 
-LOCAL_ROUTER_CONTEXT_MAX = 20
-
-
 @dataclass(frozen=True, kw_only=True)
 class LocalLLMSettings:
     """[llm_local], optional. A local OpenAI-compatible server (LM Studio,
@@ -279,11 +275,6 @@ class LocalLLMSettings:
     temperature: float = 0.7
     # Limit for one request (a model that is not loaded yet loads first).
     request_timeout_s: float = 60.0
-    # Recent messages the tool router sees besides the new one (0..20).
-    router_context_messages: int = 4
-    # "native": tools declared like for Gemini; "router": a routing request
-    # before each reply; "auto": per model from the server's model list.
-    tool_mode: str = "auto"
     # Sent as reasoning_effort with every chat request. "none" turns thinking
     # off: spoken replies are short, and thinking used up max_output_tokens
     # before any text. "" leaves it to the server.
@@ -325,6 +316,23 @@ class ToolsSettings:
     max_rounds: int = 3
 
 
+CONFIRM_TIMEOUT_MIN_S = 5
+CONFIRM_TIMEOUT_MAX_S = 120
+
+
+@dataclass(frozen=True, kw_only=True)
+class PermissionsSettings:
+    """[permissions], optional. Off / Ask / On per tool are chosen in the
+    page's Settings and stored in settings_path, not here."""
+
+    # Seconds an Ask question waits for a yes; no answer counts as no (5..120).
+    confirm_timeout_s: float = 20.0
+    # The page's choices (permissions and Photos), relative to the repo root.
+    settings_path: str = "data/settings.json"
+    # One line per tool call: time, tool, mode, outcome, never content.
+    activity_path: str = "logs/activity.jsonl"
+
+
 @dataclass(frozen=True, kw_only=True)
 class DebugSettings:
     """[debug], optional."""
@@ -356,6 +364,7 @@ class Settings:
     llm_local: LocalLLMSettings = field(default_factory=LocalLLMSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
     tools: ToolsSettings = field(default_factory=ToolsSettings)
+    permissions: PermissionsSettings = field(default_factory=PermissionsSettings)
     debug: DebugSettings = field(default_factory=DebugSettings)
     secrets: Secrets = field(default_factory=Secrets, repr=False)
     repo_root: Path = REPO_ROOT
@@ -695,15 +704,6 @@ def _check_llm_local(llm: LLMSettings, local: LocalLLMSettings) -> None:
             f"config: llm_local.request_timeout_s must be > 0 and < {CLIENT_WATCHDOG_S:g}, "
             f"got {local.request_timeout_s:g}"
         )
-    if not 0 <= local.router_context_messages <= LOCAL_ROUTER_CONTEXT_MAX:
-        raise ValueError(
-            f"config: llm_local.router_context_messages must be in "
-            f"0..{LOCAL_ROUTER_CONTEXT_MAX}, got {local.router_context_messages}"
-        )
-    if local.tool_mode not in TOOL_MODES:
-        raise ValueError(
-            f"config: llm_local.tool_mode must be one of {list(TOOL_MODES)}, got {local.tool_mode!r}"
-        )
     if local.reasoning_effort not in REASONING_EFFORTS:
         raise ValueError(
             f"config: llm_local.reasoning_effort must be one of {list(REASONING_EFFORTS)}, "
@@ -742,6 +742,32 @@ def photos_dir_path(settings: Settings) -> Path:
     return path if path.is_absolute() else settings.repo_root / path
 
 
+def _check_permissions(permissions: PermissionsSettings) -> None:
+    if not CONFIRM_TIMEOUT_MIN_S <= permissions.confirm_timeout_s <= CONFIRM_TIMEOUT_MAX_S:
+        raise ValueError(
+            f"config: permissions.confirm_timeout_s must be in "
+            f"{CONFIRM_TIMEOUT_MIN_S}..{CONFIRM_TIMEOUT_MAX_S}, got {permissions.confirm_timeout_s:g}"
+        )
+    for key in ("settings_path", "activity_path"):
+        if not getattr(permissions, key).strip():
+            raise ValueError(f"config: permissions.{key} must not be empty")
+
+
+def _repo_path(settings: Settings, raw: str) -> Path:
+    path = Path(raw)
+    return path if path.is_absolute() else settings.repo_root / path
+
+
+def settings_file_path(settings: Settings) -> Path:
+    """[permissions] settings_path, relative paths against the repo root."""
+    return _repo_path(settings, settings.permissions.settings_path)
+
+
+def activity_log_path(settings: Settings) -> Path:
+    """[permissions] activity_path, relative paths against the repo root."""
+    return _repo_path(settings, settings.permissions.activity_path)
+
+
 def memory_db_path(settings: Settings) -> Path:
     """The store file: the demo file with [debug] demo_memory, otherwise
     [memory] db_path (relative paths against the repo root)."""
@@ -761,7 +787,7 @@ def default_config_path() -> Path:
 # Every top-level table config.toml may have.
 SECTIONS = (
     "server", "llm", "stt", "tts", "camera", "face", "vision", "image_search",
-    "llm_local", "memory", "tools", "debug",
+    "llm_local", "memory", "tools", "permissions", "debug",
 )
 
 
@@ -793,6 +819,7 @@ def load_settings(
         llm_local=_build(LocalLLMSettings, "llm_local", data, defaulted, optional=True),
         memory=_build(MemorySettings, "memory", data, defaulted, optional=True),
         tools=_build(ToolsSettings, "tools", data, defaulted, optional=True),
+        permissions=_build(PermissionsSettings, "permissions", data, defaulted, optional=True),
         debug=_build(DebugSettings, "debug", data, defaulted, optional=True),
         secrets=load_secrets(env_path, environ),
     )
@@ -827,6 +854,7 @@ def load_settings(
             f"config: tools.max_rounds must be in 1..{MAX_ROUNDS_MAX}, "
             f"got {settings.tools.max_rounds}"
         )
+    _check_permissions(settings.permissions)
     if defaulted:
         log.info(
             "config: %s not set in %s, using defaults (copy them from "

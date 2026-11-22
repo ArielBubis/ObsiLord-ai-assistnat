@@ -77,9 +77,9 @@ export function modelOptions(config, selected) {
   if (!local.default_model) options.push({ value: "", label: "Server default (first listed)" });
   for (const m of models) {
     if (!m || typeof m.id !== "string") continue;
-    // tools false: the server says the model has no tool support, so the
-    // camera is decided by the routing step (true or unknown: native tools).
-    const marks = [m.loaded === true ? "loaded" : "", m.tools === false ? "routing step" : ""].filter(Boolean);
+    // tools false: the server says the model has no tool support, so it
+    // answers without the camera, recall and calculator (true or unknown: tools).
+    const marks = [m.loaded === true ? "loaded" : "", m.tools === false ? "no tools" : ""].filter(Boolean);
     options.push({ value: m.id, label: marks.length ? `${m.id} (${marks.join(", ")})` : m.id });
   }
   if (selected && !options.some((o) => o.value === selected)) {
